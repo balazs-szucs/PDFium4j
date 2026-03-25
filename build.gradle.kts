@@ -37,6 +37,8 @@ tasks.withType<JavaCompile> {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    dependsOn("extractPdfiumBinaries")
+    classpath += files(layout.buildDirectory.dir("generated-natives"))
     jvmArgs(
         "--enable-preview",
         "--enable-native-access=ALL-UNNAMED"
@@ -66,6 +68,9 @@ tasks.withType<JavaExec> {
 
 // -- PDFium native binary download & bundling --
 // Prebuilt binaries from https://github.com/bblanchon/pdfium-binaries
+// Exclude stale empty natives dirs from src/main/resources (if present)
+tasks.processResources { exclude("natives/**") }
+
 val pdfiumVersion = findProperty("pdfiumVersion")?.toString() ?: "7749"
 
 val pdfiumPlatforms = mapOf(
@@ -135,9 +140,22 @@ val extractPdfiumBinaries by tasks.registering {
     }
 }
 
-tasks.processResources {
-    dependsOn(extractPdfiumBinaries)
-    from(pdfiumNativesDir)
+// Per-platform native JAR tasks, one classified JAR per supported OS/arch
+val nativeJarTasks = pdfiumPlatforms.keys.map { localName ->
+    val sanitized = localName.split("-").joinToString("") { it.replaceFirstChar(Char::uppercase) }
+    tasks.register<Jar>("nativesJar$sanitized") {
+        dependsOn(extractPdfiumBinaries)
+        group = "build"
+        description = "Packages $localName native library"
+        archiveClassifier.set("natives-$localName")
+        from(pdfiumNativesDir.map { it.dir("natives/$localName") }) {
+            into("natives/$localName")
+        }
+    }
+}
+
+tasks.assemble {
+    dependsOn(nativeJarTasks)
 }
 
 dependencies {
@@ -151,6 +169,10 @@ publishing {
     publications {
         create<MavenPublication>("mavenJava") {
             from(components["java"])
+
+            nativeJarTasks.forEach { jarTask ->
+                artifact(jarTask)
+            }
 
             pom {
                 name = "PDFium4j"
