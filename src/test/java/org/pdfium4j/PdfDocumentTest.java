@@ -3,7 +3,6 @@ package org.pdfium4j;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 import org.junit.jupiter.api.io.TempDir;
-import org.pdfium4j.internal.EditBindings;
 import org.pdfium4j.model.*;
 
 import java.awt.image.BufferedImage;
@@ -35,9 +34,7 @@ class PdfDocumentTest {
         }
     }
 
-    static boolean setMetaTextAvailable() {
-        return pdfiumAvailable() && EditBindings.EPDF_SetMetaText != null;
-    }
+
 
     @Test
     @EnabledIf("pdfiumAvailable")
@@ -659,7 +656,7 @@ class PdfDocumentTest {
     }
 
     @Test
-    @EnabledIf("setMetaTextAvailable")
+    @EnabledIf("pdfiumAvailable")
     void setMetadataSingleTag(@TempDir Path tempDir) throws IOException {
         Path testPdf = getTestPdf();
         if (testPdf == null) return;
@@ -682,7 +679,7 @@ class PdfDocumentTest {
     }
 
     @Test
-    @EnabledIf("setMetaTextAvailable")
+    @EnabledIf("pdfiumAvailable")
     void setMetadataBulk(@TempDir Path tempDir) throws IOException {
         Path testPdf = getTestPdf();
         if (testPdf == null) return;
@@ -705,7 +702,7 @@ class PdfDocumentTest {
     }
 
     @Test
-    @EnabledIf("setMetaTextAvailable")
+    @EnabledIf("pdfiumAvailable")
     void setMetadataClearValue(@TempDir Path tempDir) throws IOException {
         Path testPdf = getTestPdf();
         if (testPdf == null) return;

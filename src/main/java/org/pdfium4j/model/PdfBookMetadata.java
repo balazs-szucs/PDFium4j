@@ -3,13 +3,13 @@ package org.pdfium4j.model;
 import org.pdfium4j.XmpMetadataParser;
 import org.pdfium4j.PdfDocument;
 
-import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.Locale;
 
 /**
  * PDF implementation of {@link BookMetadata}.
@@ -44,14 +44,10 @@ public record PdfBookMetadata(
         Map<String, String> customFields
     ) implements BookMetadata {
 
-    private static final Pattern REPEATED_DIGIT_ISBN = Pattern.compile("^(\\d)\\1{9,12}$");
-    private static final Pattern ISBN_NON_DIGIT = Pattern.compile("[^0-9Xx]");
-    private static final Pattern KEYWORD_SEPARATOR = Pattern.compile("[,;]");
-
     public PdfBookMetadata {
-        authors = List.copyOf(authors);
-        subjects = List.copyOf(subjects);
-        customFields = Map.copyOf(customFields);
+        authors = Collections.unmodifiableList(authors);
+        subjects = Collections.unmodifiableList(subjects);
+        customFields = Collections.unmodifiableMap(customFields);
     }
 
     @Override
@@ -101,14 +97,14 @@ public record PdfBookMetadata(
         List<String> subjects = new ArrayList<>(xmp.subjects());
         Optional<String> keywordsOpt = document.metadata(MetadataTag.KEYWORDS);
         if (keywordsOpt.isPresent()) {
-            for (String part : KEYWORD_SEPARATOR.split(keywordsOpt.get())) {
+            for (String part : keywordsOpt.get().split("[,;]")) {
                 String trimmed = part.trim();
                 if (!trimmed.isBlank() && !subjects.contains(trimmed)) {
                     subjects.add(trimmed);
                 }
             }
         }
-        subjects = List.copyOf(subjects);
+        subjects = Collections.unmodifiableList(subjects);
 
         Optional<String> description = xmp.description();
         Optional<String> publisher = xmp.publisher();
@@ -130,12 +126,13 @@ public record PdfBookMetadata(
     }
 
     private static List<String> extractAuthors(XmpMetadata xmp, PdfDocument document) {
+        List<String> authors = new ArrayList<>();
 
-        List<String> authors = new ArrayList<>(xmp.creators());
+        authors.addAll(xmp.creators());
 
         if (authors.isEmpty()) {
             document.metadata(MetadataTag.AUTHOR).ifPresent(author -> {
-                String[] parts = KEYWORD_SEPARATOR.split(author);
+                String[] parts = author.split("[,;]");
                 for (String part : parts) {
                     String trimmed = part.trim();
                     if (!trimmed.isBlank() && !authors.contains(trimmed)) {
@@ -145,7 +142,7 @@ public record PdfBookMetadata(
             });
         }
 
-        return List.copyOf(authors);
+        return Collections.unmodifiableList(authors);
     }
 
     private static Optional<String> extractIsbn(XmpMetadata xmp) {
@@ -155,7 +152,7 @@ public record PdfBookMetadata(
         }
 
         for (String id : xmp.identifiers()) {
-            if (id.toLowerCase(Locale.ROOT).contains("isbn")) {
+            if (id.toLowerCase().contains("isbn")) {
                 String cleaned = cleanIsbn(id);
                 if (cleaned != null) {
                     return Optional.of(cleaned);
@@ -166,12 +163,10 @@ public record PdfBookMetadata(
         return Optional.empty();
     }
 
-    private static final Pattern PDF_DATE_PREFIX = 
+    private static final Pattern PDF_DATE_PATTERN =
             Pattern.compile("^D:(\\d{4})(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?");
 
-    private static final Pattern FOUR_DIGIT_YEAR = Pattern.compile("\\b(\\d{4})\\b");
-
-    private static final DateTimeFormatter[] DATE_FORMATTERS = {
+    private static final List<DateTimeFormatter> DATE_FORMATS = List.of(
             DateTimeFormatter.ISO_LOCAL_DATE,                         // 2024-01-15
             DateTimeFormatter.ofPattern("yyyy/MM/dd"),                // 2024/01/15
             DateTimeFormatter.ofPattern("yyyy.MM.dd"),                // 2024.01.15
@@ -182,17 +177,13 @@ public record PdfBookMetadata(
             DateTimeFormatter.ofPattern("MMMM dd, yyyy", Locale.US),  // January 15, 2024
             DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.US),    // 15 Jan 2024
             DateTimeFormatter.ofPattern("yyyy")                       // 2024 (year only)
-    };
+    );
 
     private static Optional<LocalDate> extractPublishedDate(XmpMetadata xmp, PdfDocument document) {
         List<String> candidates = new ArrayList<>();
         xmp.date().ifPresent(candidates::add);
         String createDate = xmp.customFields().get("CreateDate");
         if (createDate != null) candidates.add(createDate);
-
-        // Fall back to Info dictionary dates
-        document.metadata(MetadataTag.CREATION_DATE).ifPresent(candidates::add);
-        document.metadata(MetadataTag.MOD_DATE).ifPresent(candidates::add);
 
         for (String raw : candidates) {
             Optional<LocalDate> parsed = parseDate(raw.strip());
@@ -205,7 +196,7 @@ public record PdfBookMetadata(
         if (dateStr == null || dateStr.isEmpty()) return Optional.empty();
 
         // Try PDF date format: D:YYYYMMDDHHmmSS+TZ
-        Matcher pdfMatcher = PDF_DATE_PREFIX.matcher(dateStr);
+        Matcher pdfMatcher = PDF_DATE_PATTERN.matcher(dateStr);
         if (pdfMatcher.find()) {
             int year = Integer.parseInt(pdfMatcher.group(1));
             int month = pdfMatcher.group(2) != null ? Integer.parseInt(pdfMatcher.group(2)) : 1;
@@ -213,20 +204,21 @@ public record PdfBookMetadata(
             if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
                 try {
                     return Optional.of(LocalDate.of(year, month, day));
-                } catch (DateTimeException ignored) {}
+                } catch (java.time.DateTimeException ignored) {}
             }
         }
 
+        // Strip ISO 8601 time/timezone suffix for date-only parsing
         String dateOnly = dateStr.contains("T") ? dateStr.substring(0, dateStr.indexOf('T')) : dateStr;
 
-        for (DateTimeFormatter fmt : DATE_FORMATTERS) {
+        for (DateTimeFormatter fmt : DATE_FORMATS) {
             try {
                 return Optional.of(LocalDate.parse(dateOnly, fmt));
             } catch (DateTimeParseException ignored) {}
         }
 
         // Last resort: extract 4-digit year
-        Matcher yearMatcher = FOUR_DIGIT_YEAR.matcher(dateStr);
+        Matcher yearMatcher = Pattern.compile("\\b(\\d{4})\\b").matcher(dateStr);
         if (yearMatcher.find()) {
             int year = Integer.parseInt(yearMatcher.group(1));
             if (year >= 1000 && year <= 9999) {
@@ -240,11 +232,13 @@ public record PdfBookMetadata(
     private static Map<String, String> extractCustomFields(XmpMetadata xmp, PdfDocument document) {
         Map<String, String> custom = new LinkedHashMap<>();
 
-        custom.putAll(xmp.customFields());
+        for (Map.Entry<String, String> entry : xmp.customFields().entrySet()) {
+            custom.put(entry.getKey(), entry.getValue());
+        }
 
         for (Map.Entry<String, String> entry : xmp.calibreFields().entrySet()) {
-            if (!"series".equalsIgnoreCase(entry.getKey()) &&
-                !"series_index".equalsIgnoreCase(entry.getKey())) {
+            if (!entry.getKey().equalsIgnoreCase("series") &&
+                !entry.getKey().equalsIgnoreCase("series_index")) {
                 custom.put("calibre:" + entry.getKey(), entry.getValue());
             }
         }
@@ -256,10 +250,10 @@ public record PdfBookMetadata(
             Map<String, String> infoDict = document.metadata();
             for (Map.Entry<String, String> entry : infoDict.entrySet()) {
                 String key = entry.getKey();
-                if ("Title".equalsIgnoreCase(key) || "Author".equalsIgnoreCase(key) ||
-                    "Subject".equalsIgnoreCase(key) || "Keywords".equalsIgnoreCase(key) ||
-                    "Creator".equalsIgnoreCase(key) || "Producer".equalsIgnoreCase(key) ||
-                    "CreationDate".equalsIgnoreCase(key) || "ModDate".equalsIgnoreCase(key)) {
+                if (key.equalsIgnoreCase("Title") || key.equalsIgnoreCase("Author") ||
+                    key.equalsIgnoreCase("Subject") || key.equalsIgnoreCase("Keywords") ||
+                    key.equalsIgnoreCase("Creator") || key.equalsIgnoreCase("Producer") ||
+                    key.equalsIgnoreCase("CreationDate") || key.equalsIgnoreCase("ModDate")) {
                     continue;
                 }
                 custom.put("info:" + key, entry.getValue());
@@ -268,15 +262,15 @@ public record PdfBookMetadata(
             // Ignore metadata access errors
         }
 
-        return Map.copyOf(custom);
+        return Collections.unmodifiableMap(custom);
     }
 
     private static String cleanIsbn(String id) {
         if (id == null) return null;
-        String cleaned = ISBN_NON_DIGIT.matcher(id).replaceAll("").toUpperCase();
+        String cleaned = id.replaceAll("[^0-9Xx]", "").toUpperCase();
 
         // Reject uniform sequences like 0000000000 or 1111111111111 (fake ISBNs)
-        if (REPEATED_DIGIT_ISBN.matcher(cleaned).matches()) return null;
+        if (cleaned.matches("^(\\d)\\1{9,12}$")) return null;
 
         if (cleaned.length() == 10 && isValidIsbn10(cleaned)) return cleaned;
         if (cleaned.length() == 13 && isValidIsbn13(cleaned)) return cleaned;
@@ -306,7 +300,7 @@ public record PdfBookMetadata(
 
     private static String normalizeLanguage(String language) {
         if (language == null || language.isBlank()) return null;
-        String lower = language.trim().toLowerCase(Locale.ROOT);
+        String lower = language.trim().toLowerCase();
         if (lower.length() == 2) return lower;
         int dashPos = lower.indexOf('-');
         if (dashPos > 0) return lower.substring(0, dashPos);
@@ -327,6 +321,6 @@ public record PdfBookMetadata(
      */
     public boolean isLikelyImageOnly() {
         // If no title, creators, or subjects, might be image-only
-        return title.isEmpty() && authors.isEmpty() && subjects.isEmpty();
+        return !title.isPresent() && authors.isEmpty() && subjects.isEmpty();
     }
 }
