@@ -9,7 +9,7 @@ plugins {
 
 allprojects {
     group = "org.grimmory"
-    version = "0.1.0"
+    version = "0.3.0"
 
     repositories {
         mavenCentral()
@@ -74,11 +74,13 @@ tasks.processResources { exclude("natives/**") }
 val pdfiumVersion = findProperty("pdfiumVersion")?.toString() ?: "7749"
 
 val pdfiumPlatforms = mapOf(
-    "linux-x64"   to "linux-x64",
-    "linux-arm64"  to "linux-arm64",
-    "darwin-x64"   to "mac-x64",
-    "darwin-arm64"  to "mac-arm64",
-    "windows-x64"  to "win-x64"
+    "linux-x64"        to "linux-x64",
+    "linux-arm64"      to "linux-arm64",
+    "linux-musl-x64"   to "linux-musl-x64",
+    "linux-musl-arm64" to "linux-musl-arm64",
+    "darwin-x64"       to "mac-x64",
+    "darwin-arm64"     to "mac-arm64",
+    "windows-x64"      to "win-x64"
 )
 
 val pdfiumArchiveDir = layout.buildDirectory.dir("pdfium-archives")
@@ -148,9 +150,7 @@ val nativeJarTasks = pdfiumPlatforms.keys.map { localName ->
         group = "build"
         description = "Packages $localName native library"
         archiveClassifier.set("natives-$localName")
-        from(pdfiumNativesDir.map { it.dir("natives/$localName") }) {
-            into("natives/$localName")
-        }
+        from(pdfiumNativesDir.map { it.dir("natives/$localName") }) { into("natives/$localName") }
     }
 }
 

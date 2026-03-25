@@ -266,9 +266,19 @@ public final class XmpMetadataParser {
                     if (!listValues.isEmpty()) {
                         fields.put(child.getLocalName(), String.join(",", listValues));
                     } else {
-                        String text = child.getTextContent();
-                        if (text != null && !text.isBlank()) {
-                            fields.put(child.getLocalName(), text.trim());
+                        // Check for rdf:value first (structured value)
+                        NodeList rdfValues = childElem.getElementsByTagNameNS(NS_RDF, "value");
+                        if (rdfValues.getLength() > 0) {
+                            String text = rdfValues.item(0).getTextContent();
+                            if (text != null && !text.isBlank()) {
+                                fields.put(child.getLocalName(), text.trim());
+                            }
+                        } else {
+                            // Get only direct text content, not descendants
+                            String text = getDirectTextContent(childElem);
+                            if (text != null && !text.isBlank()) {
+                                fields.put(child.getLocalName(), text.trim());
+                            }
                         }
                     }
                 }
@@ -298,5 +308,20 @@ public final class XmpMetadataParser {
             return nodes.item(0).getTextContent();
         }
         return null;
+    }
+
+    /**
+     * Get only direct text content of an element, ignoring text from child elements.
+     */
+    private static String getDirectTextContent(Element element) {
+        StringBuilder sb = new StringBuilder();
+        NodeList children = element.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.TEXT_NODE) {
+                sb.append(child.getNodeValue());
+            }
+        }
+        return sb.toString();
     }
 }

@@ -145,11 +145,31 @@ public final class NativeLoader {
         } else if (os.contains("mac")) {
             osKey = "darwin";
         } else if (os.contains("nux")) {
-            osKey = "linux";
+            osKey = isMusl() ? "linux-musl" : "linux";
         } else {
             throw new NativeLoadException("Unsupported operating system: " + os);
         }
         return osKey + "-" + detectArch();
+    }
+
+    private static boolean isMusl() {
+        // Check for musl dynamic linker
+        try {
+            java.nio.file.Path ldMusl = java.nio.file.Path.of("/lib");
+            if (java.nio.file.Files.exists(ldMusl)) {
+                try (var files = java.nio.file.Files.list(ldMusl)) {
+                    if (files.anyMatch(p -> p.getFileName().toString().startsWith("ld-musl-"))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        // Fallback: check /proc/self/maps for musl
+        try {
+            String maps = java.nio.file.Files.readString(java.nio.file.Path.of("/proc/self/maps"));
+            if (maps.contains("musl")) return true;
+        } catch (Exception ignored) {}
+        return false;
     }
 
     private static String detectArch() {
