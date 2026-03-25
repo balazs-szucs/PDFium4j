@@ -39,11 +39,13 @@ public final class NativeLoader {
                     System.loadLibrary("pdfium");
                     loaded = true;
                 } catch (UnsatisfiedLinkError e) {
-                    loadError = classpathMiss;
-                    throw new NativeLoadException(
+                    NativeLoadException ex = new NativeLoadException(
                             "PDFium native library not found for " + detectPlatform()
                                     + ". Also tried System.loadLibrary(\"pdfium\") and failed.",
                             classpathMiss);
+                    ex.addSuppressed(e);
+                    loadError = ex;
+                    throw ex;
                 }
             } catch (Throwable t) {
                 loadError = t;
@@ -112,7 +114,7 @@ public final class NativeLoader {
 
     private static void extractToDir(String resource, Path dir) throws IOException {
         String filename = resource.substring(resource.lastIndexOf('/') + 1);
-        extractResource(resource, dir, filename, false);
+        extractResource(resource, dir, filename, true);
     }
 
     private static Path extractLib(String resource, Path dir, String filename) throws IOException {
@@ -137,16 +139,24 @@ public final class NativeLoader {
 
     static String detectPlatform() {
         String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
-        String osKey = os.contains("win") ? "windows" : os.contains("mac") ? "darwin" : "linux";
+        String osKey;
+        if (os.contains("win")) {
+            osKey = "windows";
+        } else if (os.contains("mac")) {
+            osKey = "darwin";
+        } else if (os.contains("nux")) {
+            osKey = "linux";
+        } else {
+            throw new NativeLoadException("Unsupported operating system: " + os);
+        }
         return osKey + "-" + detectArch();
     }
 
     private static String detectArch() {
         String arch = System.getProperty("os.arch").toLowerCase(Locale.ROOT);
-        if (arch.equals("aarch64") || arch.equals("arm64")) {
-            return "arm64";
-        }
-        return "x64";
+        if ("x86_64".equals(arch) || "amd64".equals(arch)) return "x64";
+        if ("aarch64".equals(arch) || "arm64".equals(arch)) return "arm64";
+        throw new NativeLoadException("Unsupported architecture: " + arch);
     }
 
     static String nativeFilename(String lib) {

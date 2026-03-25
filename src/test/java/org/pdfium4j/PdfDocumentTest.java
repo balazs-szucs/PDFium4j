@@ -8,6 +8,8 @@ import org.pdfium4j.model.*;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -192,8 +194,7 @@ class PdfDocumentTest {
         Path testPdf = getTestPdf();
         if (testPdf == null) return;
 
-        PdfDocument doc = PdfDocument.open(testPdf);
-        try {
+        try (PdfDocument doc = PdfDocument.open(testPdf)) {
             AtomicReference<Throwable> errorRef = new AtomicReference<>();
             Thread worker = new Thread(() -> {
                 try {
@@ -208,8 +209,6 @@ class PdfDocumentTest {
 
             assertNotNull(errorRef.get(), "Wrong-thread close should fail");
             assertInstanceOf(IllegalStateException.class, errorRef.get());
-        } finally {
-            doc.close();
         }
     }
 
@@ -719,39 +718,73 @@ class PdfDocumentTest {
         }
     }
 
+    private static Path cachedTestPdf;
+
     private Path getTestPdf() {
+        if (cachedTestPdf != null && Files.exists(cachedTestPdf)) {
+            return cachedTestPdf;
+        }
         var url = getClass().getResource("/test.pdf");
         if (url != null) {
-            return Path.of(url.getPath());
+            try {
+                cachedTestPdf = Path.of(url.toURI());
+                return cachedTestPdf;
+            } catch (URISyntaxException e) {
+                // fall through to generation
+            }
         }
-
-        // Check JPDFium test resources
-        Path jpdfiumTest = Path.of("/home/balazs/IdeaProjects/JPDFium/jpdfium/src/test/resources/pdfs/minimal.pdf");
-        if (Files.exists(jpdfiumTest)) return jpdfiumTest;
-
-        Path[] candidates = {
-                Path.of("/home/balazs/IdeaProjects/JPDFium/jpdfium/src/test/resources/pdfs/general/minimal.pdf"),
-                Path.of("/home/balazs/IdeaProjects/JPDFium/jpdfium/src/test/resources/pdfs/general/basic-text.pdf"),
-                Path.of("/tmp/test.pdf"),
-        };
-        for (Path p : candidates) {
-            if (Files.exists(p)) return p;
+        // Generate a minimal PDF with text content
+        try {
+            cachedTestPdf = Files.createTempFile("pdfium4j-test-", ".pdf");
+            cachedTestPdf.toFile().deleteOnExit();
+            Files.write(cachedTestPdf, minimalPdfWithText());
+            return cachedTestPdf;
+        } catch (IOException e) {
+            System.err.println("Failed to create test PDF: " + e.getMessage());
+            return null;
         }
-
-        System.err.println("No test PDF found, skipping test");
-        return null;
     }
 
     private Path getTestPdfWithText() {
-        // Prefer a PDF that has text content
-        Path[] candidates = {
-                Path.of("/home/balazs/IdeaProjects/JPDFium/jpdfium/src/test/resources/pdfs/general/basic-text.pdf"),
-                Path.of("/home/balazs/IdeaProjects/JPDFium/jpdfium/src/test/resources/pdfs/general/mozilla_tracemonkey.pdf"),
-        };
-        for (Path p : candidates) {
-            if (Files.exists(p)) return p;
-        }
-        // Fall back to any test PDF
         return getTestPdf();
+    }
+
+    private static byte[] minimalPdfWithText() {
+        String pdf = """
+                %PDF-1.4
+                1 0 obj
+                << /Type /Catalog /Pages 2 0 R >>
+                endobj
+                2 0 obj
+                << /Type /Pages /Kids [3 0 R] /Count 1 >>
+                endobj
+                3 0 obj
+                << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]
+                   /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+                endobj
+                4 0 obj
+                << /Length 44 >>
+                stream
+                BT /F1 12 Tf 100 700 Td (Hello World) Tj ET
+                endstream
+                endobj
+                5 0 obj
+                << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+                endobj
+                xref
+                0 6
+                0000000000 65535 f \r
+                0000000009 00000 n \r
+                0000000058 00000 n \r
+                0000000115 00000 n \r
+                0000000266 00000 n \r
+                0000000360 00000 n \r
+                trailer
+                << /Size 6 /Root 1 0 R >>
+                startxref
+                434
+                %%EOF
+                """;
+        return pdf.getBytes(StandardCharsets.US_ASCII);
     }
 }

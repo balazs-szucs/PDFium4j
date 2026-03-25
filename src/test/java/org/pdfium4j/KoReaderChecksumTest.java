@@ -10,6 +10,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 import java.util.HexFormat;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -91,9 +92,7 @@ class KoReaderChecksumTest {
 
     private static byte[] repeatByte(int value, int count) {
         byte[] bytes = new byte[count];
-        for (int i = 0; i < count; i++) {
-            bytes[i] = (byte) value;
-        }
+        Arrays.fill(bytes, (byte) value);
         return bytes;
     }
 

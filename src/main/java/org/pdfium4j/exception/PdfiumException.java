@@ -52,15 +52,18 @@ public class PdfiumException extends RuntimeException {
 
     private static String formatMessage(String message, PdfErrorCode errorCode, String operation, String filePath) {
         StringBuilder sb = new StringBuilder();
-        if (message != null) sb.append(message);
+        if (message != null && !message.isEmpty()) sb.append(message);
         if (errorCode != null && errorCode != PdfErrorCode.UNKNOWN && errorCode != PdfErrorCode.SUCCESS) {
-            sb.append(" [").append(errorCode.name()).append(": ").append(errorCode.description()).append("]");
+            if (!sb.isEmpty()) sb.append(" ");
+            sb.append("[").append(errorCode.name()).append(": ").append(errorCode.description()).append("]");
         }
         if (operation != null) {
-            sb.append(" (operation: ").append(operation).append(")");
+            if (!sb.isEmpty()) sb.append(" ");
+            sb.append("(operation: ").append(operation).append(")");
         }
         if (filePath != null) {
-            sb.append(" (file: ").append(filePath).append(")");
+            if (!sb.isEmpty()) sb.append(" ");
+            sb.append("(file: ").append(filePath).append(")");
         }
         return sb.toString();
     }

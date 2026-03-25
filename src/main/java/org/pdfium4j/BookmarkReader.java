@@ -16,7 +16,7 @@ final class BookmarkReader {
 
     private BookmarkReader() {}
 
-    static List<Bookmark> readBookmarks(MemorySegment docHandle, Arena arena) {
+    static List<Bookmark> readBookmarks(MemorySegment docHandle) {
         return collectBookmarkChildren(docHandle, MemorySegment.NULL, 0);
     }
 

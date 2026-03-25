@@ -47,8 +47,15 @@ tasks.withType<JavaCompile> {
     ))
 }
 
-tasks.named<JavaCompile>("compileTestJava") {
-    exclude("**/PathologicalPdfTest.java")
+tasks.withType<Test> {
+    useJUnitPlatform()
+    jvmArgs(
+        "--enable-preview",
+        "--enable-native-access=ALL-UNNAMED"
+    )
+    filter {
+        excludeTestsMatching("org.pdfium4j.PathologicalPdfTest")
+    }
 }
 
 tasks.withType<Javadoc> {
@@ -60,13 +67,7 @@ tasks.withType<Javadoc> {
     isFailOnError = false
 }
 
-tasks.withType<Test> {
-    useJUnitPlatform()
-    jvmArgs(
-        "--enable-preview",
-        "--enable-native-access=ALL-UNNAMED"
-    )
-}
+
 
 tasks.withType<JavaExec> {
     jvmArgs(
@@ -76,7 +77,7 @@ tasks.withType<JavaExec> {
 }
 
 dependencies {
-    // Native module: optional runtime dep so consumers can pick their platform
+    // First release bundles Linux x64 unconditionally; future releases will leave platform selection to consumers
     runtimeOnly(project(":pdfium4j-natives-linux-x64"))
 
     testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
@@ -138,10 +139,6 @@ signing {
     val signingPassword = findProperty("signingPassword") as String? ?: System.getenv("GPG_PASSPHRASE")
     if (signingKey != null && signingPassword != null) {
         useInMemoryPgpKeys(signingKey, signingPassword)
+        sign(publishing.publications["mavenJava"])
     }
-    sign(publishing.publications["mavenJava"])
-}
-
-tasks.withType<Sign> {
-    onlyIf { gradle.taskGraph.hasTask("publish") }
 }

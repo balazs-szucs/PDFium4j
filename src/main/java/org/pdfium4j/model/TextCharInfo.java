@@ -45,6 +45,9 @@ public record TextCharInfo(
 
     /** The character as a Java String. */
     public String character() {
+        if (!Character.isValidCodePoint(charCode)) {
+            return "\uFFFD";
+        }
         return new String(Character.toChars(charCode));
     }
 }

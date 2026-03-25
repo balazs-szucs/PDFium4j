@@ -1,17 +1,17 @@
 package org.pdfium4j;
 
 import org.pdfium4j.exception.PdfCorruptException;
-import org.pdfium4j.exception.PdfPasswordException;
-import org.pdfium4j.exception.PdfiumException;
 import org.pdfium4j.model.PdfDiagnostic;
 import org.pdfium4j.model.PdfProbeResult;
-import org.junit.Test;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Tests for PDF handling with pathological test cases.
@@ -20,11 +20,8 @@ import static org.junit.Assert.*;
  */
 public class PathologicalPdfTest {
 
-    /**
-     * Test probing an empty file.
-     */
     @Test
-    public void testProbeEmptyFile() {
+    void testProbeEmptyFile() {
         byte[] empty = new byte[0];
         PdfProbeResult result = PdfDocument.probe(empty);
         
@@ -32,117 +29,73 @@ public class PathologicalPdfTest {
         assertEquals(PdfProbeResult.Status.UNREADABLE, result.status());
     }
 
-    /**
-     * Test probing a file with invalid header.
-     */
     @Test
-    public void testProbeInvalidHeader() {
-        byte[] notPdf = "This is not a PDF file".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    void testProbeInvalidHeader() {
+        byte[] notPdf = "This is not a PDF file".getBytes(StandardCharsets.UTF_8);
         PdfProbeResult result = PdfDocument.probe(notPdf);
         
         assertFalse(result.isValid());
         assertEquals(PdfProbeResult.Status.CORRUPT, result.status());
     }
 
-    /**
-     * Test probing a truncated PDF (missing EOF marker).
-     */
     @Test
-    public void testProbeTruncatedPdf() {
-        // Minimal valid PDF header but truncated body
+    void testProbeTruncatedPdf() {
         byte[] truncated = new byte[] {
                 '%', 'P', 'D', 'F', '-', '1', '.', '4', '\n',
                 '1', ' ', '0', ' ', 'o', 'b', 'j', '\n',
                 '<', '<', '>', '>', '\n',
                 'e', 'n', 'd', 'o', 'b', 'j'
-                // Missing xref and EOF
         };
         
         PdfProbeResult result = PdfDocument.probe(truncated);
-        // Should not crash, should return error status
         assertNotNull(result);
         assertFalse(result.isValid() || result.status() == PdfProbeResult.Status.OK);
     }
 
-    /**
-     * Test diagnosing a corrupt PDF.
-     */
     @Test
-    public void testDiagnoseCorruptPdf() throws IOException {
+    void testDiagnoseCorruptPdf() throws IOException {
         Path tempFile = Files.createTempFile("corrupt-", ".pdf");
         try {
-            // Write garbage data
             Files.write(tempFile, "This is garbage data, not a PDF".getBytes());
             
             PdfDiagnostic diagnostic = PdfDocument.diagnose(tempFile);
-            assertFalse(diagnostic.isValid());
+            assertFalse(diagnostic.valid());
             assertFalse(diagnostic.warnings().isEmpty());
         } finally {
             Files.deleteIfExists(tempFile);
         }
     }
 
-    /**
-     * Test that opening a corrupt PDF throws PdfCorruptException.
-     */
-    @Test(expected = PdfCorruptException.class)
-    public void testOpenCorruptPdf() throws IOException {
+    @Test
+    void testOpenCorruptPdf() throws IOException {
         Path tempFile = Files.createTempFile("corrupt-open-", ".pdf");
         try {
             Files.write(tempFile, "Corrupted PDF content".getBytes());
-            PdfDocument.open(tempFile);
-            fail("Should throw PdfCorruptException");
-        } catch (PdfCorruptException e) {
-            assertTrue(e.getMessage().contains("corrupt") || e.getMessage().contains("FORMAT"));
-            throw e;
+            assertThrows(PdfCorruptException.class, () -> PdfDocument.open(tempFile));
         } finally {
             Files.deleteIfExists(tempFile);
         }
     }
 
-    /**
-     * Test probing a password-protected PDF.
-     * Note: This requires a test PDF encrypted with a password.
-     * For now, we test the error handling.
-     */
+    @Disabled("Requires encrypted PDF fixture")
     @Test
-    public void testPasswordProtectedHandling() {
-        // We can't create a password-protected PDF on the fly,
-        // but we can verify the probe handles it correctly if encountered
-        // This test documents the expected behavior
-        // 
-        // In production, PdfProbeResult should return PASSWORD_REQUIRED status
-        // for encrypted PDFs without throwing an exception
+    void testPasswordProtectedHandling() {
     }
 
-    /**
-     * Test image-only detection with empty PDF.
-     */
     @Test
-    public void testImageOnlyDetectionEmpty() {
-        // Empty/minimal PDF should not be flagged as image-only
+    void testImageOnlyDetectionEmpty() {
         byte[] minimal = new byte[0];
         PdfProbeResult result = PdfDocument.probe(minimal);
         assertFalse(result.isValid());
     }
 
-    /**
-     * Test that very large dimension PDFs are handled correctly.
-     */
+    @Disabled("Requires large-dimension PDF fixture")
     @Test
-    public void testLargeDimensionHandling() {
-        // This test documents the expected behavior for huge pages
-        // A real test would need a PDF with 14400x14400+ pages
-        // The bounded rendering should prevent OOM errors
+    void testLargeDimensionHandling() {
     }
 
-    /**
-     * Test bit-flip fuzzing on valid PDF structure.
-     * This verifies that random bit flips result in clean exceptions, not crashes.
-     */
     @Test
-    public void testBitFlipFuzzing() throws IOException {
-        // Create a minimal valid PDF structure
+    void testBitFlipFuzzing() {
         byte[] validPdf = new byte[] {
                 '%', 'P', 'D', 'F', '-', '1', '.', '4', '\n',
                 '1', ' ', '0', ' ', 'o', 'b', 'j', '\n',
@@ -158,17 +111,15 @@ public class PathologicalPdfTest {
                 '%', '%', 'E', 'O', 'F'
         };
 
-        // Flip random bits and verify no crashes
-        java.util.Random random = new java.util.Random(42); // Fixed seed for reproducibility
+        java.util.Random random = new java.util.Random(42);
         for (int i = 0; i < 50; i++) {
             byte[] mutated = validPdf.clone();
             int flipPos = random.nextInt(mutated.length);
             int bitPos = random.nextInt(8);
-            mutated[flipPos] ^= (1 << bitPos);
+            mutated[flipPos] ^= (byte) (1 << bitPos);
 
             try {
                 PdfProbeResult result = PdfDocument.probe(mutated);
-                // Should not throw, should return some status
                 assertNotNull(result);
             } catch (Exception e) {
                 fail("Bit-flip mutation " + i + " threw exception: " + e.getMessage());
@@ -176,35 +127,26 @@ public class PathologicalPdfTest {
         }
     }
 
-    /**
-     * Test null path handling.
-     */
     @Test
-    public void testProbeNullPath() {
+    void testProbeNullPath() {
         PdfProbeResult result = PdfDocument.probe((Path) null);
         assertNotNull(result);
         assertFalse(result.isValid());
         assertEquals(PdfProbeResult.Status.UNREADABLE, result.status());
     }
 
-    /**
-     * Test null data handling.
-     */
     @Test
-    public void testProbeNullData() {
+    void testProbeNullData() {
         PdfProbeResult result = PdfDocument.probe((byte[]) null);
         assertNotNull(result);
         assertFalse(result.isValid());
         assertEquals(PdfProbeResult.Status.UNREADABLE, result.status());
     }
 
-    /**
-     * Test diagnostic with null path.
-     */
     @Test
-    public void testDiagnoseNullPath() {
+    void testDiagnoseNullPath() {
         PdfDiagnostic diagnostic = PdfDocument.diagnose(null);
         assertNotNull(diagnostic);
-        assertFalse(diagnostic.isValid());
+        assertFalse(diagnostic.valid());
     }
 }

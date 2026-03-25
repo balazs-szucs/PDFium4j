@@ -4,7 +4,7 @@ import org.pdfium4j.model.XmpMetadata;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.xpath.*;
+
 import org.w3c.dom.*;
 import org.xml.sax.InputSource;
 
@@ -44,7 +44,21 @@ public final class XmpMetadataParser {
         if (xmpBytes.length > MAX_XMP_BYTES) {
             return XmpMetadata.empty();
         }
-        return parse(new String(xmpBytes, StandardCharsets.UTF_8));
+        // Let the XML parser detect encoding from byte stream (BOM / XML declaration)
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(true);
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+
+            DocumentBuilder builder = factory.newDocumentBuilder();
+            Document doc = builder.parse(new InputSource(new ByteArrayInputStream(xmpBytes)));
+            return extractFromDocument(doc);
+        } catch (Exception _) {
+            // Corrupt producers may embed null bytes, stray BOMs, or garbage before the declaration
+            return parse(new String(xmpBytes, StandardCharsets.UTF_8));
+        }
     }
 
     /**
@@ -58,7 +72,7 @@ public final class XmpMetadataParser {
             return XmpMetadata.empty();
         }
 
-        xmpXml = sanitizeXmpString(xmpXml);
+        String xml = sanitizeXmpString(xmpXml);
 
         try {
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -69,7 +83,7 @@ public final class XmpMetadataParser {
             factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
 
             DocumentBuilder builder = factory.newDocumentBuilder();
-            Document doc = builder.parse(new InputSource(new StringReader(xmpXml)));
+            Document doc = builder.parse(new InputSource(new StringReader(xml)));
 
             return extractFromDocument(doc);
         } catch (Exception e) {
@@ -83,25 +97,26 @@ public final class XmpMetadataParser {
      * null bytes, and XML declaration encoding mismatches.
      */
     private static String sanitizeXmpString(String xmp) {
-        if (!xmp.isEmpty() && xmp.charAt(0) == '\uFEFF') {
-            xmp = xmp.substring(1);
+        String s = xmp;
+        if (!s.isEmpty() && s.charAt(0) == '\uFEFF') {
+            s = s.substring(1);
         }
 
         // Some corrupt producers embed null bytes
-        if (xmp.indexOf('\0') >= 0) {
-            xmp = xmp.replace("\0", "");
+        if (s.indexOf('\0') >= 0) {
+            s = s.replace("\0", "");
         }
 
         // Some tools embed garbage before the XML declaration
-        int xmlDeclStart = xmp.indexOf("<?xml");
+        int xmlDeclStart = s.indexOf("<?xml");
         if (xmlDeclStart > 0) {
-            xmp = xmp.substring(xmlDeclStart);
+            s = s.substring(xmlDeclStart);
         }
 
         // Nitro PDF embeds stray BOMs inside element text
-        xmp = xmp.replace("\uFEFF", "");
+        String replace = s.replace("\uFEFF", "");
 
-        return xmp;
+        return replace;
     }
 
     /**

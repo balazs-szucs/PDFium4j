@@ -1,6 +1,7 @@
 package org.pdfium4j.model;
 
 import java.util.*;
+import java.util.regex.Pattern;
 
 /**
  * Structured representation of XMP metadata extracted from a PDF.
@@ -33,12 +34,22 @@ public record XmpMetadata(
         Map<String, String> calibreFields,
         Map<String, String> customFields
 ) {
+    private static final Pattern WHITESPACE_HYPHEN = Pattern.compile("[\\s-]");
+    private static final Pattern ISBN_FORMAT = Pattern.compile("(?i)^(urn:isbn:|isbn[: ]?)?[0-9X-]{10,17}$");
+
     public XmpMetadata {
-        creators = List.copyOf(creators);
-        subjects = List.copyOf(subjects);
-        identifiers = List.copyOf(identifiers);
-        calibreFields = Map.copyOf(calibreFields);
-        customFields = Map.copyOf(customFields);
+        Objects.requireNonNull(title, "title");
+        creators = List.copyOf(Objects.requireNonNull(creators, "creators"));
+        Objects.requireNonNull(description, "description");
+        subjects = List.copyOf(Objects.requireNonNull(subjects, "subjects"));
+        Objects.requireNonNull(publisher, "publisher");
+        Objects.requireNonNull(language, "language");
+        Objects.requireNonNull(date, "date");
+        Objects.requireNonNull(rights, "rights");
+        identifiers = List.copyOf(Objects.requireNonNull(identifiers, "identifiers"));
+        Objects.requireNonNull(pdfaConformance, "pdfaConformance");
+        calibreFields = Map.copyOf(Objects.requireNonNull(calibreFields, "calibreFields"));
+        customFields = Map.copyOf(Objects.requireNonNull(customFields, "customFields"));
     }
 
     /**
@@ -60,8 +71,8 @@ public record XmpMetadata(
      */
     public List<String> isbns() {
         return identifiers.stream()
-                .filter(id -> id.matches("(?i)^(urn:isbn:|isbn[: ]?)?[0-9X-]{10,17}$"))
-                .map(id -> id.replaceAll("(?i)^(urn:isbn:|isbn[: ]?)", "").replaceAll("[\\s-]", ""))
+                .filter(id -> ISBN_FORMAT.matcher(id).matches())
+                .map(id -> WHITESPACE_HYPHEN.matcher(id.replaceAll("(?i)^(urn:isbn:|isbn[: ]?)", "")).replaceAll(""))
                 .toList();
     }
 

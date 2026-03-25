@@ -130,7 +130,7 @@ If classpath loading is unavailable, PDFium4j falls back to `System.loadLibrary(
 
 ## Project structure
 
-```
+```text
 pdfium4j/                     Root (core Java module)
   src/main/java/              FFM bindings and public API
   src/test/java/              Tests

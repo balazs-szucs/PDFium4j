@@ -539,7 +539,7 @@ public final class PdfPage implements AutoCloseable {
         try {
             textPage = (MemorySegment) TextBindings.FPDFText_LoadPage.invokeExact(handle);
             if (FfmHelper.isNull(textPage)) {
-                return emptyValue;
+                throw new PdfiumException(errorContext + ": FPDFText_LoadPage returned NULL");
             }
             return action.apply(textPage);
         } catch (PdfiumException e) {

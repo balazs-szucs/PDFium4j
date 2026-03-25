@@ -22,6 +22,10 @@ public record PdfDiagnostic(
         int fileVersion,
         List<String> warnings
 ) {
+    public PdfDiagnostic {
+        warnings = warnings != null ? List.copyOf(warnings) : List.of();
+    }
+
     /** Whether this appears to be a scanned/image-only PDF (no extractable text). */
     public boolean isImageOnly() {
         return valid && pageCount > 0 && !hasText;

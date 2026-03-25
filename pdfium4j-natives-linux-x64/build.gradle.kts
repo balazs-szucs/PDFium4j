@@ -68,10 +68,6 @@ signing {
     val signingPassword = findProperty("signingPassword") as String? ?: System.getenv("GPG_PASSPHRASE")
     if (signingKey != null && signingPassword != null) {
         useInMemoryPgpKeys(signingKey, signingPassword)
+        sign(publishing.publications["mavenJava"])
     }
-    sign(publishing.publications["mavenJava"])
-}
-
-tasks.withType<Sign> {
-    onlyIf { gradle.taskGraph.hasTask("publish") }
 }

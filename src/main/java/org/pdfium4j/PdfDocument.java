@@ -12,6 +12,7 @@ import org.pdfium4j.model.*;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.foreign.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
@@ -52,6 +53,7 @@ public final class PdfDocument implements AutoCloseable {
     private final Set<PdfPage> openPages;
     private volatile boolean closed = false;
     private boolean metadataDirty = false;
+    private byte[] pendingXmpPacket;
 
     private PdfDocument(MemorySegment handle, Arena docArena, byte[] rawBytes, PdfProcessingPolicy policy, Thread ownerThread) {
         this.handle = handle;
@@ -86,6 +88,19 @@ public final class PdfDocument implements AutoCloseable {
         if (path == null) {
             return PdfProbeResult.error(PdfProbeResult.Status.UNREADABLE,
                     PdfErrorCode.FILE, "Path is null");
+        }
+
+        long fileSize;
+        try {
+            fileSize = Files.size(path);
+        } catch (IOException e) {
+            return PdfProbeResult.error(PdfProbeResult.Status.UNREADABLE,
+                    PdfErrorCode.FILE, "Cannot read file: " + e.getMessage());
+        }
+        if (fileSize > resolvedPolicy.maxDocumentBytes()) {
+            return PdfProbeResult.error(PdfProbeResult.Status.UNSUPPORTED,
+                    PdfErrorCode.FILE,
+                    "Document exceeds policy limit: " + fileSize + " > " + resolvedPolicy.maxDocumentBytes() + " bytes");
         }
 
         byte[] data;
@@ -131,9 +146,8 @@ public final class PdfDocument implements AutoCloseable {
 
         PdfiumLibrary.ensureInitialized();
 
-        Arena arena = Arena.ofConfined();
-        try {
-            MemorySegment dataSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, data);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment dataSeg = arena.allocateFrom(JAVA_BYTE, data);
             MemorySegment doc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(
                     dataSeg, data.length, MemorySegment.NULL);
 
@@ -172,13 +186,12 @@ public final class PdfDocument implements AutoCloseable {
             } finally {
                 try {
                     ViewBindings.FPDF_CloseDocument.invokeExact(doc);
-                } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {
+                }
             }
         } catch (Throwable t) {
             return PdfProbeResult.error(PdfProbeResult.Status.ERROR,
                     PdfErrorCode.UNKNOWN, "Probe failed: " + t.getMessage());
-        } finally {
-            arena.close();
         }
     }
 
@@ -316,8 +329,7 @@ public final class PdfDocument implements AutoCloseable {
                 docArena.close();
                 throwLastError(errorContext);
             }
-            // Do not retain a second Java-side raw copy by default.
-            return new PdfDocument(doc, docArena, null, policy, Thread.currentThread());
+            return new PdfDocument(doc, docArena, data, policy, Thread.currentThread());
         } catch (PdfiumException e) {
             throw e;
         } catch (Throwable t) {
@@ -402,8 +414,8 @@ public final class PdfDocument implements AutoCloseable {
         int count = pageCount();
         List<PageSize> sizes = new ArrayList<>(count);
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment wSeg = arena.allocate(ValueLayout.JAVA_DOUBLE);
-            MemorySegment hSeg = arena.allocate(ValueLayout.JAVA_DOUBLE);
+            MemorySegment wSeg = arena.allocate(JAVA_DOUBLE);
+            MemorySegment hSeg = arena.allocate(JAVA_DOUBLE);
             for (int i = 0; i < count; i++) {
                 int ok = (int) ViewBindings.FPDF_GetPageSizeByIndex.invokeExact(
                         handle, i, wSeg, hSeg);
@@ -411,8 +423,8 @@ public final class PdfDocument implements AutoCloseable {
                     sizes.add(new PageSize(0, 0));
                 } else {
                     sizes.add(new PageSize(
-                            (float) wSeg.get(ValueLayout.JAVA_DOUBLE, 0),
-                            (float) hSeg.get(ValueLayout.JAVA_DOUBLE, 0)));
+                            (float) wSeg.get(JAVA_DOUBLE, 0),
+                            (float) hSeg.get(JAVA_DOUBLE, 0)));
                 }
             }
         } catch (PdfiumException e) {
@@ -496,10 +508,9 @@ public final class PdfDocument implements AutoCloseable {
     }
 
     private static void validateDocumentSize(int documentBytes, PdfProcessingPolicy policy) {
-        long size = documentBytes;
-        if (size > policy.maxDocumentBytes()) {
+        if ((long) documentBytes > policy.maxDocumentBytes()) {
             throw new PdfiumException(
-                    "Document exceeds policy limit: " + size + " > " + policy.maxDocumentBytes() + " bytes");
+                    "Document exceeds policy limit: " + (long) documentBytes + " > " + policy.maxDocumentBytes() + " bytes");
         }
     }
 
@@ -562,10 +573,10 @@ public final class PdfDocument implements AutoCloseable {
     public int fileVersion() {
         ensureOpen();
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment versionSeg = arena.allocate(ValueLayout.JAVA_INT);
+            MemorySegment versionSeg = arena.allocate(JAVA_INT);
             int ok = (int) DocBindings.FPDF_GetFileVersion.invokeExact(handle, versionSeg);
             if (ok != 0) {
-                return versionSeg.get(ValueLayout.JAVA_INT, 0);
+                return versionSeg.get(JAVA_INT, 0);
             }
             return 0;
         } catch (Throwable t) {
@@ -607,18 +618,27 @@ public final class PdfDocument implements AutoCloseable {
      */
     public void insertBlankPage(int pageIndex, PageSize size) {
         ensureOpen();
+        MemorySegment pageSeg = MemorySegment.NULL;
         try {
-            MemorySegment pageSeg = (MemorySegment) EditBindings.FPDFPage_New.invokeExact(
+            pageSeg = (MemorySegment) EditBindings.FPDFPage_New.invokeExact(
                     handle, pageIndex, (double) size.width(), (double) size.height());
             if (FfmHelper.isNull(pageSeg)) {
                 throw new PdfiumException("FPDFPage_New failed for index " + pageIndex);
             }
-            int _ = (int) EditBindings.FPDFPage_GenerateContent.invokeExact(pageSeg);
-            ViewBindings.FPDF_ClosePage.invokeExact(pageSeg);
+            int ok = (int) EditBindings.FPDFPage_GenerateContent.invokeExact(pageSeg);
+            if (ok == 0) {
+                throw new PdfiumException("FPDFPage_GenerateContent failed for index " + pageIndex);
+            }
         } catch (PdfiumException e) {
             throw e;
         } catch (Throwable t) {
             throw new PdfiumException("Failed to insert blank page at " + pageIndex, t);
+        } finally {
+            if (!FfmHelper.isNull(pageSeg)) {
+                try {
+                    ViewBindings.FPDF_ClosePage.invokeExact(pageSeg);
+                } catch (Throwable ignored) {}
+            }
         }
     }
 
@@ -801,6 +821,32 @@ public final class PdfDocument implements AutoCloseable {
     }
 
     /**
+     * Set XMP metadata that will be embedded in the PDF on the next save.
+     * Uses the provided {@link XmpMetadataWriter} to serialize the metadata.
+     *
+     * @param metadata the metadata to embed
+     * @param writer   the writer (may have custom namespaces registered)
+     */
+    public void setXmpMetadata(XmpMetadata metadata, XmpMetadataWriter writer) {
+        ensureOpen();
+        Objects.requireNonNull(metadata, "metadata");
+        Objects.requireNonNull(writer, "writer");
+        this.pendingXmpPacket = writer.writeBytes(metadata);
+    }
+
+    /**
+     * Set XMP metadata from a pre-built XMP packet string.
+     * The string should be a complete XMP packet including xpacket processing instructions.
+     *
+     * @param xmpPacket the raw XMP XML packet
+     */
+    public void setXmpMetadata(String xmpPacket) {
+        ensureOpen();
+        Objects.requireNonNull(xmpPacket, "xmpPacket");
+        this.pendingXmpPacket = xmpPacket.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
      * Get document permissions bitmask.
      * See PDF Reference Table 3.20 for bit definitions.
      */
@@ -882,20 +928,21 @@ public final class PdfDocument implements AutoCloseable {
     public String xmpMetadataString() {
         byte[] xmp = xmpMetadata();
         if (xmp.length == 0) return "";
-        return new String(xmp, java.nio.charset.StandardCharsets.UTF_8);
+        return new String(xmp, StandardCharsets.UTF_8);
     }
 
-    private static byte[] extractXmpPacket(byte[] pdf) {
-        byte[] beginMarker = "<?xpacket begin=".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
-        byte[] endMarker = "<?xpacket end=".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    private static final byte[] XMP_BEGIN_MARKER = "<?xpacket begin=".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] XMP_END_MARKER = "<?xpacket end=".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] XMP_PI_CLOSE = "?>".getBytes(StandardCharsets.US_ASCII);
 
-        int beginPos = indexOf(pdf, beginMarker, 0);
+    private static byte[] extractXmpPacket(byte[] pdf) {
+        int beginPos = indexOf(pdf, XMP_BEGIN_MARKER, 0);
         if (beginPos < 0) return new byte[0];
 
-        int endPos = indexOf(pdf, endMarker, beginPos);
+        int endPos = indexOf(pdf, XMP_END_MARKER, beginPos);
         if (endPos < 0) return new byte[0];
 
-        int endTagClose = indexOf(pdf, "?>".getBytes(java.nio.charset.StandardCharsets.US_ASCII), endPos);
+        int endTagClose = indexOf(pdf, XMP_PI_CLOSE, endPos);
         if (endTagClose < 0) return new byte[0];
         int packetEnd = endTagClose + 2;
 
@@ -915,6 +962,39 @@ public final class PdfDocument implements AutoCloseable {
         return -1;
     }
 
+    private static byte[] replaceXmpPacket(byte[] pdf, byte[] newPacket) {
+        int beginPos = indexOf(pdf, XMP_BEGIN_MARKER, 0);
+        if (beginPos < 0) {
+            // No existing XMP packet - cannot inject without rewriting cross-reference table
+            return pdf;
+        }
+
+        int endPos = indexOf(pdf, XMP_END_MARKER, beginPos);
+        if (endPos < 0) return pdf;
+
+        int endTagClose = indexOf(pdf, XMP_PI_CLOSE, endPos);
+        if (endTagClose < 0) return pdf;
+        int packetEnd = endTagClose + 2;
+
+        int oldLen = packetEnd - beginPos;
+        if (newPacket.length <= oldLen) {
+            // Pad the new packet to exactly match old length (in-place replacement preserves xref offsets)
+            byte[] padded = new byte[oldLen];
+            System.arraycopy(newPacket, 0, padded, 0, newPacket.length);
+            // Fill remainder with spaces (safe XMP padding)
+            Arrays.fill(padded, newPacket.length, oldLen, (byte) ' ');
+            System.arraycopy(padded, 0, pdf, beginPos, oldLen);
+            return pdf;
+        }
+
+        // New packet is larger - splice into the byte array
+        byte[] result = new byte[pdf.length - oldLen + newPacket.length];
+        System.arraycopy(pdf, 0, result, 0, beginPos);
+        System.arraycopy(newPacket, 0, result, beginPos, newPacket.length);
+        System.arraycopy(pdf, packetEnd, result, beginPos + newPacket.length, pdf.length - packetEnd);
+        return result;
+    }
+
 
     /**
      * Get the full bookmark (outline) tree for the document.
@@ -923,7 +1003,7 @@ public final class PdfDocument implements AutoCloseable {
      */
     public List<Bookmark> bookmarks() {
         ensureOpen();
-        return BookmarkReader.readBookmarks(handle, docArena);
+        return BookmarkReader.readBookmarks(handle);
     }
 
 
@@ -951,7 +1031,11 @@ public final class PdfDocument implements AutoCloseable {
      */
     public byte[] saveToBytes() {
         ensureOpen();
-        return PdfSaver.saveToBytes(handle, metadataDirty);
+        byte[] result = PdfSaver.saveToBytes(handle, metadataDirty);
+        if (pendingXmpPacket != null) {
+            result = replaceXmpPacket(result, pendingXmpPacket);
+        }
+        return result;
     }
 
     /**
