@@ -16,21 +16,6 @@ allprojects {
 subprojects {
     apply(plugin = "maven-publish")
     apply(plugin = "signing")
-
-    publishing {
-        repositories {
-            maven {
-                name = "SonatypeCentral"
-                url = uri("https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/")
-                credentials {
-                    username = findProperty("sonatypeUsername") as String?
-                        ?: System.getenv("SONATYPE_USERNAME")
-                    password = findProperty("sonatypePassword") as String?
-                        ?: System.getenv("SONATYPE_PASSWORD")
-                }
-            }
-        }
-    }
 }
 
 java {
@@ -116,19 +101,6 @@ publishing {
                     developerConnection = "scm:git:ssh://github.com/grimmory-tools/PDFium4j.git"
                     url = "https://github.com/grimmory-tools/PDFium4j"
                 }
-            }
-        }
-    }
-
-    repositories {
-        maven {
-            name = "SonatypeCentral"
-            url = uri("https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/")
-            credentials {
-                username = findProperty("sonatypeUsername") as String?
-                    ?: System.getenv("SONATYPE_USERNAME")
-                password = findProperty("sonatypePassword") as String?
-                    ?: System.getenv("SONATYPE_PASSWORD")
             }
         }
     }
