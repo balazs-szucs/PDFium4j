@@ -44,13 +44,15 @@ public final class PdfPage implements AutoCloseable {
     private final Thread ownerThread;
     private final long maxRenderPixels;
     private final Runnable onClose;
+    private final Runnable onModified;
     private volatile boolean closed = false;
 
-    PdfPage(MemorySegment handle, Thread ownerThread, long maxRenderPixels, Runnable onClose) {
+    PdfPage(MemorySegment handle, Thread ownerThread, long maxRenderPixels, Runnable onClose, Runnable onModified) {
         this.handle = handle;
         this.ownerThread = ownerThread;
         this.maxRenderPixels = maxRenderPixels;
         this.onClose = onClose;
+        this.onModified = onModified;
     }
 
     /**
@@ -187,6 +189,7 @@ public final class PdfPage implements AutoCloseable {
         };
         try {
             EditBindings.FPDFPage_SetRotation.invokeExact(handle, rot);
+            onModified.run();
         } catch (Throwable t) {
             throw new PdfiumException("Failed to set page rotation", t);
         }

@@ -396,7 +396,9 @@ public final class PdfDocument implements AutoCloseable {
                 throw new PdfiumException("Failed to load page " + index);
             }
             final PdfPage[] holder = new PdfPage[1];
-            PdfPage page = new PdfPage(pageSeg, ownerThread, policy.maxRenderPixels(), () -> unregisterPage(holder[0]));
+            PdfPage page = new PdfPage(pageSeg, ownerThread, policy.maxRenderPixels(),
+                    () -> unregisterPage(holder[0]),
+                    () -> structurallyModified = true);
             holder[0] = page;
             registerPage(page);
             return page;
@@ -836,6 +838,7 @@ public final class PdfDocument implements AutoCloseable {
         ensureOpen();
         Objects.requireNonNull(xmpPacket, "xmpPacket");
         this.pendingXmpMetadata = xmpPacket;
+        metadataDirty = true;
     }
 
     /**
@@ -1076,10 +1079,10 @@ public final class PdfDocument implements AutoCloseable {
      */
     public void save(Path path) {
         byte[] bytes;
-        if (!structurallyModified && metadataDirty) {
-            bytes = saveMetadataOnly();
-        } else {
+        if (structurallyModified) {
             bytes = saveToBytes();
+        } else {
+            bytes = saveMetadataOnly();
         }
         try {
             Files.write(path, bytes);
@@ -1130,10 +1133,10 @@ public final class PdfDocument implements AutoCloseable {
      */
     public void save(OutputStream out) {
         byte[] bytes;
-        if (!structurallyModified && metadataDirty) {
-            bytes = saveMetadataOnly();
-        } else {
+        if (structurallyModified) {
             bytes = saveToBytes();
+        } else {
+            bytes = saveMetadataOnly();
         }
         try {
             out.write(bytes);
