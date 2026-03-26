@@ -169,6 +169,23 @@ pdfium4j/                     Root (Java module)
 ./gradlew build
 ```
 
+## Quality Workflow
+
+Use Java 25 and run the same verification path as CI:
+
+```bash
+./gradlew clean check --warning-mode all
+```
+
+This runs formatting and static analysis gates (Spotless, Checkstyle, PMD, SpotBugs), plus tests.
+
+For local iteration:
+
+```bash
+./gradlew spotlessApply
+./gradlew pmdMain pmdTest spotbugsMain spotbugsTest
+```
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

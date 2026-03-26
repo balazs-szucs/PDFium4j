@@ -229,9 +229,7 @@ public final class XmpMetadataWriter {
 
     private static void writePadding(StringBuilder sb) {
         // XMP spec recommends padding to allow in-place updates
-        for (int i = 0; i < 20; i++) {
-            sb.append("                                                                                \n");
-        }
+        sb.append("                                                                                \n".repeat(20));
     }
 
     private static String escapeXml(String s) {

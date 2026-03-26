@@ -56,7 +56,10 @@ final class BookmarkReader {
             if (needed <= 2) return "";
 
             MemorySegment buf = arena.allocate(needed);
-            long _ = (long) DocBindings.FPDFBookmark_GetTitle.invokeExact(bm, buf, needed);
+            long copied = (long) DocBindings.FPDFBookmark_GetTitle.invokeExact(bm, buf, needed);
+            if (copied <= 2) {
+                return "";
+            }
             return FfmHelper.fromWideString(buf, needed);
         } catch (Throwable t) {
             return "";

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- FFM bindings mirror C API names and signatures by design. -->
+    <Match>
+        <Class name="~org\.pdfium4j\.internal\..*Bindings" />
+    </Match>
+</FindBugsFilter>

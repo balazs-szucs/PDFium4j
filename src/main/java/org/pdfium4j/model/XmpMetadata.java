@@ -36,6 +36,7 @@ public record XmpMetadata(
 ) {
     private static final Pattern WHITESPACE_HYPHEN = Pattern.compile("[\\s-]");
     private static final Pattern ISBN_FORMAT = Pattern.compile("(?i)^(urn:isbn:|isbn[: ]?)?[0-9X-]{10,17}$");
+    private static final Pattern PATTERN = Pattern.compile("(?i)^(urn:isbn:|isbn[: ]?)");
 
     public XmpMetadata {
         Objects.requireNonNull(title, "title");
@@ -72,7 +73,7 @@ public record XmpMetadata(
     public List<String> isbns() {
         return identifiers.stream()
                 .filter(id -> ISBN_FORMAT.matcher(id).matches())
-                .map(id -> WHITESPACE_HYPHEN.matcher(id.replaceAll("(?i)^(urn:isbn:|isbn[: ]?)", "")).replaceAll(""))
+                .map(id -> WHITESPACE_HYPHEN.matcher(PATTERN.matcher(id).replaceAll("")).replaceAll(""))
                 .toList();
     }
 

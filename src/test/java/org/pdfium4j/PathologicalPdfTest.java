@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -24,7 +25,7 @@ public class PathologicalPdfTest {
     void testProbeEmptyFile() {
         byte[] empty = new byte[0];
         PdfProbeResult result = PdfDocument.probe(empty);
-        
+
         assertFalse(result.isValid());
         assertEquals(PdfProbeResult.Status.UNREADABLE, result.status());
     }
@@ -33,20 +34,20 @@ public class PathologicalPdfTest {
     void testProbeInvalidHeader() {
         byte[] notPdf = "This is not a PDF file".getBytes(StandardCharsets.UTF_8);
         PdfProbeResult result = PdfDocument.probe(notPdf);
-        
+
         assertFalse(result.isValid());
         assertEquals(PdfProbeResult.Status.CORRUPT, result.status());
     }
 
     @Test
     void testProbeTruncatedPdf() {
-        byte[] truncated = new byte[] {
+        byte[] truncated = {
                 '%', 'P', 'D', 'F', '-', '1', '.', '4', '\n',
                 '1', ' ', '0', ' ', 'o', 'b', 'j', '\n',
                 '<', '<', '>', '>', '\n',
                 'e', 'n', 'd', 'o', 'b', 'j'
         };
-        
+
         PdfProbeResult result = PdfDocument.probe(truncated);
         assertNotNull(result);
         assertFalse(result.isValid() || result.status() == PdfProbeResult.Status.OK);
@@ -56,8 +57,8 @@ public class PathologicalPdfTest {
     void testDiagnoseCorruptPdf() throws IOException {
         Path tempFile = Files.createTempFile("corrupt-", ".pdf");
         try {
-            Files.write(tempFile, "This is garbage data, not a PDF".getBytes());
-            
+            Files.writeString(tempFile, "This is garbage data, not a PDF");
+
             PdfDiagnostic diagnostic = PdfDocument.diagnose(tempFile);
             assertFalse(diagnostic.valid());
             assertFalse(diagnostic.warnings().isEmpty());
@@ -70,7 +71,7 @@ public class PathologicalPdfTest {
     void testOpenCorruptPdf() throws IOException {
         Path tempFile = Files.createTempFile("corrupt-open-", ".pdf");
         try {
-            Files.write(tempFile, "Corrupted PDF content".getBytes());
+            Files.writeString(tempFile, "Corrupted PDF content");
             assertThrows(PdfCorruptException.class, () -> PdfDocument.open(tempFile));
         } finally {
             Files.deleteIfExists(tempFile);
@@ -96,7 +97,7 @@ public class PathologicalPdfTest {
 
     @Test
     void testBitFlipFuzzing() {
-        byte[] validPdf = new byte[] {
+        byte[] validPdf = {
                 '%', 'P', 'D', 'F', '-', '1', '.', '4', '\n',
                 '1', ' ', '0', ' ', 'o', 'b', 'j', '\n',
                 '<', '<', '/', 'T', 'y', 'p', 'e', '/', 'C', 'a', 't', 'a', 'l', 'o', 'g', '>', '>', '\n',
@@ -111,7 +112,7 @@ public class PathologicalPdfTest {
                 '%', '%', 'E', 'O', 'F'
         };
 
-        java.util.Random random = new java.util.Random(42);
+        ThreadLocalRandom random = ThreadLocalRandom.current();
         for (int i = 0; i < 50; i++) {
             byte[] mutated = validPdf.clone();
             int flipPos = random.nextInt(mutated.length);

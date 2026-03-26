@@ -5,6 +5,10 @@ plugins {
     `java-library`
     `maven-publish`
     signing
+    checkstyle
+    pmd
+    id("com.diffplug.spotless") version "8.0.0"
+    id("com.github.spotbugs") version "6.4.4"
 }
 
 allprojects {
@@ -14,6 +18,54 @@ allprojects {
     repositories {
         mavenCentral()
     }
+}
+
+configure<CheckstyleExtension> {
+    toolVersion = "10.21.3"
+    configFile = rootProject.file("config/checkstyle/checkstyle.xml")
+    isShowViolations = true
+}
+
+configure<PmdExtension> {
+    toolVersion = "7.16.0"
+    isConsoleOutput = true
+    rulesMinimumPriority.set(5)
+    ruleSetFiles = files(rootProject.file("config/pmd/ruleset.xml"))
+    ruleSets = emptyList()
+}
+
+extensions.configure<com.diffplug.gradle.spotless.SpotlessExtension>("spotless") {
+    format("misc") {
+        target("*.md", "*.kts", "*.gradle.kts", "**/*.yml", "**/*.yaml", "**/.gitignore")
+        targetExclude("**/build/**", "**/.gradle/**")
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+    java {
+        target("src/*/java/**/*.java")
+        targetExclude("**/build/**")
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
+
+tasks.withType<com.github.spotbugs.snom.SpotBugsTask>().configureEach {
+    excludeFilter.set(rootProject.file("config/spotbugs/exclude.xml"))
+    reports.create("html") {
+        required.set(true)
+    }
+    reports.create("xml") {
+        required.set(false)
+    }
+}
+
+tasks.withType<Checkstyle>().configureEach {
+    exclude("**/internal/*Bindings.java")
+}
+
+tasks.withType<Pmd>().configureEach {
+    exclude("**/internal/*Bindings.java")
 }
 
 subprojects {
@@ -64,6 +116,10 @@ tasks.withType<JavaExec> {
         "--enable-preview",
         "--enable-native-access=ALL-UNNAMED"
     )
+}
+
+tasks.named("check") {
+    dependsOn("spotlessCheck")
 }
 
 // -- PDFium native binary download & bundling --
@@ -168,6 +224,8 @@ tasks.assemble {
 }
 
 dependencies {
+    compileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
+    testCompileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
     testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

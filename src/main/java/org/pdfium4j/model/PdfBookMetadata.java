@@ -9,7 +9,6 @@ import java.time.format.DateTimeParseException;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.Locale;
 
 /**
  * PDF implementation of {@link BookMetadata}.
@@ -43,6 +42,11 @@ public record PdfBookMetadata(
         XmpMetadata rawMetadata,
         Map<String, String> customFields
     ) implements BookMetadata {
+
+    private static final System.Logger LOG = System.getLogger(PdfBookMetadata.class.getName());
+    private static final Pattern PATTERN = Pattern.compile("^(\\d)\\1{9,12}$");
+    private static final Pattern REGEX = Pattern.compile("[^0-9Xx]");
+    private static final Pattern REGEXP = Pattern.compile("[,;]");
 
     public PdfBookMetadata {
         authors = Collections.unmodifiableList(authors);
@@ -92,12 +96,12 @@ public record PdfBookMetadata(
                 .or(() -> Optional.ofNullable(xmp.customFields().get("Language")))
                 .map(PdfBookMetadata::normalizeLanguage);
 
-        Optional<LocalDate> publishedDate = extractPublishedDate(xmp, document);
+        Optional<LocalDate> publishedDate = extractPublishedDate(xmp);
 
         List<String> subjects = new ArrayList<>(xmp.subjects());
         Optional<String> keywordsOpt = document.metadata(MetadataTag.KEYWORDS);
         if (keywordsOpt.isPresent()) {
-            for (String part : keywordsOpt.get().split("[,;]")) {
+            for (String part : REGEXP.split(keywordsOpt.get())) {
                 String trimmed = part.trim();
                 if (!trimmed.isBlank() && !subjects.contains(trimmed)) {
                     subjects.add(trimmed);
@@ -132,7 +136,7 @@ public record PdfBookMetadata(
 
         if (authors.isEmpty()) {
             document.metadata(MetadataTag.AUTHOR).ifPresent(author -> {
-                String[] parts = author.split("[,;]");
+                String[] parts = REGEXP.split(author);
                 for (String part : parts) {
                     String trimmed = part.trim();
                     if (!trimmed.isBlank() && !authors.contains(trimmed)) {
@@ -179,7 +183,7 @@ public record PdfBookMetadata(
             DateTimeFormatter.ofPattern("yyyy")                       // 2024 (year only)
     );
 
-    private static Optional<LocalDate> extractPublishedDate(XmpMetadata xmp, PdfDocument document) {
+    private static Optional<LocalDate> extractPublishedDate(XmpMetadata xmp) {
         List<String> candidates = new ArrayList<>();
         xmp.date().ifPresent(candidates::add);
         String createDate = xmp.customFields().get("CreateDate");
@@ -232,13 +236,11 @@ public record PdfBookMetadata(
     private static Map<String, String> extractCustomFields(XmpMetadata xmp, PdfDocument document) {
         Map<String, String> custom = new LinkedHashMap<>();
 
-        for (Map.Entry<String, String> entry : xmp.customFields().entrySet()) {
-            custom.put(entry.getKey(), entry.getValue());
-        }
+        custom.putAll(xmp.customFields());
 
         for (Map.Entry<String, String> entry : xmp.calibreFields().entrySet()) {
-            if (!entry.getKey().equalsIgnoreCase("series") &&
-                !entry.getKey().equalsIgnoreCase("series_index")) {
+            if (!"series".equalsIgnoreCase(entry.getKey()) &&
+                !"series_index".equalsIgnoreCase(entry.getKey())) {
                 custom.put("calibre:" + entry.getKey(), entry.getValue());
             }
         }
@@ -250,16 +252,16 @@ public record PdfBookMetadata(
             Map<String, String> infoDict = document.metadata();
             for (Map.Entry<String, String> entry : infoDict.entrySet()) {
                 String key = entry.getKey();
-                if (key.equalsIgnoreCase("Title") || key.equalsIgnoreCase("Author") ||
-                    key.equalsIgnoreCase("Subject") || key.equalsIgnoreCase("Keywords") ||
-                    key.equalsIgnoreCase("Creator") || key.equalsIgnoreCase("Producer") ||
-                    key.equalsIgnoreCase("CreationDate") || key.equalsIgnoreCase("ModDate")) {
+                if ("Title".equalsIgnoreCase(key) || "Author".equalsIgnoreCase(key) ||
+                    "Subject".equalsIgnoreCase(key) || "Keywords".equalsIgnoreCase(key) ||
+                    "Creator".equalsIgnoreCase(key) || "Producer".equalsIgnoreCase(key) ||
+                    "CreationDate".equalsIgnoreCase(key) || "ModDate".equalsIgnoreCase(key)) {
                     continue;
                 }
                 custom.put("info:" + key, entry.getValue());
             }
         } catch (Exception e) {
-            // Ignore metadata access errors
+            LOG.log(System.Logger.Level.DEBUG, "Ignoring supplemental Info dictionary metadata extraction failure", e);
         }
 
         return Collections.unmodifiableMap(custom);
@@ -267,10 +269,10 @@ public record PdfBookMetadata(
 
     private static String cleanIsbn(String id) {
         if (id == null) return null;
-        String cleaned = id.replaceAll("[^0-9Xx]", "").toUpperCase();
+        String cleaned = REGEX.matcher(id).replaceAll("").toUpperCase();
 
         // Reject uniform sequences like 0000000000 or 1111111111111 (fake ISBNs)
-        if (cleaned.matches("^(\\d)\\1{9,12}$")) return null;
+        if (PATTERN.matcher(cleaned).matches()) return null;
 
         if (cleaned.length() == 10 && isValidIsbn10(cleaned)) return cleaned;
         if (cleaned.length() == 13 && isValidIsbn13(cleaned)) return cleaned;
@@ -304,7 +306,7 @@ public record PdfBookMetadata(
         if (lower.length() == 2) return lower;
         int dashPos = lower.indexOf('-');
         if (dashPos > 0) return lower.substring(0, dashPos);
-        
+
         return lower;
     }
 
@@ -321,6 +323,6 @@ public record PdfBookMetadata(
      */
     public boolean isLikelyImageOnly() {
         // If no title, creators, or subjects, might be image-only
-        return !title.isPresent() && authors.isEmpty() && subjects.isEmpty();
+        return title.isEmpty() && authors.isEmpty() && subjects.isEmpty();
     }
 }

@@ -14,6 +14,15 @@ import java.awt.image.BufferedImage;
  */
 public record RenderResult(int width, int height, byte[] rgba) {
 
+    public RenderResult {
+        rgba = rgba.clone();
+    }
+
+    @Override
+    public byte[] rgba() {
+        return rgba.clone();
+    }
+
     /**
      * Convert to a {@link BufferedImage} for use with ImageIO or Graphics2D.
      *

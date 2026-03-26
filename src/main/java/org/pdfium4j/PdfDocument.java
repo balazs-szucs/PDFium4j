@@ -8,6 +8,7 @@ import org.pdfium4j.internal.EditBindings;
 import org.pdfium4j.internal.FfmHelper;
 import org.pdfium4j.internal.ViewBindings;
 import org.pdfium4j.model.*;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -50,10 +51,9 @@ public final class PdfDocument implements AutoCloseable {
     private final byte[] sourceBytes; // non-null when opened from byte[]
     private final PdfProcessingPolicy policy;
     private final Thread ownerThread;
-    private final Set<PdfPage> openPages;
+    private final List<PdfPage> openPages;
     private volatile boolean closed = false;
-    private boolean metadataDirty = false;
-    private boolean structurallyModified = false;
+    private volatile boolean structurallyModified = false;
     private final Map<MetadataTag, String> pendingMetadata = new LinkedHashMap<>();
     private String pendingXmpMetadata = null;
 
@@ -65,7 +65,7 @@ public final class PdfDocument implements AutoCloseable {
         this.sourceBytes = sourceBytes;
         this.policy = policy;
         this.ownerThread = ownerThread;
-        this.openPages = Collections.newSetFromMap(new IdentityHashMap<>());
+        this.openPages = new ArrayList<>();
     }
 
 
@@ -75,7 +75,7 @@ public final class PdfDocument implements AutoCloseable {
      * for scanning large numbers of files.
      *
      * <p>The returned {@link PdfProbeResult} indicates whether the file is valid,
-     * needs a password, is corrupt, or has other issues — without throwing exceptions.
+     * needs a password, is corrupt, or has other issues  -  without throwing exceptions.
      *
      * @param path path to the PDF file
      * @return probe result with status, page count, and encryption info
@@ -138,8 +138,7 @@ public final class PdfDocument implements AutoCloseable {
 
         PdfiumLibrary.ensureInitialized();
 
-        Arena arena = Arena.ofConfined();
-        try {
+        try (Arena arena = Arena.ofConfined()) {
             MemorySegment dataSeg = arena.allocateFrom(ValueLayout.JAVA_BYTE, data);
             MemorySegment doc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(
                     dataSeg, data.length, MemorySegment.NULL);
@@ -184,8 +183,6 @@ public final class PdfDocument implements AutoCloseable {
         } catch (Throwable t) {
             return PdfProbeResult.error(PdfProbeResult.Status.ERROR,
                     PdfErrorCode.UNKNOWN, "Probe failed: " + t.getMessage());
-        } finally {
-            arena.close();
         }
     }
 
@@ -263,9 +260,7 @@ public final class PdfDocument implements AutoCloseable {
             if (FfmHelper.isNull(doc)) {
                 throwLastError("Failed to open: " + path);
             }
-            PdfDocument result = new PdfDocument(doc, null, path, null, resolvedPolicy, Thread.currentThread());
-            doc = MemorySegment.NULL; // ownership transferred
-            return result;
+            return new PdfDocument(doc, null, path, null, resolvedPolicy, Thread.currentThread());
         } catch (PdfiumException e) {
             throw e;
         } catch (Throwable t) {
@@ -313,7 +308,6 @@ public final class PdfDocument implements AutoCloseable {
         // The arena must outlive the document because PDFium reads from the buffer
         // during the lifetime of the FPDF_DOCUMENT handle.
         Arena docArena = Arena.ofShared();
-        MemorySegment doc = MemorySegment.NULL;
         try {
             MemorySegment dataSeg = docArena.allocateFrom(JAVA_BYTE, data);
 
@@ -324,21 +318,16 @@ public final class PdfDocument implements AutoCloseable {
                 pwdSeg = MemorySegment.NULL;
             }
 
-            doc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(
+            MemorySegment loadedDoc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(
                     dataSeg, data.length, pwdSeg);
-            if (FfmHelper.isNull(doc)) {
+            if (FfmHelper.isNull(loadedDoc)) {
                 docArena.close();
                 throwLastError(errorContext);
             }
-            PdfDocument result = new PdfDocument(doc, docArena, null, data, policy, Thread.currentThread());
-            doc = MemorySegment.NULL; // ownership transferred
-            return result;
+            return new PdfDocument(loadedDoc, docArena, null, data, policy, Thread.currentThread());
         } catch (PdfiumException e) {
             throw e;
         } catch (Throwable t) {
-            if (!FfmHelper.isNull(doc)) {
-                try { ViewBindings.FPDF_CloseDocument.invokeExact(doc); } catch (Throwable ignored) {}
-            }
             docArena.close();
             throw new PdfiumException(errorContext, t);
         }
@@ -518,10 +507,9 @@ public final class PdfDocument implements AutoCloseable {
     }
 
     private static void validateDocumentSize(int documentBytes, PdfProcessingPolicy policy) {
-        long size = documentBytes;
-        if (size > policy.maxDocumentBytes()) {
+        if ((long) documentBytes > policy.maxDocumentBytes()) {
             throw new PdfiumException(
-                    "Document exceeds policy limit: " + size + " > " + policy.maxDocumentBytes() + " bytes");
+                    "Document exceeds policy limit: " + (long) documentBytes + " > " + policy.maxDocumentBytes() + " bytes");
         }
     }
 
@@ -637,7 +625,10 @@ public final class PdfDocument implements AutoCloseable {
                 throw new PdfiumException("FPDFPage_New failed for index " + pageIndex);
             }
             try {
-                int _ = (int) EditBindings.FPDFPage_GenerateContent.invokeExact(pageSeg);
+                int generated = (int) EditBindings.FPDFPage_GenerateContent.invokeExact(pageSeg);
+                if (generated == 0) {
+                    throw new PdfiumException("FPDFPage_GenerateContent failed for index " + pageIndex);
+                }
             } finally {
                 ViewBindings.FPDF_ClosePage.invokeExact(pageSeg);
             }
@@ -734,7 +725,7 @@ public final class PdfDocument implements AutoCloseable {
                     if (s.width() <= 0 || s.height() <= 0) {
                         warnings.add("Page " + i + " has zero or negative dimensions");
                     } else if (s.width() > 14400 || s.height() > 14400) {
-                        // 200 inches at 72 DPI — likely an engineering drawing or corrupted
+                        // 200 inches at 72 DPI  -  likely an engineering drawing or corrupted
                         warnings.add("Page " + i + " has unusually large dimensions: "
                                 + s.width() + "x" + s.height() + " points");
                     }
@@ -778,7 +769,10 @@ public final class PdfDocument implements AutoCloseable {
 
             // Second call: fill buffer
             MemorySegment buf = arena.allocate(needed);
-            long _ = (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, tagSeg, buf, needed);
+            long written = (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, tagSeg, buf, needed);
+            if (written <= 2) {
+                return Optional.empty();
+            }
 
             String value = FfmHelper.fromWideString(buf, needed);
             return value.isEmpty() ? Optional.empty() : Optional.of(value);
@@ -811,7 +805,6 @@ public final class PdfDocument implements AutoCloseable {
         Objects.requireNonNull(tag, "tag");
         Objects.requireNonNull(value, "value");
         pendingMetadata.put(tag, value);
-        metadataDirty = true;
     }
 
     /**
@@ -838,7 +831,6 @@ public final class PdfDocument implements AutoCloseable {
         ensureOpen();
         Objects.requireNonNull(xmpPacket, "xmpPacket");
         this.pendingXmpMetadata = xmpPacket;
-        metadataDirty = true;
     }
 
     /**
@@ -885,7 +877,10 @@ public final class PdfDocument implements AutoCloseable {
 
             // Second call: fill buffer
             MemorySegment buf = arena.allocate(needed);
-            long _ = (long) DocBindings.FPDF_GetPageLabel.invokeExact(handle, pageIndex, buf, needed);
+            long written = (long) DocBindings.FPDF_GetPageLabel.invokeExact(handle, pageIndex, buf, needed);
+            if (written <= 2) {
+                return Optional.empty();
+            }
 
             String label = FfmHelper.fromWideString(buf, needed);
             return label.isEmpty() ? Optional.empty() : Optional.of(label);
@@ -1072,7 +1067,7 @@ public final class PdfDocument implements AutoCloseable {
      *
      * <p>When only metadata has been modified (no page additions, deletions,
      * or imports), this uses a fast path that reads the original PDF bytes
-     * and appends an incremental update — avoiding the expensive native
+     * and appends an incremental update  -  avoiding the expensive native
      * {@code FPDF_SaveAsCopy} serialization entirely.
      *
      * @param path output file path
@@ -1149,6 +1144,7 @@ public final class PdfDocument implements AutoCloseable {
     /**
      * Returns the raw FPDF_DOCUMENT MemorySegment for direct PDFium FFM calls.
      */
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "This is an intentional low-level FFM escape hatch")
     public MemorySegment rawHandle() {
         ensureOpen();
         return handle;
@@ -1171,13 +1167,18 @@ public final class PdfDocument implements AutoCloseable {
 
     private void registerPage(PdfPage page) {
         synchronized (openPages) {
+            for (PdfPage existing : openPages) {
+                if (existing == page) {
+                    return;
+                }
+            }
             openPages.add(page);
         }
     }
 
     private void unregisterPage(PdfPage page) {
         synchronized (openPages) {
-            openPages.remove(page);
+            openPages.removeIf(existing -> existing == page);
         }
     }
 

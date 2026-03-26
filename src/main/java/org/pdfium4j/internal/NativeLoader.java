@@ -1,6 +1,7 @@
 package org.pdfium4j.internal;
 
 import org.pdfium4j.exception.NativeLoadException;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -49,7 +50,7 @@ public final class NativeLoader {
                 }
             } catch (Throwable t) {
                 loadError = t;
-                throw (t instanceof NativeLoadException nle) ? nle
+                throw (t instanceof NativeLoadException nativeLoadException) ? nativeLoadException
                         : new NativeLoadException("Failed to load native library", t);
             }
         }
@@ -152,6 +153,7 @@ public final class NativeLoader {
         return osKey + "-" + detectArch();
     }
 
+    @SuppressFBWarnings(value = "DMI_HARDCODED_ABSOLUTE_FILENAME", justification = "Musl detection requires probing standard linker locations")
     private static boolean isMusl() {
         // Check for musl dynamic linker
         try {

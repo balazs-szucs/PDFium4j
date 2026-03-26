@@ -502,7 +502,7 @@ class PdfDocumentTest {
             assertNotNull(saved);
             assertTrue(saved.length > 0, "Saved PDF should not be empty");
             // Verify it starts with %PDF
-            String header = new String(saved, 0, Math.min(5, saved.length));
+            String header = new String(saved, 0, Math.min(5, saved.length), StandardCharsets.ISO_8859_1);
             assertTrue(header.startsWith("%PDF"), "Saved file should be a valid PDF");
         }
     }
@@ -769,7 +769,7 @@ class PdfDocumentTest {
             doc.save(baos);
             byte[] saved = baos.toByteArray();
             assertTrue(saved.length > 0);
-            assertTrue(new String(saved, 0, 5).startsWith("%PDF"));
+            assertTrue(new String(saved, 0, 5, StandardCharsets.ISO_8859_1).startsWith("%PDF"));
         }
     }
 
@@ -838,27 +838,22 @@ class PdfDocumentTest {
         }
     }
 
-    private static Path cachedTestPdf;
-
     private Path getTestPdf() {
-        if (cachedTestPdf != null && Files.exists(cachedTestPdf)) {
-            return cachedTestPdf;
-        }
         var url = getClass().getResource("/test.pdf");
         if (url != null) {
             try {
-                cachedTestPdf = Path.of(url.toURI());
-                return cachedTestPdf;
+                return Path.of(url.toURI());
             } catch (URISyntaxException e) {
-                // fall through to generation
+                System.getLogger(PdfDocumentTest.class.getName())
+                        .log(System.Logger.Level.DEBUG, "Unable to resolve test PDF URI", e);
             }
         }
         // Generate a minimal PDF with text content
         try {
-            cachedTestPdf = Files.createTempFile("pdfium4j-test-", ".pdf");
-            cachedTestPdf.toFile().deleteOnExit();
-            Files.write(cachedTestPdf, minimalPdfWithText());
-            return cachedTestPdf;
+            Path tempPdf = Files.createTempFile("pdfium4j-test-", ".pdf");
+            tempPdf.toFile().deleteOnExit();
+            Files.write(tempPdf, minimalPdfWithText());
+            return tempPdf;
         } catch (IOException e) {
             System.err.println("Failed to create test PDF: " + e.getMessage());
             return null;
@@ -919,7 +914,7 @@ class PdfDocumentTest {
         Path outNoChanges = tempDir.resolve("no-changes.pdf");
         Path outFast = tempDir.resolve("fast-save.pdf");
 
-        // Save with no changes — should use fast path, returning original bytes
+        // Save with no changes  -  should use fast path, returning original bytes
         try (PdfDocument doc = PdfDocument.open(testPdf)) {
             doc.save(outNoChanges);
         }
@@ -1131,12 +1126,14 @@ class PdfDocumentTest {
                   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
                     <rdf:Description rdf:about=""
                         xmlns:dc="http://purl.org/dc/elements/1.1/">
-                      <dc:title><rdf:Alt><rdf:li xml:lang="x-default">%s</rdf:li></rdf:Alt></dc:title>
-                      <dc:creator><rdf:Seq><rdf:li>%s</rdf:li></rdf:Seq></dc:creator>
+                                            <dc:title><rdf:Alt><rdf:li xml:lang="x-default">{TITLE}</rdf:li></rdf:Alt></dc:title>
+                                            <dc:creator><rdf:Seq><rdf:li>{AUTHOR}</rdf:li></rdf:Seq></dc:creator>
                     </rdf:Description>
                   </rdf:RDF>
                 </x:xmpmeta>
-                <?xpacket end="w"?>""".formatted(title, author);
+                                <?xpacket end="w"?>"""
+                                .replace("{TITLE}", title)
+                                .replace("{AUTHOR}", author);
     }
 
     @Test
@@ -1210,7 +1207,7 @@ class PdfDocumentTest {
         Path pdf = tempDir.resolve("xmp-only.pdf");
         Files.copy(testPdf, pdf);
 
-        // Only XMP, no setMetadata — should still use fast path
+        // Only XMP, no setMetadata  -  should still use fast path
         try (PdfDocument doc = PdfDocument.open(pdf)) {
             doc.setXmpMetadata(buildBookloreXmp("XMP Only Title", "XMP Author"));
             doc.save(pdf);
