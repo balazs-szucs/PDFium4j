@@ -916,12 +916,12 @@ class PdfDocumentTest {
         Path testPdf = getTestPdf();
         if (testPdf == null) return;
 
-        Path outFull = tempDir.resolve("full-save.pdf");
+        Path outNoChanges = tempDir.resolve("no-changes.pdf");
         Path outFast = tempDir.resolve("fast-save.pdf");
 
-        // Full save (through FPDF_SaveAsCopy)
+        // Save with no changes — should use fast path, returning original bytes
         try (PdfDocument doc = PdfDocument.open(testPdf)) {
-            doc.save(outFull); // no metadata changes, triggers full save
+            doc.save(outNoChanges);
         }
 
         // Metadata-only save (fast path)
@@ -931,8 +931,12 @@ class PdfDocumentTest {
         }
 
         // Verify both produce valid PDFs
-        assertTrue(Files.size(outFull) > 0);
+        assertTrue(Files.size(outNoChanges) > 0);
         assertTrue(Files.size(outFast) > 0);
+
+        // No-changes save should produce same size as original
+        assertEquals(Files.size(testPdf), Files.size(outNoChanges),
+                "Save with no changes should preserve original file size exactly");
 
         // Verify the fast-save file contains the metadata
         try (PdfDocument doc = PdfDocument.open(outFast)) {
@@ -1133,5 +1137,92 @@ class PdfDocumentTest {
                   </rdf:RDF>
                 </x:xmpmeta>
                 <?xpacket end="w"?>""".formatted(title, author);
+    }
+
+    @Test
+    @EnabledIf("pdfiumAvailable")
+    void fileSizeStableAfterMetadataSave(@TempDir Path tempDir) throws IOException {
+        Path testPdf = getTestPdf();
+        if (testPdf == null) return;
+
+        long originalSize = Files.size(testPdf);
+        Path pdf = tempDir.resolve("stable.pdf");
+        Files.copy(testPdf, pdf);
+
+        // Save with metadata + XMP (simulates grimmory's write path)
+        try (PdfDocument doc = PdfDocument.open(pdf)) {
+            doc.setMetadata(MetadataTag.TITLE, "Test Title");
+            doc.setMetadata(MetadataTag.AUTHOR, "Test Author");
+            doc.setXmpMetadata(buildBookloreXmp("Test Title", "Test Author"));
+            doc.save(pdf);
+        }
+
+        long afterFirst = Files.size(pdf);
+        // Incremental update should add at most 20 KB for metadata + xref + trailer
+        assertTrue(afterFirst - originalSize < 20_000,
+                "First save should add at most 20 KB, but grew by " + (afterFirst - originalSize));
+
+        // Save again (simulates second metadata update)
+        try (PdfDocument doc = PdfDocument.open(pdf)) {
+            doc.setMetadata(MetadataTag.TITLE, "Updated Title");
+            doc.setMetadata(MetadataTag.AUTHOR, "Updated Author");
+            doc.setXmpMetadata(buildBookloreXmp("Updated Title", "Updated Author"));
+            doc.save(pdf);
+        }
+
+        long afterSecond = Files.size(pdf);
+        // Second save grows by another incremental update
+        assertTrue(afterSecond - afterFirst < 20_000,
+                "Second save should add at most 20 KB, but grew by " + (afterSecond - afterFirst));
+
+        // Total size should be within 40 KB of original
+        assertTrue(afterSecond < originalSize + 40_000,
+                "After two saves, file should be within 40 KB of original (" + originalSize
+                        + "), but is " + afterSecond);
+    }
+
+    @Test
+    @EnabledIf("pdfiumAvailable")
+    void saveWithNoChangesPreservesSize(@TempDir Path tempDir) throws IOException {
+        Path testPdf = getTestPdf();
+        if (testPdf == null) return;
+
+        long originalSize = Files.size(testPdf);
+        Path pdf = tempDir.resolve("unchanged.pdf");
+        Files.copy(testPdf, pdf);
+
+        // Save with no changes
+        try (PdfDocument doc = PdfDocument.open(pdf)) {
+            doc.save(pdf);
+        }
+
+        assertEquals(originalSize, Files.size(pdf),
+                "Save with no changes should not change file size");
+    }
+
+    @Test
+    @EnabledIf("pdfiumAvailable")
+    void xmpOnlySaveUsesIncrementalUpdate(@TempDir Path tempDir) throws IOException {
+        Path testPdf = getTestPdf();
+        if (testPdf == null) return;
+
+        long originalSize = Files.size(testPdf);
+        Path pdf = tempDir.resolve("xmp-only.pdf");
+        Files.copy(testPdf, pdf);
+
+        // Only XMP, no setMetadata — should still use fast path
+        try (PdfDocument doc = PdfDocument.open(pdf)) {
+            doc.setXmpMetadata(buildBookloreXmp("XMP Only Title", "XMP Author"));
+            doc.save(pdf);
+        }
+
+        long afterSave = Files.size(pdf);
+        assertTrue(afterSave - originalSize < 20_000,
+                "XMP-only save should add at most 20 KB, but grew by " + (afterSave - originalSize));
+
+        try (PdfDocument doc = PdfDocument.open(pdf)) {
+            String xmp = doc.xmpMetadataString();
+            assertTrue(xmp.contains("XMP Only Title"), "XMP should be present");
+        }
     }
 }

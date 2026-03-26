@@ -29,7 +29,14 @@ public final class XmpMetadataParser {
     private static final String NS_XMP = "http://ns.adobe.com/xap/1.0/";
     private static final String NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
-    private XmpMetadataParser() {}
+    private static final String NS_CALIBRE_SI = "http://calibre-ebook.com/xmp-namespace/seriesIndex";
+
+    private static final Set<String> HANDLED_NAMESPACES = Set.of(
+            NS_DC, NS_PDFA_ID, NS_CALIBRE, NS_RDF,
+            "http://www.w3.org/2000/xmlns/",   // xmlns declarations
+            "http://www.w3.org/XML/1998/namespace", // xml:lang etc.
+            "adobe:ns:meta/"                    // x:xmpmeta wrapper
+    );
 
     /**
      * Parse XMP metadata from raw XML bytes.
@@ -148,8 +155,8 @@ public final class XmpMetadataParser {
         // Calibre fields
         Map<String, String> calibreFields = extractCalibreFields(doc);
 
-        // Custom fields from xmp: namespace
-        Map<String, String> customFields = extractXmpFields(doc);
+        // Custom fields from all non-standard namespaces
+        Map<String, String> customFields = extractCustomFields(doc);
 
         return new XmpMetadata(title, creators, description, subjects,
                 publisher, language, date, rights, identifiers,
@@ -242,7 +249,8 @@ public final class XmpMetadataParser {
     }
 
     /**
-     * Extract Calibre-specific metadata fields.
+     * Extract Calibre-specific metadata fields, including series_index from
+     * the calibreSI namespace nested inside calibre:series.
      */
     private static Map<String, String> extractCalibreFields(Document doc) {
         Map<String, String> fields = new LinkedHashMap<>();
@@ -280,6 +288,14 @@ public final class XmpMetadataParser {
                                 fields.put(child.getLocalName(), text.trim());
                             }
                         }
+                        // Also extract calibreSI:series_index nested inside calibre:series
+                        NodeList siNodes = childElem.getElementsByTagNameNS(NS_CALIBRE_SI, "series_index");
+                        if (siNodes.getLength() > 0) {
+                            String siText = siNodes.item(0).getTextContent();
+                            if (siText != null && !siText.isBlank()) {
+                                fields.put("series_index", siText.trim());
+                            }
+                        }
                     }
                 }
             }
@@ -288,15 +304,53 @@ public final class XmpMetadataParser {
     }
 
     /**
-     * Extract standard XMP fields.
+     * Extract fields from all non-standard namespaces (xmp:, booklore:, etc.)
+     * into the customFields map with "prefix:localName" keys.
      */
-    private static Map<String, String> extractXmpFields(Document doc) {
+    private static Map<String, String> extractCustomFields(Document doc) {
         Map<String, String> fields = new LinkedHashMap<>();
-        String[] xmpFields = {"CreateDate", "ModifyDate", "CreatorTool", "MetadataDate"};
-        for (String field : xmpFields) {
-            String value = getElementText(doc, NS_XMP, field);
-            if (value != null && !value.isBlank()) {
-                fields.put(field, value.trim());
+        NodeList descNodes = doc.getElementsByTagNameNS(NS_RDF, "Description");
+        for (int i = 0; i < descNodes.getLength(); i++) {
+            Element desc = (Element) descNodes.item(i);
+
+            // Check attributes on Description elements
+            NamedNodeMap attrs = desc.getAttributes();
+            for (int j = 0; j < attrs.getLength(); j++) {
+                Node attr = attrs.item(j);
+                String ns = attr.getNamespaceURI();
+                if (ns != null && !HANDLED_NAMESPACES.contains(ns)) {
+                    String prefix = attr.getPrefix();
+                    String key = (prefix != null && !prefix.isEmpty())
+                            ? prefix + ":" + attr.getLocalName()
+                            : attr.getLocalName();
+                    fields.put(key, attr.getNodeValue());
+                }
+            }
+
+            // Check child elements
+            NodeList children = desc.getChildNodes();
+            for (int j = 0; j < children.getLength(); j++) {
+                Node child = children.item(j);
+                if (child.getNodeType() != Node.ELEMENT_NODE) continue;
+                String ns = child.getNamespaceURI();
+                if (ns == null || HANDLED_NAMESPACES.contains(ns) || NS_CALIBRE.equals(ns)) continue;
+
+                Element childElem = (Element) child;
+                String prefix = child.getPrefix();
+                String key = (prefix != null && !prefix.isEmpty())
+                        ? prefix + ":" + child.getLocalName()
+                        : child.getLocalName();
+
+                // Handle RDF containers (Bag/Seq/Alt)
+                List<String> listValues = getListFromRdfContainer(childElem);
+                if (!listValues.isEmpty()) {
+                    fields.put(key, String.join(",", listValues));
+                } else {
+                    String text = getDirectTextContent(childElem);
+                    if (text != null && !text.isBlank()) {
+                        fields.put(key, text.trim());
+                    }
+                }
             }
         }
         return fields;

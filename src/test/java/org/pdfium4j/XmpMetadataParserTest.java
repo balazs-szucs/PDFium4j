@@ -133,8 +133,8 @@ class XmpMetadataParserTest {
     @Test
     void parsesXmpCustomFields() {
         XmpMetadata meta = XmpMetadataParser.parse(FULL_XMP);
-        assertTrue(meta.customFields().containsKey("CreatorTool"));
-        assertEquals("TestTool", meta.customFields().get("CreatorTool"));
+        assertTrue(meta.customFields().containsKey("xmp:CreatorTool"));
+        assertEquals("TestTool", meta.customFields().get("xmp:CreatorTool"));
     }
 
     @Test
@@ -356,8 +356,8 @@ class XmpMetadataParserTest {
     @Test
     void parsesBookloreXmpFields() {
         XmpMetadata meta = XmpMetadataParser.parse(BOOKLORE_XMP);
-        assertTrue(meta.customFields().containsKey("CreatorTool"));
-        assertEquals("Booklore", meta.customFields().get("CreatorTool"));
+        assertTrue(meta.customFields().containsKey("xmp:CreatorTool"));
+        assertEquals("Booklore", meta.customFields().get("xmp:CreatorTool"));
     }
 
     @Test
@@ -392,6 +392,121 @@ class XmpMetadataParserTest {
         assertEquals(original.rights(), parsed.rights());
         assertEquals(original.calibreSeries().orElse(""), parsed.calibreSeries().orElse(""));
         assertEquals(original.calibreSeriesIndex().orElse(0), parsed.calibreSeriesIndex().orElse(0));
+    }
+
+    @Test
+    void parsesBookloreCustomNamespaceFields() {
+        XmpMetadata meta = XmpMetadataParser.parse(BOOKLORE_XMP);
+        assertEquals("Idiomatic Python for the Impatient Programmer",
+                meta.customFields().get("booklore:subtitle"));
+        assertEquals("9781718500921", meta.customFields().get("booklore:isbn13"));
+        assertEquals("1718500920", meta.customFields().get("booklore:isbn10"));
+        assertEquals("52555538", meta.customFields().get("booklore:goodreadsId"));
+        assertEquals("4.4", meta.customFields().get("booklore:goodreadsRating"));
+        assertEquals("713", meta.customFields().get("booklore:pageCount"));
+    }
+
+    @Test
+    void parsesBookloreRatingsFromCustomFields() {
+        String xmp = """
+                <x:xmpmeta xmlns:x="adobe:ns:meta/">
+                  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                    <rdf:Description rdf:about=""
+                        xmlns:booklore="http://booklore.org/metadata/1.0/">
+                      <booklore:goodreadsRating>4.4</booklore:goodreadsRating>
+                      <booklore:hardcoverRating>4.2</booklore:hardcoverRating>
+                      <booklore:amazonRating>4.5</booklore:amazonRating>
+                      <booklore:rating>3.8</booklore:rating>
+                      <booklore:lubimyczytacRating>8.5</booklore:lubimyczytacRating>
+                      <booklore:ranobedbRating>7.8</booklore:ranobedbRating>
+                    </rdf:Description>
+                  </rdf:RDF>
+                </x:xmpmeta>
+                """;
+        XmpMetadata meta = XmpMetadataParser.parse(xmp);
+        assertEquals("4.4", meta.customFields().get("booklore:goodreadsRating"));
+        assertEquals("4.2", meta.customFields().get("booklore:hardcoverRating"));
+        assertEquals("4.5", meta.customFields().get("booklore:amazonRating"));
+        assertEquals("3.8", meta.customFields().get("booklore:rating"));
+        assertEquals("8.5", meta.customFields().get("booklore:lubimyczytacRating"));
+        assertEquals("7.8", meta.customFields().get("booklore:ranobedbRating"));
+    }
+
+    @Test
+    void parsesBookloreExternalIds() {
+        String xmp = """
+                <x:xmpmeta xmlns:x="adobe:ns:meta/">
+                  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                    <rdf:Description rdf:about=""
+                        xmlns:booklore="http://booklore.org/metadata/1.0/">
+                      <booklore:goodreadsId>52555538</booklore:goodreadsId>
+                      <booklore:hardcoverId>dead-simple-python</booklore:hardcoverId>
+                      <booklore:hardcoverBookId>547027</booklore:hardcoverBookId>
+                      <booklore:googleId>gid123</booklore:googleId>
+                      <booklore:asin>B08KGS5V1R</booklore:asin>
+                      <booklore:comicvineId>cv345</booklore:comicvineId>
+                      <booklore:lubimyczytacId>lub678</booklore:lubimyczytacId>
+                      <booklore:ranobedbId>ran901</booklore:ranobedbId>
+                    </rdf:Description>
+                  </rdf:RDF>
+                </x:xmpmeta>
+                """;
+        XmpMetadata meta = XmpMetadataParser.parse(xmp);
+        assertEquals("52555538", meta.customFields().get("booklore:goodreadsId"));
+        assertEquals("dead-simple-python", meta.customFields().get("booklore:hardcoverId"));
+        assertEquals("547027", meta.customFields().get("booklore:hardcoverBookId"));
+        assertEquals("gid123", meta.customFields().get("booklore:googleId"));
+        assertEquals("B08KGS5V1R", meta.customFields().get("booklore:asin"));
+        assertEquals("cv345", meta.customFields().get("booklore:comicvineId"));
+        assertEquals("lub678", meta.customFields().get("booklore:lubimyczytacId"));
+        assertEquals("ran901", meta.customFields().get("booklore:ranobedbId"));
+    }
+
+    @Test
+    void parsesMultipleDescriptionBlocksWithSameNamespace() {
+        String xmp = """
+                <x:xmpmeta xmlns:x="adobe:ns:meta/">
+                  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                    <rdf:Description rdf:about=""
+                        xmlns:booklore="http://booklore.org/metadata/1.0/">
+                      <booklore:creatorTool>Booklore</booklore:creatorTool>
+                      <booklore:metadataDate>2025-06-01</booklore:metadataDate>
+                    </rdf:Description>
+                    <rdf:Description rdf:about=""
+                        xmlns:booklore="http://booklore.org/metadata/1.0/">
+                      <booklore:goodreadsRating>4.4</booklore:goodreadsRating>
+                      <booklore:isbn13>9781718500921</booklore:isbn13>
+                    </rdf:Description>
+                  </rdf:RDF>
+                </x:xmpmeta>
+                """;
+        XmpMetadata meta = XmpMetadataParser.parse(xmp);
+        // Both Description blocks should contribute to customFields
+        assertEquals("Booklore", meta.customFields().get("booklore:creatorTool"));
+        assertEquals("2025-06-01", meta.customFields().get("booklore:metadataDate"));
+        assertEquals("4.4", meta.customFields().get("booklore:goodreadsRating"));
+        assertEquals("9781718500921", meta.customFields().get("booklore:isbn13"));
+    }
+
+    @Test
+    void parsesCalibreSeriesIndexFromStructuredValue() {
+        String xmp = """
+                <x:xmpmeta xmlns:x="adobe:ns:meta/">
+                  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                    <rdf:Description rdf:about=""
+                        xmlns:calibre="http://calibre-ebook.com/xmp-namespace"
+                        xmlns:calibreSI="http://calibre-ebook.com/xmp-namespace/seriesIndex">
+                      <calibre:series rdf:parseType="Resource">
+                        <rdf:value>The Dark Tower</rdf:value>
+                        <calibreSI:series_index>3.5</calibreSI:series_index>
+                      </calibre:series>
+                    </rdf:Description>
+                  </rdf:RDF>
+                </x:xmpmeta>
+                """;
+        XmpMetadata meta = XmpMetadataParser.parse(xmp);
+        assertEquals("The Dark Tower", meta.calibreSeries().orElse(""));
+        assertEquals(3.5, meta.calibreSeriesIndex().orElse(0));
     }
 
     @Test
@@ -430,9 +545,16 @@ class XmpMetadataParserTest {
         assertTrue(xmpPacket.contains("booklore:goodreadsId"));
         assertTrue(xmpPacket.contains("12345"));
 
-        // Parse it back — Dublin Core should survive
+        // Parse it back — Dublin Core and booklore fields should survive
         XmpMetadata parsed = XmpMetadataParser.parse(xmpPacket);
         assertEquals("Test Title", parsed.title().orElse(""));
         assertEquals(List.of("Test Author"), parsed.creators());
+
+        // Booklore fields should be in customFields with prefix:localName keys
+        assertEquals("An Epic Subtitle", parsed.customFields().get("booklore:subtitle"));
+        assertEquals("9781234567890", parsed.customFields().get("booklore:isbn13"));
+        assertEquals("1234567890", parsed.customFields().get("booklore:isbn10"));
+        assertEquals("12345", parsed.customFields().get("booklore:goodreadsId"));
+        assertEquals("4.5", parsed.customFields().get("booklore:goodreadsRating"));
     }
 }

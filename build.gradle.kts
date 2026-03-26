@@ -9,7 +9,7 @@ plugins {
 
 allprojects {
     group = "org.grimmory"
-    version = "0.4.0"
+    version = "0.6.0"
 
     repositories {
         mavenCentral()
@@ -83,6 +83,15 @@ val pdfiumPlatforms = mapOf(
     "windows-x64"      to "win-x64"
 )
 
+// When set (e.g. -PpdfiumPlatformFilter=linux-musl-x64), only that platform
+// is downloaded and extracted. Useful in composite-build / container scenarios.
+val platformFilter = findProperty("pdfiumPlatformFilter")?.toString()
+val activePlatforms = if (platformFilter != null) {
+    pdfiumPlatforms.filterKeys { it == platformFilter }
+} else {
+    pdfiumPlatforms
+}
+
 val pdfiumArchiveDir = layout.buildDirectory.dir("pdfium-archives")
 val pdfiumNativesDir = layout.buildDirectory.dir("generated-natives")
 
@@ -93,7 +102,7 @@ val downloadPdfiumBinaries by tasks.registering {
         val dir = pdfiumArchiveDir.get().asFile
         dir.mkdirs()
         val base = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/$pdfiumVersion"
-        pdfiumPlatforms.values.forEach { remoteName ->
+        activePlatforms.values.forEach { remoteName ->
             val target = dir.resolve("pdfium-$remoteName.tgz")
             if (!target.exists()) {
                 logger.lifecycle("Downloading pdfium-$remoteName.tgz …")
@@ -119,7 +128,7 @@ val extractPdfiumBinaries by tasks.registering {
     doLast {
         val nativesRoot = pdfiumNativesDir.get().asFile.resolve("natives")
         nativesRoot.deleteRecursively()
-        pdfiumPlatforms.forEach { (localName, remoteName) ->
+        activePlatforms.forEach { (localName, remoteName) ->
             val archive = pdfiumArchiveDir.get().asFile.resolve("pdfium-$remoteName.tgz")
             val platformDir = nativesRoot.resolve(localName)
             platformDir.mkdirs()
