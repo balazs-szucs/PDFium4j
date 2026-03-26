@@ -8,6 +8,7 @@ import org.pdfium4j.internal.FfmHelper;
 import org.pdfium4j.internal.TextBindings;
 import org.pdfium4j.internal.ViewBindings;
 import org.pdfium4j.model.*;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -118,7 +119,7 @@ public final class PdfPage implements AutoCloseable {
      * @return the page text, or empty string if no text content
      */
     public String extractText() {
-        return withTextPage("", "Failed to extract text", textPage -> {
+        return withTextPage("Failed to extract text", textPage -> {
             int charCount = (int) TextBindings.FPDFText_CountChars.invokeExact(textPage);
             if (charCount <= 0) {
                 return "";
@@ -145,7 +146,7 @@ public final class PdfPage implements AutoCloseable {
      * @return character count, or 0 if no text
      */
     public int charCount() {
-        return withTextPage(0, "Failed to count characters", textPage -> {
+        return withTextPage("Failed to count characters", textPage -> {
             int count = (int) TextBindings.FPDFText_CountChars.invokeExact(textPage);
             return Math.max(0, count);
         });
@@ -328,7 +329,7 @@ public final class PdfPage implements AutoCloseable {
      * @return list of character info records, or empty list if no text
      */
     public List<TextCharInfo> extractTextWithBounds() {
-        return withTextPage(List.of(), "Failed to extract text with bounds", textPage -> {
+        return withTextPage("Failed to extract text with bounds", textPage -> {
             int charCount = (int) TextBindings.FPDFText_CountChars.invokeExact(textPage);
             if (charCount <= 0) {
                 return List.of();
@@ -460,7 +461,7 @@ public final class PdfPage implements AutoCloseable {
      * @return list of detected web links, or empty list if none
      */
     public List<PdfLink> webLinks() {
-        return withTextPage(List.of(), "Failed to extract web links", textPage -> {
+        return withTextPage("Failed to extract web links", textPage -> {
             MemorySegment pageLink = MemorySegment.NULL;
             try {
                 pageLink = (MemorySegment) TextBindings.FPDFLink_LoadWebLinks.invokeExact(textPage);
@@ -526,6 +527,7 @@ public final class PdfPage implements AutoCloseable {
     /**
      * Returns the raw FPDF_PAGE MemorySegment for direct PDFium FFM calls.
      */
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "This is an intentional low-level FFM escape hatch")
     public MemorySegment rawHandle() {
         ensureOpen();
         return handle;
@@ -536,7 +538,7 @@ public final class PdfPage implements AutoCloseable {
         T apply(MemorySegment textPage) throws Throwable;
     }
 
-    private <T> T withTextPage(T emptyValue, String errorContext, TextPageFunction<T> action) {
+    private <T> T withTextPage(String errorContext, TextPageFunction<T> action) {
         ensureOpen();
         MemorySegment textPage = MemorySegment.NULL;
         try {

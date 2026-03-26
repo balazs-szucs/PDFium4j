@@ -24,18 +24,19 @@ import static java.lang.foreign.ValueLayout.*;
  * then applies pure-Java incremental updates for Info dictionary and XMP metadata.
  * <p>
  * Incremental updates (PDF spec §7.5.6) append new objects, a new xref section,
- * and a new trailer at the end of the file — the original bytes are never modified.
+ * and a new trailer at the end of the file  -  the original bytes are never modified.
  * This is the standard mechanism used by all PDF editors.
  */
 final class PdfSaver {
 
     private static final ThreadLocal<ByteArrayOutputStream> WRITE_BUFFER = new ThreadLocal<>();
+    private static final Pattern PATTERN = Pattern.compile("/Metadata\\s+\\d+\\s+\\d+\\s+R");
 
     private PdfSaver() {}
 
     /**
      * Apply an incremental update to existing PDF bytes without native serialization.
-     * This is the fast path for metadata-only changes — it reads the original file
+     * This is the fast path for metadata-only changes  -  it reads the original file
      * and appends new Info/XMP objects + xref + trailer at the end.
      */
     static byte[] applyIncrementalUpdate(byte[] originalPdf, Map<MetadataTag, String> pendingMetadata, String pendingXmp) {
@@ -87,7 +88,7 @@ final class PdfSaver {
 
     /**
      * Append a PDF incremental update containing new Info dictionary and/or XMP metadata objects.
-     * This appends after the existing %%EOF — the original file bytes are untouched.
+     * This appends after the existing %%EOF  -  the original file bytes are untouched.
      */
     private static byte[] appendIncrementalUpdate(byte[] pdf, Map<MetadataTag, String> metadata, String xmp) {
         String text = new String(pdf, StandardCharsets.ISO_8859_1);
@@ -96,7 +97,7 @@ final class PdfSaver {
         int prevXrefOffset = findLastStartxrefValue(text);
 
         // Parse existing trailer to get /Size and /Root
-        TrailerInfo trailer = parseTrailer(pdf, text);
+        TrailerInfo trailer = parseTrailer(text);
 
         int maxObjNum = findMaxObjectNumber(text);
         int nextObj = maxObjNum + 1;
@@ -124,13 +125,12 @@ final class PdfSaver {
         if (xmp != null && !xmp.isEmpty()) {
             xmpObjNum = nextObj++;
             byte[] xmpBytes = xmp.getBytes(StandardCharsets.UTF_8);
-            StringBuilder xmpObj = new StringBuilder();
-            xmpObj.append(xmpObjNum).append(" 0 obj\n");
-            xmpObj.append("<< /Type /Metadata /Subtype /XML /Length ").append(xmpBytes.length).append(" >>\n");
-            xmpObj.append("stream\n");
-            xmpObj.append(xmp);
-            xmpObj.append("\nendstream\nendobj\n");
-            newObjects.put(xmpObjNum, xmpObj.toString());
+            String xmpObj = xmpObjNum + " 0 obj\n" +
+                    "<< /Type /Metadata /Subtype /XML /Length " + xmpBytes.length + " >>\n" +
+                    "stream\n" +
+                    xmp +
+                    "\nendstream\nendobj\n";
+            newObjects.put(xmpObjNum, xmpObj);
         }
 
         // Build the incremental update
@@ -151,7 +151,7 @@ final class PdfSaver {
         // Write one subsection per object (or contiguous ranges)
         for (Map.Entry<Integer, Integer> entry : objOffsets.entrySet()) {
             update.append(entry.getKey()).append(" 1\n");
-            update.append(String.format("%010d 00000 n \r\n", entry.getValue()));
+            update.append(String.format("%010d 00000 n \r%n", entry.getValue()));
         }
 
         // Write new trailer
@@ -162,13 +162,6 @@ final class PdfSaver {
             update.append(" /Info ").append(infoObjNum).append(" 0 R");
         } else if (trailer.infoRef != null) {
             update.append(" /Info ").append(trailer.infoRef);
-        }
-        if (xmpObjNum > 0) {
-            // Catalog /Metadata needs updating too — but for incremental update
-            // the trailer doesn't carry /Metadata; it goes in the Catalog.
-            // For simplicity, we write a new Catalog object with /Metadata ref.
-            // Actually: /Info is in trailer, /Metadata is in Catalog. For XMP we need
-            // to update the Catalog. Let's handle this below.
         }
         update.append(" /Prev ").append(prevXrefOffset);
         update.append(" >>\n");
@@ -183,7 +176,7 @@ final class PdfSaver {
 
         // If XMP object was added, we need to also update the Catalog to reference it
         if (xmpObjNum > 0) {
-            result = appendCatalogUpdate(result, trailer, xmpObjNum, nextObj, xrefOffset);
+            result = appendCatalogUpdate(result, trailer, xmpObjNum, nextObj);
         }
 
         return result;
@@ -192,7 +185,7 @@ final class PdfSaver {
     /**
      * Append another incremental update that rewrites the Catalog object with a /Metadata reference.
      */
-    private static byte[] appendCatalogUpdate(byte[] pdf, TrailerInfo trailer, int metadataObjNum, int sizeBase, int prevXrefOffset) {
+    private static byte[] appendCatalogUpdate(byte[] pdf, TrailerInfo trailer, int metadataObjNum, int sizeBase) {
         String text = new String(pdf, StandardCharsets.ISO_8859_1);
 
         // Find the Catalog object and its contents
@@ -206,7 +199,7 @@ final class PdfSaver {
 
         // Remove existing /Metadata if present, add our new one
         String dict = catalogDict;
-        dict = dict.replaceFirst("/Metadata\\s+\\d+\\s+\\d+\\s+R", "");
+        dict = PATTERN.matcher(dict).replaceFirst("");
         // Insert /Metadata ref before the closing >>
         int closeIdx = dict.lastIndexOf(">>");
         if (closeIdx >= 0) {
@@ -228,7 +221,7 @@ final class PdfSaver {
         int xrefOffset = baseOffset + update.length();
         update.append("xref\n");
         update.append(catalogObjNum).append(" 1\n");
-        update.append(String.format("%010d 00000 n \r\n", catalogOffset));
+        update.append(String.format("%010d 00000 n \r%n", catalogOffset));
 
         update.append("trailer\n");
         update.append("<< /Size ").append(sizeBase);
@@ -253,7 +246,7 @@ final class PdfSaver {
 
     /**
      * Write or replace the XMP metadata packet in the PDF by in-place replacement
-     * (without incremental update — used when XMP packet already exists with padding).
+     * (without incremental update  -  used when XMP packet already exists with padding).
      */
     static byte[] replaceXmpPacketInPlace(byte[] pdf, String xmpPacket) {
         byte[] xmpBytes = xmpPacket.getBytes(StandardCharsets.UTF_8);
@@ -287,7 +280,7 @@ final class PdfSaver {
 
     private record TrailerInfo(String rootRef, String infoRef) {}
 
-    private static TrailerInfo parseTrailer(byte[] pdf, String text) {
+    private static TrailerInfo parseTrailer(String text) {
         // Try traditional trailer first
         String rootRef = findTrailerEntry(text, "Root");
         String infoRef = findTrailerEntry(text, "Info");
@@ -474,6 +467,7 @@ final class PdfSaver {
         return -1;
     }
 
+    @SuppressWarnings("PMD.UnusedFormalParameter")
     private static int writeBlockCallback(MemorySegment pThis, MemorySegment pData, long size) {
         ByteArrayOutputStream baos = WRITE_BUFFER.get();
         if (baos == null || size <= 0) return 0;

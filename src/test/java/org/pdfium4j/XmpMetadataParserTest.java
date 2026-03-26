@@ -545,7 +545,7 @@ class XmpMetadataParserTest {
         assertTrue(xmpPacket.contains("booklore:goodreadsId"));
         assertTrue(xmpPacket.contains("12345"));
 
-        // Parse it back — Dublin Core and booklore fields should survive
+        // Parse it back  -  Dublin Core and booklore fields should survive
         XmpMetadata parsed = XmpMetadataParser.parse(xmpPacket);
         assertEquals("Test Title", parsed.title().orElse(""));
         assertEquals(List.of("Test Author"), parsed.creators());

@@ -22,6 +22,6 @@ public record PageSize(float width, float height) {
 
     private static int safePixels(float points, int dpi) {
         long px = Math.round((double) points * dpi / 72.0);
-        return (int) Math.clamp(px, 0, Integer.MAX_VALUE);
+        return Math.clamp(px, 0, Integer.MAX_VALUE);
     }
 }

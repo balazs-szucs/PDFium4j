@@ -1,6 +1,7 @@
 package org.pdfium4j;
 
 import org.pdfium4j.model.XmpMetadata;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -26,7 +27,6 @@ public final class XmpMetadataParser {
     private static final String NS_DC = "http://purl.org/dc/elements/1.1/";
     private static final String NS_PDFA_ID = "http://www.aiim.org/pdfa/ns/id/";
     private static final String NS_CALIBRE = "http://calibre-ebook.com/xmp-namespace";
-    private static final String NS_XMP = "http://ns.adobe.com/xap/1.0/";
     private static final String NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 
     private static final String NS_CALIBRE_SI = "http://calibre-ebook.com/xmp-namespace/seriesIndex";
@@ -44,6 +44,7 @@ public final class XmpMetadataParser {
      * @param xmpBytes the raw XMP XML bytes (as returned by PdfDocument.xmpMetadata())
      * @return parsed metadata, or empty metadata if parsing fails
      */
+    @SuppressFBWarnings(value = "REC_CATCH_EXCEPTION", justification = "Corrupt third-party XMP requires broad fallback parsing")
     public static XmpMetadata parse(byte[] xmpBytes) {
         if (xmpBytes == null || xmpBytes.length == 0) {
             return XmpMetadata.empty();
@@ -74,6 +75,7 @@ public final class XmpMetadataParser {
      * @param xmpXml the XMP XML string
      * @return parsed metadata, or empty metadata if parsing fails
      */
+    @SuppressFBWarnings(value = "REC_CATCH_EXCEPTION", justification = "Malformed metadata should degrade to empty metadata instead of failing the document")
     public static XmpMetadata parse(String xmpXml) {
         if (xmpXml == null || xmpXml.isBlank()) {
             return XmpMetadata.empty();
@@ -121,9 +123,8 @@ public final class XmpMetadataParser {
         }
 
         // Nitro PDF embeds stray BOMs inside element text
-        String replace = s.replace("\uFEFF", "");
 
-        return replace;
+        return s.replace("\uFEFF", "");
     }
 
     /**

@@ -2,12 +2,17 @@ package org.pdfium4j.exception;
 
 import org.pdfium4j.model.PdfErrorCode;
 
+import java.io.Serial;
+
 /**
  * Base exception for all PDFium operations.
  * Carries structured error information including the PDFium error code
  * and the operation that failed.
  */
 public class PdfiumException extends RuntimeException {
+
+    @Serial
+    private static final long serialVersionUID = 1L;
 
     private final PdfErrorCode errorCode;
     private final String operation;
