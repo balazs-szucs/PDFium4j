@@ -1121,39 +1121,37 @@ class PdfDocumentTest {
     return pdf.getBytes(StandardCharsets.US_ASCII);
   }
 
-  // --- Metadata-only fast save tests ---
+  // --- Metadata save correctness tests ---
 
   @Test
   @EnabledIf("pdfiumAvailable")
-  void metadataOnlySaveIsFasterThanFullSave(@TempDir Path tempDir) throws IOException {
+  void saveWithAndWithoutMetadataProducesValidPdfs(@TempDir Path tempDir) throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
 
     Path outNoChanges = tempDir.resolve("no-changes.pdf");
     Path outFast = tempDir.resolve("fast-save.pdf");
 
-    // Save with no changes  -  should use fast path, returning original bytes
+    // Save with no changes - always goes through PDFium native serialization
     try (PdfDocument doc = PdfDocument.open(testPdf)) {
       doc.save(outNoChanges);
     }
 
-    // Metadata-only save (fast path)
+    // Metadata save (always through PDFium + validated incremental update)
     try (PdfDocument doc = PdfDocument.open(testPdf)) {
       doc.setMetadata(MetadataTag.TITLE, "Fast Save Title");
       doc.save(outFast);
     }
 
-    // Verify both produce valid PDFs
+    // Verify both produce valid PDFs that can be re-opened
     assertTrue(Files.size(outNoChanges) > 0);
     assertTrue(Files.size(outFast) > 0);
 
-    // No-changes save should produce same size as original
-    assertEquals(
-        Files.size(testPdf),
-        Files.size(outNoChanges),
-        "Save with no changes should preserve original file size exactly");
+    try (PdfDocument doc = PdfDocument.open(outNoChanges)) {
+      assertTrue(doc.pageCount() > 0, "No-changes save should produce valid PDF");
+    }
 
-    // Verify the fast-save file contains the metadata
+    // Verify the saved file contains the metadata
     try (PdfDocument doc = PdfDocument.open(outFast)) {
       assertEquals("Fast Save Title", doc.metadata(MetadataTag.TITLE).orElse(""));
     }
@@ -1359,13 +1357,17 @@ class PdfDocumentTest {
 
   @Test
   @EnabledIf("pdfiumAvailable")
-  void fileSizeStableAfterMetadataSave(@TempDir Path tempDir) throws IOException {
+  void repeatedMetadataSavesProduceValidPdfs(@TempDir Path tempDir) throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
 
-    long originalSize = Files.size(testPdf);
     Path pdf = tempDir.resolve("stable.pdf");
     Files.copy(testPdf, pdf);
+
+    int originalPageCount;
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      originalPageCount = doc.pageCount();
+    }
 
     // Save with metadata + XMP (simulates grimmory's write path)
     try (PdfDocument doc = PdfDocument.open(pdf)) {
@@ -1375,11 +1377,12 @@ class PdfDocumentTest {
       doc.save(pdf);
     }
 
-    long afterFirst = Files.size(pdf);
-    // Incremental update should add at most 20 KB for metadata + xref + trailer
-    assertTrue(
-        afterFirst - originalSize < 20_000,
-        "First save should add at most 20 KB, but grew by " + (afterFirst - originalSize));
+    // Verify first save is valid and contains metadata
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      assertEquals(originalPageCount, doc.pageCount());
+      assertEquals("Test Title", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertEquals("Test Author", doc.metadata(MetadataTag.AUTHOR).orElse(""));
+    }
 
     // Save again (simulates second metadata update)
     try (PdfDocument doc = PdfDocument.open(pdf)) {
@@ -1389,37 +1392,38 @@ class PdfDocumentTest {
       doc.save(pdf);
     }
 
-    long afterSecond = Files.size(pdf);
-    // Second save grows by another incremental update
-    assertTrue(
-        afterSecond - afterFirst < 20_000,
-        "Second save should add at most 20 KB, but grew by " + (afterSecond - afterFirst));
-
-    // Total size should be within 40 KB of original
-    assertTrue(
-        afterSecond < originalSize + 40_000,
-        "After two saves, file should be within 40 KB of original ("
-            + originalSize
-            + "), but is "
-            + afterSecond);
+    // Verify second save is valid and contains updated metadata
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      assertEquals(originalPageCount, doc.pageCount());
+      assertEquals("Updated Title", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertEquals("Updated Author", doc.metadata(MetadataTag.AUTHOR).orElse(""));
+    }
   }
 
   @Test
   @EnabledIf("pdfiumAvailable")
-  void saveWithNoChangesPreservesSize(@TempDir Path tempDir) throws IOException {
+  void saveWithNoChangesProducesValidPdf(@TempDir Path tempDir) throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
 
-    long originalSize = Files.size(testPdf);
     Path pdf = tempDir.resolve("unchanged.pdf");
     Files.copy(testPdf, pdf);
 
-    // Save with no changes
+    int originalPageCount;
     try (PdfDocument doc = PdfDocument.open(pdf)) {
+      originalPageCount = doc.pageCount();
       doc.save(pdf);
     }
 
-    assertEquals(originalSize, Files.size(pdf), "Save with no changes should not change file size");
+    // Save always goes through PDFium native serialization; the output must be
+    // a valid PDF with the same number of pages
+    assertTrue(Files.size(pdf) > 0, "Saved file should not be empty");
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      assertEquals(
+          originalPageCount,
+          doc.pageCount(),
+          "Save with no changes should preserve page count");
+    }
   }
 
   @Test
@@ -1432,20 +1436,160 @@ class PdfDocumentTest {
     Path pdf = tempDir.resolve("xmp-only.pdf");
     Files.copy(testPdf, pdf);
 
-    // Only XMP, no setMetadata  -  should still use fast path
+    // Only XMP, no setMetadata - always uses PDFium native save + validated incremental update
     try (PdfDocument doc = PdfDocument.open(pdf)) {
       doc.setXmpMetadata(buildBookloreXmp("XMP Only Title", "XMP Author"));
       doc.save(pdf);
     }
 
     long afterSave = Files.size(pdf);
-    assertTrue(
-        afterSave - originalSize < 20_000,
-        "XMP-only save should add at most 20 KB, but grew by " + (afterSave - originalSize));
+    assertTrue(afterSave > 0, "Saved file should not be empty");
 
     try (PdfDocument doc = PdfDocument.open(pdf)) {
       String xmp = doc.xmpMetadataString();
       assertTrue(xmp.contains("XMP Only Title"), "XMP should be present");
+    }
+  }
+
+  // --- Cross-reference stream (§7.5.8) tests ---
+
+  /**
+   * Create a minimal valid PDF that uses a cross-reference stream instead of a traditional xref
+   * table. This is the format used by many modern PDF generators (e.g., Stirling-PDF, Chrome
+   * print).
+   */
+  @SuppressWarnings("PMD.UnusedAssignment")
+  private static byte[] minimalXrefStreamPdf() {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    List<Integer> offsets = new java.util.ArrayList<>();
+
+    writeBytes(out, "%PDF-1.5\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n");
+
+    int xrefStreamOffset = out.size();
+
+    // W=[1,4,0]: type(1 byte) + offset(4 bytes big-endian) + gen(0, implicit 0)
+    // Index=[0 5]: objects 0–4 contiguous
+    byte[] xrefData = new byte[5 * 5]; // 5 entries × 5 bytes
+    int di = 0;
+    // Object 0: free entry
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    // Objects 1–3: in-use
+    for (int off : offsets) {
+      xrefData[di++] = 1;
+      xrefData[di++] = (byte) ((off >> 24) & 0xFF);
+      xrefData[di++] = (byte) ((off >> 16) & 0xFF);
+      xrefData[di++] = (byte) ((off >> 8) & 0xFF);
+      xrefData[di++] = (byte) (off & 0xFF);
+    }
+    // Object 4: the xref stream itself
+    xrefData[di++] = 1;
+    xrefData[di++] = (byte) ((xrefStreamOffset >> 24) & 0xFF);
+    xrefData[di++] = (byte) ((xrefStreamOffset >> 16) & 0xFF);
+    xrefData[di++] = (byte) ((xrefStreamOffset >> 8) & 0xFF);
+    xrefData[di++] = (byte) (xrefStreamOffset & 0xFF);
+
+    writeBytes(
+        out,
+        "4 0 obj\n<< /Type /XRef /Size 5 /Root 1 0 R"
+            + " /W [1 4 0] /Index [0 5] /Length "
+            + xrefData.length
+            + " >>\nstream\n");
+    out.write(xrefData, 0, xrefData.length);
+    writeBytes(out, "\nendstream\nendobj\n");
+    writeBytes(out, "startxref\n" + xrefStreamOffset + "\n%%EOF\n");
+
+    return out.toByteArray();
+  }
+
+  private static void writeBytes(ByteArrayOutputStream out, String s) {
+    byte[] b = s.getBytes(StandardCharsets.ISO_8859_1);
+    out.write(b, 0, b.length);
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataSaveWithXrefStreamPdf(@TempDir Path tempDir) throws IOException {
+    byte[] xrefStreamPdf = minimalXrefStreamPdf();
+    Path source = tempDir.resolve("xref-stream.pdf");
+    Files.write(source, xrefStreamPdf);
+
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      assertEquals(1, doc.pageCount());
+    }
+
+    Path output = tempDir.resolve("xref-stream-meta.pdf");
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      doc.setMetadata(MetadataTag.TITLE, "XRef Stream Test");
+      doc.setMetadata(MetadataTag.AUTHOR, "Test Author");
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals("XRef Stream Test", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertEquals("Test Author", doc.metadata(MetadataTag.AUTHOR).orElse(""));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void xmpMetadataSaveWithXrefStreamPdf(@TempDir Path tempDir) throws IOException {
+    byte[] xrefStreamPdf = minimalXrefStreamPdf();
+    Path source = tempDir.resolve("xref-stream.pdf");
+    Files.write(source, xrefStreamPdf);
+
+    Path output = tempDir.resolve("xref-stream-xmp.pdf");
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      doc.setMetadata(MetadataTag.TITLE, "XRef Stream XMP");
+      doc.setXmpMetadata(buildBookloreXmp("XRef Stream XMP", "Test Author"));
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals("XRef Stream XMP", doc.metadata(MetadataTag.TITLE).orElse(""));
+      String xmp = doc.xmpMetadataString();
+      assertTrue(xmp.contains("XRef Stream XMP"), "XMP should contain title");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void xrefStreamPdfDoubleMetadataWrite(@TempDir Path tempDir) throws IOException {
+    byte[] xrefStreamPdf = minimalXrefStreamPdf();
+    Path source = tempDir.resolve("xref-stream.pdf");
+    Files.write(source, xrefStreamPdf);
+
+    Path first = tempDir.resolve("first.pdf");
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      doc.setMetadata(MetadataTag.TITLE, "First Title");
+      doc.setXmpMetadata(buildBookloreXmp("First Title", "First Author"));
+      doc.save(first);
+    }
+
+    Path second = tempDir.resolve("second.pdf");
+    try (PdfDocument doc = PdfDocument.open(first)) {
+      doc.setMetadata(MetadataTag.TITLE, "Second Title");
+      doc.setXmpMetadata(buildBookloreXmp("Second Title", "Second Author"));
+      doc.save(second);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(second)) {
+      assertEquals("Second Title", doc.metadata(MetadataTag.TITLE).orElse(""));
+      XmpMetadata parsed = XmpMetadataParser.parse(doc.xmpMetadata());
+      assertEquals("Second Title", parsed.title().orElse(""));
+      assertEquals(List.of("Second Author"), parsed.creators());
     }
   }
 }

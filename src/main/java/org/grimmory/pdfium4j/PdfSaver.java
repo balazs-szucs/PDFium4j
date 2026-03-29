@@ -15,46 +15,81 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.grimmory.pdfium4j.exception.PdfiumException;
+import org.grimmory.pdfium4j.internal.DocBindings;
 import org.grimmory.pdfium4j.internal.EditBindings;
+import org.grimmory.pdfium4j.internal.FfmHelper;
+import org.grimmory.pdfium4j.internal.ViewBindings;
 import org.grimmory.pdfium4j.model.MetadataTag;
 
 /**
  * Handles saving PDF documents. Uses PDFium's native FPDF_SaveAsCopy for the base save, then
  * applies pure-Java incremental updates for Info dictionary and XMP metadata.
  *
+ * <p><strong>Why custom code is needed:</strong> PDFium's open-source public C API provides
+ * {@code FPDF_GetMetaText} for reading metadata but has no corresponding setter function (no
+ * {@code FPDF_SetMetaText}). The {@code FPDF_INCREMENTAL} save flag is non-functional in practice
+ * (it does not append modified object streams). Therefore, setting Info dictionary or XMP metadata
+ * requires a pure-Java incremental update appended after PDFium's native serialization. This is the
+ * only custom PDF byte manipulation in the library; all other operations delegate to PDFium.
+ *
  * <p>Incremental updates (PDF spec §7.5.6) append new objects, a new xref section, and a new
  * trailer at the end of the file - the original bytes are never modified. This is the standard
  * mechanism used by all PDF editors.
+ *
+ * <p><strong>Corruption safety:</strong> All incremental updates are validated by re-opening the
+ * result with PDFium. If validation fails, the base (pre-metadata) bytes are returned instead,
+ * guaranteeing no corrupt output is ever produced.
+ *
+ * @see <a href="https://groups.google.com/g/pdfium/c/kNTBkJYu4PI">Missing FPDF_SetMetaText API</a>
+ * @see <a href="https://groups.google.com/g/pdfium/c/6SklEc2lYNM">FPDF_INCREMENTAL is broken</a>
  */
 final class PdfSaver {
+
+  private static final System.Logger LOG = System.getLogger(PdfSaver.class.getName());
 
   private static final ThreadLocal<ByteArrayOutputStream> WRITE_BUFFER = new ThreadLocal<>();
   private static final Pattern METADATA_REF_PATTERN =
       Pattern.compile("/Metadata\\s+\\d+\\s+\\d+\\s+R");
   private static final Pattern ROOT_REF_PATTERN = Pattern.compile("/Root\\s+(\\d+\\s+\\d+\\s+R)");
   private static final Pattern INFO_REF_PATTERN = Pattern.compile("/Info\\s+(\\d+\\s+\\d+\\s+R)");
-  private static final Pattern OBJ_NUM_PATTERN = Pattern.compile("(\\d+)\\s+0\\s+obj\\b");
+  private static final Pattern SIZE_PATTERN = Pattern.compile("/Size\\s+(\\d+)");
   private static final Pattern FIRST_INT_PATTERN = Pattern.compile("(\\d+)");
+
+  /**
+   * Maximum number of bytes from the end of the file to search for trailer/xref structures. PDF
+   * spec requires startxref within the last 1024 bytes, but we use a larger buffer to handle PDFs
+   * with comments or whitespace after %%EOF (common in incrementally updated files).
+   */
+  private static final int TAIL_SEARCH_BYTES = 4096;
 
   private PdfSaver() {}
 
   /**
-   * Apply an incremental update to existing PDF bytes without native serialization. This is the
-   * fast path for metadata-only changes - it reads the original file and appends new Info/XMP
-   * objects + xref + trailer at the end.
+   * Save a document to bytes using PDFium's native serialization, then apply metadata as a
+   * validated incremental update.
+   *
+   * <p>If the incremental update produces an invalid PDF (detected by re-opening with PDFium), the
+   * base bytes without metadata are returned instead. This guarantees the output is never corrupt.
    */
-  static byte[] applyIncrementalUpdate(
-      byte[] originalPdf, Map<MetadataTag, String> pendingMetadata, String pendingXmp) {
+  static byte[] saveToBytes(
+      MemorySegment docHandle, Map<MetadataTag, String> pendingMetadata, String pendingXmp) {
+    byte[] baseBytes = nativeSave(docHandle);
+
     boolean hasInfoUpdate = pendingMetadata != null && !pendingMetadata.isEmpty();
     boolean hasXmpUpdate = pendingXmp != null && !pendingXmp.isEmpty();
     if (!hasInfoUpdate && !hasXmpUpdate) {
-      return originalPdf;
+      return baseBytes;
     }
-    return appendIncrementalUpdate(originalPdf, pendingMetadata, pendingXmp);
+
+    byte[] result = appendIncrementalUpdate(baseBytes, pendingMetadata, pendingXmp);
+    return validateOrFallback(result, baseBytes, pendingMetadata);
   }
 
-  static byte[] saveToBytes(
-      MemorySegment docHandle, Map<MetadataTag, String> pendingMetadata, String pendingXmp) {
+  /**
+   * Perform the native FPDF_SaveAsCopy and return raw PDF bytes. This is the only path that
+   * produces the base PDF - all metadata is applied on top via incremental update.
+   */
+  private static byte[] nativeSave(MemorySegment docHandle) {
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     WRITE_BUFFER.set(baos);
     try (Arena arena = Arena.ofConfined()) {
@@ -78,15 +113,7 @@ final class PdfSaver {
         throw new PdfiumException("FPDF_SaveAsCopy failed");
       }
 
-      byte[] result = baos.toByteArray();
-
-      // Apply incremental updates for metadata
-      boolean hasInfoUpdate = pendingMetadata != null && !pendingMetadata.isEmpty();
-      boolean hasXmpUpdate = pendingXmp != null && !pendingXmp.isEmpty();
-      if (hasInfoUpdate || hasXmpUpdate) {
-        result = appendIncrementalUpdate(result, pendingMetadata, pendingXmp);
-      }
-      return result;
+      return baos.toByteArray();
     } catch (PdfiumException e) {
       throw e;
     } catch (Throwable t) {
@@ -97,23 +124,113 @@ final class PdfSaver {
   }
 
   /**
-   * Append a PDF incremental update containing new Info dictionary and/or XMP metadata objects.
-   * This appends after the existing %%EOF - the original file bytes are untouched.
+   * Validate PDF bytes by attempting to open them with PDFium. Checks that: (1) the document can be
+   * loaded, (2) the page count is valid, and (3) metadata entries can be read back. If any check
+   * fails, return the fallback bytes instead. This guarantees we never produce corrupt output.
+   */
+  private static byte[] validateOrFallback(
+      byte[] result, byte[] fallback, Map<MetadataTag, String> expectedMetadata) {
+    PdfiumLibrary.ensureInitialized();
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment seg = arena.allocateFrom(JAVA_BYTE, result);
+      MemorySegment doc =
+          (MemorySegment)
+              ViewBindings.FPDF_LoadMemDocument.invokeExact(seg, result.length, MemorySegment.NULL);
+      if (FfmHelper.isNull(doc)) {
+        LOG.log(
+            System.Logger.Level.WARNING,
+            "Incremental metadata update produced invalid PDF; "
+                + "falling back to base save without metadata");
+        return fallback;
+      }
+      try {
+        int pages = (int) ViewBindings.FPDF_GetPageCount.invokeExact(doc);
+        if (pages < 0) {
+          LOG.log(
+              System.Logger.Level.WARNING,
+              "Incremental metadata update produced PDF with invalid page count; "
+                  + "falling back to base save without metadata");
+          return fallback;
+        }
+
+        // Verify metadata can be read back from the saved document
+        if (expectedMetadata != null && !expectedMetadata.isEmpty()) {
+          if (!verifyMetadataReadback(doc, expectedMetadata, arena)) {
+            LOG.log(
+                System.Logger.Level.WARNING,
+                "Metadata written but could not be read back from saved PDF; "
+                    + "falling back to base save without metadata");
+            return fallback;
+          }
+        }
+      } finally {
+        try {
+          ViewBindings.FPDF_CloseDocument.invokeExact(doc);
+        } catch (Throwable ignored) {
+        }
+      }
+    } catch (Throwable t) {
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "Failed to validate incremental metadata update; "
+              + "falling back to base save without metadata",
+          t);
+      return fallback;
+    }
+    return result;
+  }
+
+  /**
+   * Verify that at least one metadata entry from the expected set can be read back from the saved
+   * document. This confirms the Info dictionary was correctly written.
+   */
+  private static boolean verifyMetadataReadback(
+      MemorySegment doc, Map<MetadataTag, String> expected, Arena arena) {
+    for (Map.Entry<MetadataTag, String> entry : expected.entrySet()) {
+      try {
+        MemorySegment tagSeg = arena.allocateFrom(entry.getKey().pdfKey());
+        long needed =
+            (long)
+                DocBindings.FPDF_GetMetaText.invokeExact(doc, tagSeg, MemorySegment.NULL, 0L);
+        if (needed > 2) {
+          // At least one tag is readable - Info dictionary is intact
+          return true;
+        }
+      } catch (Throwable ignored) {
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Append a PDF incremental update containing new Info dictionary and/or XMP metadata objects. This
+   * appends after the existing %%EOF - the original file bytes are untouched.
+   *
+   * <p>All parsing is restricted to the tail of the file where trailer/xref structures live, making
+   * it immune to false matches in binary stream data.
    */
   private static byte[] appendIncrementalUpdate(
       byte[] pdf, Map<MetadataTag, String> metadata, String xmp) {
-    String text = new String(pdf, StandardCharsets.ISO_8859_1);
+    String tail = tailString(pdf);
+    int tailOffset = pdf.length - tail.length();
 
     // Find previous startxref value (points to the current xref/xref-stream)
-    int prevXrefOffset = findLastStartxrefValue(text);
+    int prevXrefOffset = findStartxrefInTail(tail, tailOffset);
 
-    // Parse existing trailer to get /Size and /Root
-    TrailerInfo trailer = parseTrailer(text);
+    // Parse existing trailer to get /Size, /Root, /Info
+    TrailerInfo trailer = parseTrailerFromTail(pdf, tail, tailOffset);
 
-    int maxObjNum = findMaxObjectNumber(text);
-    int nextObj = maxObjNum + 1;
+    // Use /Size from trailer for next object number (per PDF spec, /Size = total entries in xref)
+    int nextObj = trailer.size;
+    if (nextObj <= 0) {
+      // Should not happen with well-formed PDFium output, but be defensive
+      LOG.log(
+          System.Logger.Level.WARNING,
+          "Could not determine /Size from trailer; skipping incremental update");
+      return pdf;
+    }
 
-    // Track new objects: objNum -> (offset relative to start of appended bytes, content)
+    // Track new objects: objNum -> content
     Map<Integer, String> newObjects = new LinkedHashMap<>();
     int infoObjNum = 0;
     int xmpObjNum = 0;
@@ -149,7 +266,7 @@ final class PdfSaver {
     }
 
     // Build the incremental update
-    int baseOffset = pdf.length; // offset where appended bytes start
+    int baseOffset = pdf.length;
     StringBuilder update = new StringBuilder();
     update.append('\n'); // separator after %%EOF
 
@@ -160,30 +277,40 @@ final class PdfSaver {
       update.append(entry.getValue());
     }
 
-    // Write xref table for the new objects
-    int xrefOffset = baseOffset + update.length();
-    update.append("xref\n");
-    // Write one subsection per object (or contiguous ranges)
-    for (Map.Entry<Integer, Integer> entry : objOffsets.entrySet()) {
-      update.append(entry.getKey()).append(" 1\n");
-      // PDF spec requires literal \r\n in xref entries, not platform line separator
-      update.append(String.format("%010d", entry.getValue())).append(" 00000 n \r\n");
+    boolean xrefStream = usesXrefStreams(pdf, tail, tailOffset);
+    if (xrefStream) {
+      int xrefStreamObjNum = nextObj++;
+      String infoRef = (infoObjNum > 0) ? (infoObjNum + " 0 R") : trailer.infoRef;
+      appendXrefStreamSection(
+          update,
+          xrefStreamObjNum,
+          objOffsets,
+          trailer.rootRef,
+          infoRef,
+          nextObj,
+          prevXrefOffset,
+          baseOffset);
+    } else {
+      int xrefOffset = baseOffset + update.length();
+      update.append("xref\n");
+      for (Map.Entry<Integer, Integer> entry : objOffsets.entrySet()) {
+        update.append(entry.getKey()).append(" 1\n");
+        update.append(String.format("%010d", entry.getValue())).append(" 00000 n \r\n");
+      }
+      update.append("trailer\n");
+      update.append("<< /Size ").append(nextObj);
+      update.append(" /Root ").append(trailer.rootRef);
+      if (infoObjNum > 0) {
+        update.append(" /Info ").append(infoObjNum).append(" 0 R");
+      } else if (trailer.infoRef != null) {
+        update.append(" /Info ").append(trailer.infoRef);
+      }
+      update.append(" /Prev ").append(prevXrefOffset);
+      update.append(" >>\n");
+      update.append("startxref\n");
+      update.append(xrefOffset).append("\n");
+      update.append("%%EOF\n");
     }
-
-    // Write new trailer
-    update.append("trailer\n");
-    update.append("<< /Size ").append(nextObj);
-    update.append(" /Root ").append(trailer.rootRef);
-    if (infoObjNum > 0) {
-      update.append(" /Info ").append(infoObjNum).append(" 0 R");
-    } else if (trailer.infoRef != null) {
-      update.append(" /Info ").append(trailer.infoRef);
-    }
-    update.append(" /Prev ").append(prevXrefOffset);
-    update.append(" >>\n");
-    update.append("startxref\n");
-    update.append(xrefOffset).append("\n");
-    update.append("%%EOF\n");
 
     byte[] updateBytes = update.toString().getBytes(StandardCharsets.ISO_8859_1);
     byte[] result = new byte[pdf.length + updateBytes.length];
@@ -202,12 +329,16 @@ final class PdfSaver {
    * Append another incremental update that rewrites the Catalog object with a /Metadata reference.
    */
   private static byte[] appendCatalogUpdate(
-      byte[] pdf, TrailerInfo trailer, int metadataObjNum, int sizeBase) {
-    String text = new String(pdf, StandardCharsets.ISO_8859_1);
+      byte[] pdf, TrailerInfo originalTrailer, int metadataObjNum, int sizeBase) {
+    // Re-parse the tail of the (already modified) PDF to get current state
+    String tail = tailString(pdf);
+    int tailOffset = pdf.length - tail.length();
+    boolean xrefStream = usesXrefStreams(pdf, tail, tailOffset);
 
-    // Find the Catalog object and its contents
-    int catalogObjNum = extractObjNum(trailer.rootRef);
-    String catalogDict = findObjectDict(text, catalogObjNum);
+    // Find the Catalog object - search entire file for the specific object
+    int catalogObjNum = extractObjNum(originalTrailer.rootRef);
+    String fullText = new String(pdf, StandardCharsets.ISO_8859_1);
+    String catalogDict = findObjectDict(fullText, catalogObjNum);
     if (catalogDict == null) return pdf;
 
     // Create a new Catalog object (same obj number, incremental update replaces it)
@@ -217,7 +348,6 @@ final class PdfSaver {
     // Remove existing /Metadata if present, add our new one
     String dict = catalogDict;
     dict = METADATA_REF_PATTERN.matcher(dict).replaceFirst("");
-    // Insert /Metadata ref before the closing >>
     int closeIdx = dict.lastIndexOf(">>");
     if (closeIdx >= 0) {
       dict =
@@ -237,27 +367,40 @@ final class PdfSaver {
     int catalogOffset = baseOffset + update.length();
     update.append(newCatalog);
 
-    int actualPrev = findLastStartxrefValue(text);
+    int actualPrev = findStartxrefInTail(tail, tailOffset);
+    TrailerInfo currentTrailer = parseTrailerFromTail(pdf, tail, tailOffset);
 
-    int xrefOffset = baseOffset + update.length();
-    update.append("xref\n");
-    update.append(catalogObjNum).append(" 1\n");
-    // PDF spec requires literal \r\n in xref entries, not platform line separator
-    update.append(String.format("%010d", catalogOffset)).append(" 00000 n \r\n");
+    if (xrefStream) {
+      int xrefStreamObjNum = currentTrailer.size;
+      Map<Integer, Integer> offsets = new LinkedHashMap<>();
+      offsets.put(catalogObjNum, catalogOffset);
+      appendXrefStreamSection(
+          update,
+          xrefStreamObjNum,
+          offsets,
+          originalTrailer.rootRef,
+          currentTrailer.infoRef,
+          xrefStreamObjNum + 1,
+          actualPrev,
+          baseOffset);
+    } else {
+      int xrefOffset = baseOffset + update.length();
+      update.append("xref\n");
+      update.append(catalogObjNum).append(" 1\n");
+      update.append(String.format("%010d", catalogOffset)).append(" 00000 n \r\n");
 
-    update.append("trailer\n");
-    update.append("<< /Size ").append(sizeBase);
-    update.append(" /Root ").append(trailer.rootRef);
-    // Carry forward /Info from previous trailer
-    String prevTrailerInfo = findTrailerEntry(text, "Info");
-    if (prevTrailerInfo != null) {
-      update.append(" /Info ").append(prevTrailerInfo);
+      update.append("trailer\n");
+      update.append("<< /Size ").append(sizeBase);
+      update.append(" /Root ").append(originalTrailer.rootRef);
+      if (currentTrailer.infoRef != null) {
+        update.append(" /Info ").append(currentTrailer.infoRef);
+      }
+      update.append(" /Prev ").append(actualPrev);
+      update.append(" >>\n");
+      update.append("startxref\n");
+      update.append(xrefOffset).append("\n");
+      update.append("%%EOF\n");
     }
-    update.append(" /Prev ").append(actualPrev);
-    update.append(" >>\n");
-    update.append("startxref\n");
-    update.append(xrefOffset).append("\n");
-    update.append("%%EOF\n");
 
     byte[] updateBytes = update.toString().getBytes(StandardCharsets.ISO_8859_1);
     byte[] result = new byte[pdf.length + updateBytes.length];
@@ -267,66 +410,113 @@ final class PdfSaver {
   }
 
   /**
-   * Write or replace the XMP metadata packet in the PDF by in-place replacement (without
-   * incremental update - used when XMP packet already exists with padding).
+   * Append a cross-reference stream section (§7.5.8) instead of a traditional xref table + trailer.
+   * The xref stream object dictionary serves as both xref header and trailer.
+   *
+   * <p>Uses W=[1,4,0]: 1-byte type (always 1 = in-use) + 4-byte big-endian byte offset + generation
+   * number implicit 0. Stream data is uncompressed (no /Filter).
    */
-  static byte[] replaceXmpPacketInPlace(byte[] pdf, String xmpPacket) {
-    byte[] xmpBytes = xmpPacket.getBytes(StandardCharsets.UTF_8);
-    byte[] beginMarker = "<?xpacket begin=".getBytes(StandardCharsets.US_ASCII);
-    byte[] endMarker = "<?xpacket end=".getBytes(StandardCharsets.US_ASCII);
-
-    int beginPos = indexOf(pdf, beginMarker, 0);
-    if (beginPos < 0) return null; // no existing packet
-
-    int endPos = indexOf(pdf, endMarker, beginPos);
-    if (endPos < 0) return null;
-
-    int endTagClose = indexOf(pdf, "?>".getBytes(StandardCharsets.US_ASCII), endPos);
-    if (endTagClose < 0) return null;
-
-    int packetEnd = endTagClose + 2;
-    int oldLen = packetEnd - beginPos;
-
-    byte[] paddedXmp = padXmpToLength(xmpBytes, oldLen);
-    if (paddedXmp.length != oldLen) {
-      return null; // can't fit in-place, caller should use incremental update
+  private static void appendXrefStreamSection(
+      StringBuilder update,
+      int xrefStreamObjNum,
+      Map<Integer, Integer> objOffsets,
+      String rootRef,
+      String infoRef,
+      int size,
+      int prevXref,
+      int baseOffset) {
+    byte[] streamData = new byte[objOffsets.size() * 5];
+    StringBuilder indexParts = new StringBuilder();
+    int dataIdx = 0;
+    for (Map.Entry<Integer, Integer> entry : objOffsets.entrySet()) {
+      if (indexParts.length() > 0) indexParts.append(' ');
+      indexParts.append(entry.getKey()).append(" 1");
+      streamData[dataIdx++] = 1; // type 1 = in-use uncompressed object
+      int offset = entry.getValue();
+      streamData[dataIdx++] = (byte) ((offset >> 24) & 0xFF);
+      streamData[dataIdx++] = (byte) ((offset >> 16) & 0xFF);
+      streamData[dataIdx++] = (byte) ((offset >> 8) & 0xFF);
+      streamData[dataIdx++] = (byte) (offset & 0xFF);
     }
 
-    byte[] result = new byte[pdf.length];
-    System.arraycopy(pdf, 0, result, 0, pdf.length);
-    System.arraycopy(paddedXmp, 0, result, beginPos, paddedXmp.length);
-    return result;
+    int xrefStreamOffset = baseOffset + update.length();
+    update.append(xrefStreamObjNum).append(" 0 obj\n");
+    update.append("<< /Type /XRef");
+    update.append(" /Size ").append(size);
+    update.append(" /Root ").append(rootRef);
+    if (infoRef != null) {
+      update.append(" /Info ").append(infoRef);
+    }
+    update.append(" /Prev ").append(prevXref);
+    update.append(" /W [1 4 0]");
+    update.append(" /Index [").append(indexParts).append(']');
+    update.append(" /Length ").append(streamData.length);
+    update.append(" >>\nstream\n");
+    // Append binary data as ISO-8859-1 characters (byte-transparent encoding)
+    for (byte b : streamData) {
+      update.append((char) (b & 0xFF));
+    }
+    update.append("\nendstream\nendobj\n");
+    update.append("startxref\n").append(xrefStreamOffset).append('\n');
+    update.append("%%EOF\n");
   }
 
-  // --- Trailer parsing ---
+  // --- Tail-based parsing (only parses end of file, immune to binary stream false matches) ---
 
-  private record TrailerInfo(String rootRef, String infoRef) {}
-
-  private static TrailerInfo parseTrailer(String text) {
-    // Try traditional trailer first
-    String rootRef = findTrailerEntry(text, "Root");
-    String infoRef = findTrailerEntry(text, "Info");
-
-    if (rootRef != null) {
-      return new TrailerInfo(rootRef, infoRef);
-    }
-
-    // For cross-reference streams, find the last xref stream object
-    // which contains /Root in its dictionary
-    Matcher m = ROOT_REF_PATTERN.matcher(text);
-    String lastRoot = null;
-    String lastInfo = null;
-    while (m.find()) {
-      lastRoot = m.group(1);
-    }
-    Matcher m2 = INFO_REF_PATTERN.matcher(text);
-    while (m2.find()) {
-      lastInfo = m2.group(1);
-    }
-    return new TrailerInfo(lastRoot != null ? lastRoot : "1 0 R", lastInfo);
+  /**
+   * Extract the tail of the PDF as an ISO-8859-1 string. Only this portion is parsed for
+   * trailer/xref structures, making parsing immune to false matches in binary stream data.
+   */
+  private static String tailString(byte[] pdf) {
+    int tailLen = Math.min(TAIL_SEARCH_BYTES, pdf.length);
+    return new String(pdf, pdf.length - tailLen, tailLen, StandardCharsets.ISO_8859_1);
   }
 
-  private static String findTrailerEntry(String text, String key) {
+  private record TrailerInfo(String rootRef, String infoRef, int size) {}
+
+  /**
+   * Parse trailer information from the tail of the file. Extracts /Root, /Info, and /Size entries.
+   */
+  private static TrailerInfo parseTrailerFromTail(byte[] pdf, String tail, int tailOffset) {
+    // Try traditional trailer first (search tail for "trailer" keyword)
+    String rootRef = findTrailerEntryInTail(tail, "Root");
+    String infoRef = findTrailerEntryInTail(tail, "Info");
+    int size = findTrailerSizeInTail(tail);
+
+    if (rootRef != null && size > 0) {
+      return new TrailerInfo(rootRef, infoRef, size);
+    }
+
+    // For cross-reference streams, parse the dictionary at the startxref offset
+    int startxref = findStartxrefInTail(tail, tailOffset);
+    if (startxref > 0 && startxref < pdf.length) {
+      // Read a small window around the xref stream object
+      int windowStart = startxref;
+      int windowEnd = Math.min(startxref + 512, pdf.length);
+      String window =
+          new String(pdf, windowStart, windowEnd - windowStart, StandardCharsets.ISO_8859_1);
+      String dict = findDictInWindow(window);
+      if (dict != null) {
+        Matcher rootM = ROOT_REF_PATTERN.matcher(dict);
+        if (rootM.find()) rootRef = rootM.group(1);
+        Matcher infoM = INFO_REF_PATTERN.matcher(dict);
+        if (infoM.find()) infoRef = infoM.group(1);
+        Matcher sizeM = SIZE_PATTERN.matcher(dict);
+        if (sizeM.find()) size = Integer.parseInt(sizeM.group(1));
+        if (rootRef != null && size > 0) {
+          return new TrailerInfo(rootRef, infoRef, size);
+        }
+      }
+    }
+
+    // Ultimate fallback: scan tail for the last /Root reference
+    Matcher m = ROOT_REF_PATTERN.matcher(tail);
+    while (m.find()) rootRef = m.group(1);
+    return new TrailerInfo(rootRef != null ? rootRef : "1 0 R", null, Math.max(size, 1));
+  }
+
+  /** Search tail for a trailer entry (/Root or /Info reference). */
+  private static String findTrailerEntryInTail(String tail, String key) {
     Pattern p =
         switch (key) {
           case "Root" -> ROOT_REF_PATTERN;
@@ -334,19 +524,18 @@ final class PdfSaver {
           default -> Pattern.compile("/" + key + "\\s+(\\d+\\s+\\d+\\s+R)");
         };
 
-    // Search backwards from end for the latest trailer
-    int searchFrom = text.length();
+    int searchFrom = tail.length();
     while (true) {
-      int trailerIdx = text.lastIndexOf("trailer", searchFrom);
+      int trailerIdx = tail.lastIndexOf("trailer", searchFrom);
       if (trailerIdx < 0) break;
 
-      int dictStart = text.indexOf("<<", trailerIdx);
+      int dictStart = tail.indexOf("<<", trailerIdx);
       if (dictStart < 0) break;
 
-      int dictEnd = text.indexOf(">>", dictStart);
+      int dictEnd = tail.indexOf(">>", dictStart);
       if (dictEnd < 0) break;
 
-      String dict = text.substring(dictStart, dictEnd + 2);
+      String dict = tail.substring(dictStart, dictEnd + 2);
       Matcher m = p.matcher(dict);
       if (m.find()) {
         return m.group(1);
@@ -357,10 +546,35 @@ final class PdfSaver {
     return null;
   }
 
-  private static int findLastStartxrefValue(String text) {
-    int idx = text.lastIndexOf("startxref");
+  /** Extract /Size value from the trailer in the tail. */
+  private static int findTrailerSizeInTail(String tail) {
+    int searchFrom = tail.length();
+    while (true) {
+      int trailerIdx = tail.lastIndexOf("trailer", searchFrom);
+      if (trailerIdx < 0) break;
+
+      int dictStart = tail.indexOf("<<", trailerIdx);
+      if (dictStart < 0) break;
+
+      int dictEnd = tail.indexOf(">>", dictStart);
+      if (dictEnd < 0) break;
+
+      String dict = tail.substring(dictStart, dictEnd + 2);
+      Matcher m = SIZE_PATTERN.matcher(dict);
+      if (m.find()) {
+        return Integer.parseInt(m.group(1));
+      }
+      searchFrom = trailerIdx - 1;
+      if (searchFrom < 0) break;
+    }
+    return 0;
+  }
+
+  /** Find the startxref value from the tail of the file. */
+  private static int findStartxrefInTail(String tail, int tailOffset) {
+    int idx = tail.lastIndexOf("startxref");
     if (idx < 0) return 0;
-    String after = text.substring(idx + "startxref".length()).trim();
+    String after = tail.substring(idx + "startxref".length()).trim();
     try {
       return Integer.parseInt(after.lines().findFirst().orElse("0").trim());
     } catch (NumberFormatException e) {
@@ -368,15 +582,59 @@ final class PdfSaver {
     }
   }
 
+  private static final Pattern XREF_STREAM_HEADER = Pattern.compile("\\d+\\s+0\\s+obj\\b");
+
+  /**
+   * Detect whether the PDF uses cross-reference streams (§7.5.8). Reads only the bytes at the
+   * startxref offset, not the entire file.
+   */
+  private static boolean usesXrefStreams(byte[] pdf, String tail, int tailOffset) {
+    int startxref = findStartxrefInTail(tail, tailOffset);
+    if (startxref <= 0 || startxref >= pdf.length) return false;
+    int peekEnd = Math.min(startxref + 200, pdf.length);
+    String peek =
+        new String(pdf, startxref, peekEnd - startxref, StandardCharsets.ISO_8859_1).stripLeading();
+    if (peek.startsWith("xref")) return false;
+    return XREF_STREAM_HEADER.matcher(peek).lookingAt()
+        && peek.contains("/Type")
+        && peek.contains("/XRef");
+  }
+
+  /**
+   * Find and extract the first dictionary {@code << ... >>} in a window string. Handles nested
+   * dictionaries.
+   */
+  private static String findDictInWindow(String window) {
+    int dictStart = window.indexOf("<<");
+    if (dictStart < 0) return null;
+    int depth = 0;
+    int pos = dictStart;
+    while (pos < window.length() - 1) {
+      if (window.charAt(pos) == '<' && window.charAt(pos + 1) == '<') {
+        depth++;
+        pos += 2;
+      } else if (window.charAt(pos) == '>' && window.charAt(pos + 1) == '>') {
+        depth--;
+        if (depth == 0) return window.substring(dictStart, pos + 2);
+        pos += 2;
+      } else {
+        pos++;
+      }
+    }
+    return null;
+  }
+
   private static int extractObjNum(String ref) {
-    // "N 0 R" -> N
     Matcher m = FIRST_INT_PATTERN.matcher(ref);
     if (m.find()) return Integer.parseInt(m.group(1));
     return 1;
   }
 
+  /**
+   * Find the dictionary for a specific object by number. Searches backwards from the end of the
+   * file to find the latest version of the object (incremental updates append newer versions).
+   */
   private static String findObjectDict(String text, int objNum) {
-    // Find "N 0 obj" then extract the dictionary << ... >>
     String marker = objNum + " 0 obj";
     int idx = text.lastIndexOf(marker);
     if (idx < 0) return null;
@@ -384,7 +642,6 @@ final class PdfSaver {
     int dictStart = text.indexOf("<<", idx);
     if (dictStart < 0) return null;
 
-    // Find matching >> (handle nested <<>>)
     int depth = 0;
     int pos = dictStart;
     while (pos < text.length() - 1) {
@@ -404,35 +661,7 @@ final class PdfSaver {
     return null;
   }
 
-  // --- Helpers ---
-
-  private static int findMaxObjectNumber(String pdfText) {
-    Matcher matcher = OBJ_NUM_PATTERN.matcher(pdfText);
-    int max = 0;
-    while (matcher.find()) {
-      int num = Integer.parseInt(matcher.group(1));
-      if (num > max) max = num;
-    }
-    return max;
-  }
-
-  private static byte[] padXmpToLength(byte[] xmp, int targetLen) {
-    if (xmp.length >= targetLen) {
-      return xmp;
-    }
-    byte[] endPI = "<?xpacket end=".getBytes(StandardCharsets.US_ASCII);
-    int endIdx = indexOf(xmp, endPI, 0);
-    if (endIdx < 0) return xmp;
-
-    int paddingNeeded = targetLen - xmp.length;
-    byte[] padded = new byte[targetLen];
-    System.arraycopy(xmp, 0, padded, 0, endIdx);
-    for (int i = 0; i < paddingNeeded; i++) {
-      padded[endIdx + i] = (i % 80 == 79) ? (byte) '\n' : (byte) ' ';
-    }
-    System.arraycopy(xmp, endIdx, padded, endIdx + paddingNeeded, xmp.length - endIdx);
-    return padded;
-  }
+  // --- String encoding helpers ---
 
   /**
    * Encode a Java string as a PDF string literal using UTF-16BE with BOM for non-ASCII, or
@@ -476,17 +705,6 @@ final class PdfSaver {
   private static String formatPdfDate() {
     ZonedDateTime now = ZonedDateTime.now();
     return "D:" + now.format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
-  }
-
-  private static int indexOf(byte[] haystack, byte[] needle, int fromIndex) {
-    outer:
-    for (int i = fromIndex; i <= haystack.length - needle.length; i++) {
-      for (int j = 0; j < needle.length; j++) {
-        if (haystack[i + j] != needle[j]) continue outer;
-      }
-      return i;
-    }
-    return -1;
   }
 
   @SuppressWarnings("PMD.UnusedFormalParameter")

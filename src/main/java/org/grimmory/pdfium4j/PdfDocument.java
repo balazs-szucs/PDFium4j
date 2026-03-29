@@ -859,6 +859,14 @@ public final class PdfDocument implements AutoCloseable {
       return (value == null || value.isEmpty()) ? Optional.empty() : Optional.of(value);
     }
 
+    return readNativeMetadata(tag);
+  }
+
+  /**
+   * Read a metadata value directly from the native PDFium document handle, bypassing the pending
+   * metadata cache. Used internally to merge existing metadata with pending changes during save.
+   */
+  private Optional<String> readNativeMetadata(MetadataTag tag) {
     try (Arena arena = Arena.ofConfined()) {
       MemorySegment tagSeg = arena.allocateFrom(tag.pdfKey());
 
@@ -1231,19 +1239,14 @@ public final class PdfDocument implements AutoCloseable {
   /**
    * Save the document to a file.
    *
-   * <p>When only metadata has been modified (no page additions, deletions, or imports), this uses a
-   * fast path that reads the original PDF bytes and appends an incremental update - avoiding the
-   * expensive native {@code FPDF_SaveAsCopy} serialization entirely.
+   * <p>Always serializes through PDFium's native {@code FPDF_SaveAsCopy} to guarantee a
+   * structurally valid PDF. Metadata changes (Info dictionary, XMP) are applied as a validated
+   * incremental update on top of the native output.
    *
    * @param path output file path
    */
   public void save(Path path) {
-    byte[] bytes;
-    if (structurallyModified) {
-      bytes = saveToBytes();
-    } else {
-      bytes = saveMetadataOnly();
-    }
+    byte[] bytes = saveToBytes();
     try {
       Files.write(path, bytes);
     } catch (IOException e) {
@@ -1258,32 +1261,37 @@ public final class PdfDocument implements AutoCloseable {
    */
   public byte[] saveToBytes() {
     ensureOpen();
-    return PdfSaver.saveToBytes(handle, pendingMetadata, pendingXmpMetadata);
+    Map<MetadataTag, String> mergedMetadata = buildMergedMetadata();
+    return PdfSaver.saveToBytes(handle, mergedMetadata, pendingXmpMetadata);
   }
 
   /**
-   * Fast metadata-only save: reads original bytes and appends an incremental update with the
-   * pending Info Dictionary and/or XMP changes. Avoids the expensive {@code FPDF_SaveAsCopy} native
-   * serialization.
+   * Build a complete Info dictionary by merging existing metadata (read from PDFium) with pending
+   * changes. This ensures that setting a single tag (e.g., Title) does not discard other existing
+   * entries (e.g., Author, Subject) when the incremental update replaces the Info dictionary.
    */
-  private byte[] saveMetadataOnly() {
-    ensureOpen();
-    byte[] original;
-    if (sourceBytes != null) {
-      original = sourceBytes;
-    } else if (sourcePath != null) {
-      try {
-        original = Files.readAllBytes(sourcePath);
-      } catch (IOException e) {
-        throw new PdfiumException(
-            "Failed to read source PDF for metadata update: " + sourcePath, e);
-      }
-    } else {
-      // No original bytes available, fall back to full save
-      return saveToBytes();
+  private Map<MetadataTag, String> buildMergedMetadata() {
+    if (pendingMetadata.isEmpty()) {
+      return pendingMetadata;
     }
-    return PdfSaver.applyIncrementalUpdate(original, pendingMetadata, pendingXmpMetadata);
+
+    Map<MetadataTag, String> merged = new LinkedHashMap<>();
+    // Read all existing metadata from the native PDFium document
+    for (MetadataTag tag : MetadataTag.values()) {
+      if (!pendingMetadata.containsKey(tag)) {
+        readNativeMetadata(tag).ifPresent(v -> merged.put(tag, v));
+      }
+    }
+    // Apply pending changes (overrides existing + adds new entries)
+    for (Map.Entry<MetadataTag, String> entry : pendingMetadata.entrySet()) {
+      if (entry.getValue() != null && !entry.getValue().isEmpty()) {
+        merged.put(entry.getKey(), entry.getValue());
+      }
+      // Empty string means "clear this tag" - don't add it to merged
+    }
+    return merged;
   }
+
 
   /**
    * Save the document directly to an OutputStream, suitable for streaming responses (e.g., HTTP
@@ -1293,12 +1301,7 @@ public final class PdfDocument implements AutoCloseable {
    * @throws PdfiumException if saving fails
    */
   public void save(OutputStream out) {
-    byte[] bytes;
-    if (structurallyModified) {
-      bytes = saveToBytes();
-    } else {
-      bytes = saveMetadataOnly();
-    }
+    byte[] bytes = saveToBytes();
     try {
       out.write(bytes);
     } catch (IOException e) {
