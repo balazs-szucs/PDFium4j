@@ -73,8 +73,14 @@ public final class EditBindings {
       downcall("FPDF_CreateNewDocument", FunctionDescriptor.of(ADDRESS));
 
   /**
-   * Save the document to an FPDF_FILEWRITE sink. Flags: 0 = full save, 1 = incremental. Returns 1
-   * on success.
+   * Save the document to an FPDF_FILEWRITE sink. Returns 1 on success.
+   *
+   * <p>Flags: 0 = full save, FPDF_INCREMENTAL (1) = incremental, FPDF_NO_INCREMENTAL (2) = full
+   * save removing old versions, FPDF_REMOVE_SECURITY (4) = remove encryption.
+   *
+   * <p><strong>Warning:</strong> FPDF_INCREMENTAL (flag 1) is non-functional in the open-source
+   * PDFium build — it does not properly append modified objects, producing corrupt output. Always
+   * use flag 0 (full save). See: https://groups.google.com/g/pdfium/c/6SklEc2lYNM
    */
   public static final MethodHandle FPDF_SaveAsCopy =
       downcall("FPDF_SaveAsCopy", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT));
