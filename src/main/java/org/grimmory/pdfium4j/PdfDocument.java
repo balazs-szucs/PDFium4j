@@ -9,7 +9,6 @@ import java.lang.foreign.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.stream.IntStream;
 import org.grimmory.pdfium4j.exception.PdfCorruptException;
 import org.grimmory.pdfium4j.exception.PdfPasswordException;
 import org.grimmory.pdfium4j.exception.PdfiumException;
@@ -228,6 +227,27 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   /**
+   * Create a new empty PDF document.
+   *
+   * @throws PdfiumException if the document cannot be created
+   */
+  public static PdfDocument create() {
+    PdfiumLibrary.ensureInitialized();
+    try {
+      MemorySegment handle = (MemorySegment) EditBindings.FPDF_CreateNewDocument.invokeExact();
+      if (handle.equals(MemorySegment.NULL)) {
+        throw new PdfiumException("Failed to create new PDF document");
+      }
+      return new PdfDocument(
+          handle, null, null, null, PdfProcessingPolicy.defaultPolicy(), Thread.currentThread());
+    } catch (PdfiumException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to create new PDF document", t);
+    }
+  }
+
+  /**
    * Open a PDF from a file path.
    *
    * @throws PdfPasswordException if the PDF is encrypted
@@ -405,6 +425,7 @@ public final class PdfDocument implements AutoCloseable {
       PdfPage page =
           new PdfPage(
               pageSeg,
+              handle,
               ownerThread,
               policy.maxRenderPixels(),
               () -> unregisterPage(holder[0]),
@@ -569,8 +590,14 @@ public final class PdfDocument implements AutoCloseable {
               + " pages");
     }
 
-    List<Integer> indices = IntStream.rangeClosed(startIndex, endIndex).boxed().toList();
-    return renderPages(indices, dpi);
+    ensureOpen();
+    Map<Integer, RenderResult> results = new LinkedHashMap<>(endIndex - startIndex + 1);
+    for (int i = startIndex; i <= endIndex; i++) {
+      try (PdfPage page = page(i)) {
+        results.put(i, page.render(dpi));
+      }
+    }
+    return Collections.unmodifiableMap(results);
   }
 
   /**
@@ -580,8 +607,44 @@ public final class PdfDocument implements AutoCloseable {
    * @return map of page index to render result, in iteration order
    */
   public Map<Integer, RenderResult> renderAllPages(int dpi) {
-    List<Integer> indices = IntStream.range(0, pageCount()).boxed().toList();
-    return renderPages(indices, dpi);
+    return renderPages(0, pageCount() - 1, dpi);
+  }
+
+  /**
+   * Render a single page and return encoded image bytes. This is a convenience method that handles
+   * page opening, rendering, encoding, and resource cleanup in a single call.
+   *
+   * @param pageIndex 0-based page index
+   * @param dpi render resolution (e.g. 150 for thumbnails, 300 for high quality)
+   * @param format image format: "jpeg" or "png"
+   * @return encoded image bytes
+   * @throws IllegalArgumentException if format is not "jpeg" or "png", or pageIndex is invalid
+   */
+  public byte[] renderPageToBytes(int pageIndex, int dpi, String format) {
+    return renderPageToBytes(pageIndex, dpi, format, 0.85f);
+  }
+
+  /**
+   * Render a single page and return encoded image bytes with configurable JPEG quality.
+   *
+   * @param pageIndex 0-based page index
+   * @param dpi render resolution
+   * @param format image format: "jpeg" or "png"
+   * @param jpegQuality JPEG quality from 0.0 to 1.0 (ignored for PNG)
+   * @return encoded image bytes
+   * @throws IllegalArgumentException if format is not "jpeg" or "png", or pageIndex is invalid
+   */
+  public byte[] renderPageToBytes(int pageIndex, int dpi, String format, float jpegQuality) {
+    Objects.requireNonNull(format, "format");
+    String fmt = format.toLowerCase(java.util.Locale.ROOT);
+    if (!fmt.equals("jpeg") && !fmt.equals("png")) {
+      throw new IllegalArgumentException("Format must be 'jpeg' or 'png', got: " + format);
+    }
+
+    try (PdfPage page = page(pageIndex)) {
+      RenderResult result = page.render(dpi);
+      return fmt.equals("png") ? result.toPngBytes() : result.toJpegBytes(jpegQuality);
+    }
   }
 
   /**
@@ -818,6 +881,43 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
+  /**
+   * Get a metadata value by an arbitrary Info Dictionary key string. This allows reading
+   * non-standard keys like "EBX_PUBLISHER" that are not covered by {@link MetadataTag}.
+   *
+   * @param key the raw Info Dictionary key name (e.g. "Title", "EBX_PUBLISHER")
+   * @return the value, or empty if not present
+   */
+  public Optional<String> metadata(String key) {
+    ensureOpen();
+    Objects.requireNonNull(key, "key");
+
+    MetadataTag standardTag = MetadataTag.fromKey(key);
+    if (standardTag != null && pendingMetadata.containsKey(standardTag)) {
+      String value = pendingMetadata.get(standardTag);
+      return (value == null || value.isEmpty()) ? Optional.empty() : Optional.of(value);
+    }
+
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment keySeg = arena.allocateFrom(key);
+
+      long needed =
+          (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, keySeg, MemorySegment.NULL, 0L);
+      if (needed <= 2) return Optional.empty();
+
+      MemorySegment buf = arena.allocate(needed);
+      long written = (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, keySeg, buf, needed);
+      if (written <= 2) {
+        return Optional.empty();
+      }
+
+      String value = FfmHelper.fromWideString(buf, needed);
+      return value.isEmpty() ? Optional.empty() : Optional.of(value);
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to read metadata: " + key, t);
+    }
+  }
+
   /** Get all standard metadata as a map. Only non-empty values are included. */
   public Map<String, String> metadata() {
     Map<String, String> map = new LinkedHashMap<>();
@@ -994,7 +1094,19 @@ public final class PdfDocument implements AutoCloseable {
         System.arraycopy(buf, available - carry, buf, 0, carry);
       }
 
-      if (lastBeginFilePos < 0) return new byte[0];
+      if (lastBeginFilePos < 0) {
+        // Fallback: read entire file and scan for <x:xmpmeta> ... </x:xmpmeta>
+        channel.position(0);
+        byte[] allBytes = new byte[(int) fileSize];
+        var allBuf = java.nio.ByteBuffer.wrap(allBytes);
+        int totalRead = 0;
+        while (totalRead < fileSize) {
+          int n = channel.read(allBuf, totalRead);
+          if (n < 0) break;
+          totalRead += n;
+        }
+        return extractXmpmetaFallback(allBytes);
+      }
 
       // Phase 2: find <?xpacket end=...?> after the last begin marker
       offset = lastBeginFilePos;
@@ -1051,16 +1163,41 @@ public final class PdfDocument implements AutoCloseable {
       lastBeginPos = pos;
       searchFrom = pos + 1;
     }
+
+    if (lastBeginPos >= 0) {
+      int endPos = indexOf(pdf, endMarker, lastBeginPos);
+      if (endPos >= 0) {
+        int endTagClose =
+            indexOf(pdf, "?>".getBytes(java.nio.charset.StandardCharsets.US_ASCII), endPos);
+        if (endTagClose >= 0) {
+          int packetEnd = endTagClose + 2;
+          byte[] xmp = new byte[packetEnd - lastBeginPos];
+          System.arraycopy(pdf, lastBeginPos, xmp, 0, xmp.length);
+          return xmp;
+        }
+      }
+    }
+
+    // Fallback: scan for <x:xmpmeta ...> ... </x:xmpmeta> (no xpacket wrapper)
+    return extractXmpmetaFallback(pdf);
+  }
+
+  private static byte[] extractXmpmetaFallback(byte[] pdf) {
+    byte[] beginTag = "<x:xmpmeta".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    byte[] endTag = "</x:xmpmeta>".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    // Find LAST <x:xmpmeta occurrence
+    int lastBeginPos = -1;
+    int searchFrom = 0;
+    while (searchFrom < pdf.length) {
+      int pos = indexOf(pdf, beginTag, searchFrom);
+      if (pos < 0) break;
+      lastBeginPos = pos;
+      searchFrom = pos + 1;
+    }
     if (lastBeginPos < 0) return new byte[0];
-
-    int endPos = indexOf(pdf, endMarker, lastBeginPos);
+    int endPos = indexOf(pdf, endTag, lastBeginPos);
     if (endPos < 0) return new byte[0];
-
-    int endTagClose =
-        indexOf(pdf, "?>".getBytes(java.nio.charset.StandardCharsets.US_ASCII), endPos);
-    if (endTagClose < 0) return new byte[0];
-    int packetEnd = endTagClose + 2;
-
+    int packetEnd = endPos + endTag.length;
     byte[] xmp = new byte[packetEnd - lastBeginPos];
     System.arraycopy(pdf, lastBeginPos, xmp, 0, xmp.length);
     return xmp;
