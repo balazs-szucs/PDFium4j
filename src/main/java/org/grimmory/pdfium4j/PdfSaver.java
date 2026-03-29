@@ -25,12 +25,12 @@ import org.grimmory.pdfium4j.model.MetadataTag;
  * Handles saving PDF documents. Uses PDFium's native FPDF_SaveAsCopy for the base save, then
  * applies pure-Java incremental updates for Info dictionary and XMP metadata.
  *
- * <p><strong>Why custom code is needed:</strong> PDFium's open-source public C API provides
- * {@code FPDF_GetMetaText} for reading metadata but has no corresponding setter function (no
- * {@code FPDF_SetMetaText}). The {@code FPDF_INCREMENTAL} save flag is non-functional in practice
- * (it does not append modified object streams). Therefore, setting Info dictionary or XMP metadata
- * requires a pure-Java incremental update appended after PDFium's native serialization. This is the
- * only custom PDF byte manipulation in the library; all other operations delegate to PDFium.
+ * <p><strong>Why custom code is needed:</strong> PDFium's open-source public C API provides {@code
+ * FPDF_GetMetaText} for reading metadata but has no corresponding setter function (no {@code
+ * FPDF_SetMetaText}). The {@code FPDF_INCREMENTAL} save flag is non-functional in practice (it does
+ * not append modified object streams). Therefore, setting Info dictionary or XMP metadata requires
+ * a pure-Java incremental update appended after PDFium's native serialization. This is the only
+ * custom PDF byte manipulation in the library; all other operations delegate to PDFium.
  *
  * <p>Incremental updates (PDF spec §7.5.6) append new objects, a new xref section, and a new
  * trailer at the end of the file - the original bytes are never modified. This is the standard
@@ -190,8 +190,7 @@ final class PdfSaver {
       try {
         MemorySegment tagSeg = arena.allocateFrom(entry.getKey().pdfKey());
         long needed =
-            (long)
-                DocBindings.FPDF_GetMetaText.invokeExact(doc, tagSeg, MemorySegment.NULL, 0L);
+            (long) DocBindings.FPDF_GetMetaText.invokeExact(doc, tagSeg, MemorySegment.NULL, 0L);
         if (needed > 2) {
           // At least one tag is readable - Info dictionary is intact
           return true;
@@ -203,8 +202,8 @@ final class PdfSaver {
   }
 
   /**
-   * Append a PDF incremental update containing new Info dictionary and/or XMP metadata objects. This
-   * appends after the existing %%EOF - the original file bytes are untouched.
+   * Append a PDF incremental update containing new Info dictionary and/or XMP metadata objects.
+   * This appends after the existing %%EOF - the original file bytes are untouched.
    *
    * <p>All parsing is restricted to the tail of the file where trailer/xref structures live, making
    * it immune to false matches in binary stream data.
@@ -212,13 +211,12 @@ final class PdfSaver {
   private static byte[] appendIncrementalUpdate(
       byte[] pdf, Map<MetadataTag, String> metadata, String xmp) {
     String tail = tailString(pdf);
-    int tailOffset = pdf.length - tail.length();
 
     // Find previous startxref value (points to the current xref/xref-stream)
-    int prevXrefOffset = findStartxrefInTail(tail, tailOffset);
+    int prevXrefOffset = findStartxrefInTail(tail);
 
     // Parse existing trailer to get /Size, /Root, /Info
-    TrailerInfo trailer = parseTrailerFromTail(pdf, tail, tailOffset);
+    TrailerInfo trailer = parseTrailerFromTail(pdf, tail);
 
     // Use /Size from trailer for next object number (per PDF spec, /Size = total entries in xref)
     int nextObj = trailer.size;
@@ -277,7 +275,7 @@ final class PdfSaver {
       update.append(entry.getValue());
     }
 
-    boolean xrefStream = usesXrefStreams(pdf, tail, tailOffset);
+    boolean xrefStream = usesXrefStreams(pdf, tail);
     if (xrefStream) {
       int xrefStreamObjNum = nextObj++;
       String infoRef = (infoObjNum > 0) ? (infoObjNum + " 0 R") : trailer.infoRef;
@@ -332,8 +330,7 @@ final class PdfSaver {
       byte[] pdf, TrailerInfo originalTrailer, int metadataObjNum, int sizeBase) {
     // Re-parse the tail of the (already modified) PDF to get current state
     String tail = tailString(pdf);
-    int tailOffset = pdf.length - tail.length();
-    boolean xrefStream = usesXrefStreams(pdf, tail, tailOffset);
+    boolean xrefStream = usesXrefStreams(pdf, tail);
 
     // Find the Catalog object - search entire file for the specific object
     int catalogObjNum = extractObjNum(originalTrailer.rootRef);
@@ -367,8 +364,8 @@ final class PdfSaver {
     int catalogOffset = baseOffset + update.length();
     update.append(newCatalog);
 
-    int actualPrev = findStartxrefInTail(tail, tailOffset);
-    TrailerInfo currentTrailer = parseTrailerFromTail(pdf, tail, tailOffset);
+    int actualPrev = findStartxrefInTail(tail);
+    TrailerInfo currentTrailer = parseTrailerFromTail(pdf, tail);
 
     if (xrefStream) {
       int xrefStreamObjNum = currentTrailer.size;
@@ -477,7 +474,7 @@ final class PdfSaver {
   /**
    * Parse trailer information from the tail of the file. Extracts /Root, /Info, and /Size entries.
    */
-  private static TrailerInfo parseTrailerFromTail(byte[] pdf, String tail, int tailOffset) {
+  private static TrailerInfo parseTrailerFromTail(byte[] pdf, String tail) {
     // Try traditional trailer first (search tail for "trailer" keyword)
     String rootRef = findTrailerEntryInTail(tail, "Root");
     String infoRef = findTrailerEntryInTail(tail, "Info");
@@ -488,7 +485,7 @@ final class PdfSaver {
     }
 
     // For cross-reference streams, parse the dictionary at the startxref offset
-    int startxref = findStartxrefInTail(tail, tailOffset);
+    int startxref = findStartxrefInTail(tail);
     if (startxref > 0 && startxref < pdf.length) {
       // Read a small window around the xref stream object
       int windowStart = startxref;
@@ -571,7 +568,7 @@ final class PdfSaver {
   }
 
   /** Find the startxref value from the tail of the file. */
-  private static int findStartxrefInTail(String tail, int tailOffset) {
+  private static int findStartxrefInTail(String tail) {
     int idx = tail.lastIndexOf("startxref");
     if (idx < 0) return 0;
     String after = tail.substring(idx + "startxref".length()).trim();
@@ -588,8 +585,8 @@ final class PdfSaver {
    * Detect whether the PDF uses cross-reference streams (§7.5.8). Reads only the bytes at the
    * startxref offset, not the entire file.
    */
-  private static boolean usesXrefStreams(byte[] pdf, String tail, int tailOffset) {
-    int startxref = findStartxrefInTail(tail, tailOffset);
+  private static boolean usesXrefStreams(byte[] pdf, String tail) {
+    int startxref = findStartxrefInTail(tail);
     if (startxref <= 0 || startxref >= pdf.length) return false;
     int peekEnd = Math.min(startxref + 200, pdf.length);
     String peek =

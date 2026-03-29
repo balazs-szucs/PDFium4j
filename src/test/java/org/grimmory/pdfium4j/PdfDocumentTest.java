@@ -1420,9 +1420,7 @@ class PdfDocumentTest {
     assertTrue(Files.size(pdf) > 0, "Saved file should not be empty");
     try (PdfDocument doc = PdfDocument.open(pdf)) {
       assertEquals(
-          originalPageCount,
-          doc.pageCount(),
-          "Save with no changes should preserve page count");
+          originalPageCount, doc.pageCount(), "Save with no changes should preserve page count");
     }
   }
 
@@ -1432,7 +1430,6 @@ class PdfDocumentTest {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
 
-    long originalSize = Files.size(testPdf);
     Path pdf = tempDir.resolve("xmp-only.pdf");
     Files.copy(testPdf, pdf);
 

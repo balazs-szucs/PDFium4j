@@ -51,7 +51,6 @@ public final class PdfDocument implements AutoCloseable {
   private final Thread ownerThread;
   private final List<PdfPage> openPages;
   private volatile boolean closed = false;
-  private volatile boolean structurallyModified = false;
   private final Map<MetadataTag, String> pendingMetadata = new LinkedHashMap<>();
   private String pendingXmpMetadata = null;
 
@@ -429,7 +428,7 @@ public final class PdfDocument implements AutoCloseable {
               ownerThread,
               policy.maxRenderPixels(),
               () -> unregisterPage(holder[0]),
-              () -> structurallyModified = true);
+              () -> {});
       holder[0] = page;
       registerPage(page);
       return page;
@@ -686,7 +685,6 @@ public final class PdfDocument implements AutoCloseable {
     }
     try {
       EditBindings.FPDFPage_Delete.invokeExact(handle, pageIndex);
-      structurallyModified = true;
     } catch (Throwable t) {
       throw new PdfiumException("Failed to delete page " + pageIndex, t);
     }
@@ -717,7 +715,6 @@ public final class PdfDocument implements AutoCloseable {
       } finally {
         ViewBindings.FPDF_ClosePage.invokeExact(pageSeg);
       }
-      structurallyModified = true;
     } catch (PdfiumException e) {
       throw e;
     } catch (Throwable t) {
@@ -754,7 +751,6 @@ public final class PdfDocument implements AutoCloseable {
       if (ok == 0) {
         throw new PdfiumException("FPDF_ImportPages failed for range: " + pageRange);
       }
-      structurallyModified = true;
     } catch (PdfiumException e) {
       throw e;
     } catch (Throwable t) {
@@ -1291,7 +1287,6 @@ public final class PdfDocument implements AutoCloseable {
     }
     return merged;
   }
-
 
   /**
    * Save the document directly to an OutputStream, suitable for streaming responses (e.g., HTTP
