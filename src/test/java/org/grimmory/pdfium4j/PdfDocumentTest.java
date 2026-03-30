@@ -1426,6 +1426,84 @@ class PdfDocumentTest {
 
   @Test
   @EnabledIf("pdfiumAvailable")
+  void xmpStreamLengthMatchesUtf8Content(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    // XMP with BOM (U+FEFF, 3 bytes in UTF-8) and non-ASCII content
+    String xmpWithUnicode =
+        """
+            <?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>
+            <x:xmpmeta xmlns:x="adobe:ns:meta/">
+              <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                <rdf:Description rdf:about=""
+                    xmlns:dc="http://purl.org/dc/elements/1.1/">
+                  <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Ünîcödé Títlé — «Книга»</rdf:li></rdf:Alt></dc:title>
+                  <dc:creator><rdf:Seq><rdf:li>José García — 日本語著者</rdf:li></rdf:Seq></dc:creator>
+                </rdf:Description>
+              </rdf:RDF>
+            </x:xmpmeta>
+            <?xpacket end="w"?>""";
+
+    Path pdf = tempDir.resolve("unicode-xmp.pdf");
+    Files.copy(testPdf, pdf);
+
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      doc.setXmpMetadata(xmpWithUnicode);
+      doc.save(pdf);
+    }
+
+    // Verify the PDF structure: /Length value must match actual stream bytes
+    byte[] savedBytes = Files.readAllBytes(pdf);
+    String savedText = new String(savedBytes, StandardCharsets.ISO_8859_1);
+    int metaIdx = savedText.indexOf("/Type /Metadata /Subtype /XML /Length ");
+    assertTrue(metaIdx > 0, "XMP metadata stream object should be present");
+
+    // Extract the declared /Length value
+    int lengthStart = metaIdx + "/Type /Metadata /Subtype /XML /Length ".length();
+    int lengthEnd = savedText.indexOf(' ', lengthStart);
+    if (lengthEnd < 0) lengthEnd = savedText.indexOf('>', lengthStart);
+    int declaredLength = Integer.parseInt(savedText.substring(lengthStart, lengthEnd).trim());
+
+    // Find actual stream content between "stream\n" and "\nendstream"
+    int streamKeyword = savedText.indexOf("stream\n", metaIdx);
+    assertTrue(streamKeyword > 0, "stream keyword should follow XMP object");
+    int streamStart = streamKeyword + "stream\n".length();
+    // Search for endstream in raw bytes from streamStart
+    int endstreamIdx =
+        indexOf(savedBytes, "endstream".getBytes(StandardCharsets.ISO_8859_1), streamStart);
+    assertTrue(endstreamIdx > 0, "endstream should be present");
+    // The newline before endstream is part of the delimiter, not the content
+    int actualContentLength = endstreamIdx - 1 - streamStart;
+
+    assertEquals(
+        declaredLength,
+        actualContentLength,
+        "XMP stream /Length must match actual UTF-8 content bytes");
+
+    // Verify the XMP content is properly readable
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      String xmp = doc.xmpMetadataString();
+      assertTrue(xmp.contains("Ünîcödé"), "Non-ASCII title should be preserved");
+      assertTrue(xmp.contains("Книга"), "Cyrillic text should be preserved");
+      assertTrue(xmp.contains("日本語著者"), "CJK text should be preserved");
+    }
+  }
+
+  private static int indexOf(byte[] data, byte[] pattern, int from) {
+    int limit = data.length - pattern.length;
+    outer:
+    for (int i = from; i <= limit; i++) {
+      for (int j = 0; j < pattern.length; j++) {
+        if (data[i + j] != pattern[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
   void xmpOnlySaveUsesIncrementalUpdate(@TempDir Path tempDir) throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;

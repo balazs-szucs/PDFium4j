@@ -13,6 +13,6 @@ public record SaveOptions(boolean skipValidation) {
   /** Default options: full validation enabled. */
   public static final SaveOptions DEFAULT = new SaveOptions(false);
 
-  /** Skip validation — use only when the save is metadata-only. */
+  /** Skip validation use only when the save is metadata-only. */
   public static final SaveOptions SKIP_VALIDATION = new SaveOptions(true);
 }
