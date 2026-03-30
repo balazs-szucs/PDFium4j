@@ -246,11 +246,19 @@ final class PdfSaver {
       return pdf;
     }
 
-    // Track new objects: objNum -> content
-    Map<Integer, String> newObjects = new LinkedHashMap<>();
+    int baseOffset = pdf.length;
+    // Use ByteArrayOutputStream to properly handle mixed encodings: XMP stream content is UTF-8
+    // while all other PDF syntax is ISO-8859-1.  A StringBuilder approach would mangle non-ASCII
+    // XMP characters and produce wrong /Length values.
+    ByteArrayOutputStream update = new ByteArrayOutputStream();
+    update.write('\n'); // separator after %%EOF
+    int bytesWritten = 1;
+
+    Map<Integer, Integer> objOffsets = new LinkedHashMap<>();
     int infoObjNum = 0;
     int xmpObjNum = 0;
 
+    // Info dictionary - pure ASCII/ISO-8859-1 values (PDFDocEncoding uses hex escapes)
     if (metadata != null && !metadata.isEmpty()) {
       infoObjNum = nextObj++;
       StringBuilder infoObj = new StringBuilder();
@@ -263,72 +271,71 @@ final class PdfSaver {
       }
       infoObj.append("/ModDate ").append(encodePdfString(formatPdfDate())).append("\n");
       infoObj.append(">>\nendobj\n");
-      newObjects.put(infoObjNum, infoObj.toString());
+      byte[] infoBytes = infoObj.toString().getBytes(StandardCharsets.ISO_8859_1);
+      objOffsets.put(infoObjNum, baseOffset + bytesWritten);
+      update.writeBytes(infoBytes);
+      bytesWritten += infoBytes.length;
     }
 
+    // XMP stream - content MUST be UTF-8 (XMP spec requirement, and may contain BOM + non-ASCII
+    // metadata).  The stream header/footer are ASCII, so only the content portion uses UTF-8.
     if (xmp != null && !xmp.isEmpty()) {
       xmpObjNum = nextObj++;
-      byte[] xmpBytes = xmp.getBytes(StandardCharsets.UTF_8);
-      String xmpObj =
-          xmpObjNum
-              + " 0 obj\n"
-              + "<< /Type /Metadata /Subtype /XML /Length "
-              + xmpBytes.length
-              + " >>\n"
-              + "stream\n"
-              + xmp
-              + "\nendstream\nendobj\n";
-      newObjects.put(xmpObjNum, xmpObj);
+      byte[] xmpContentBytes = xmp.getBytes(StandardCharsets.UTF_8);
+      byte[] headerBytes =
+          (xmpObjNum
+                  + " 0 obj\n<< /Type /Metadata /Subtype /XML /Length "
+                  + xmpContentBytes.length
+                  + " >>\nstream\n")
+              .getBytes(StandardCharsets.ISO_8859_1);
+      byte[] footerBytes = "\nendstream\nendobj\n".getBytes(StandardCharsets.ISO_8859_1);
+      objOffsets.put(xmpObjNum, baseOffset + bytesWritten);
+      update.writeBytes(headerBytes);
+      update.writeBytes(xmpContentBytes);
+      update.writeBytes(footerBytes);
+      bytesWritten += headerBytes.length + xmpContentBytes.length + footerBytes.length;
     }
 
-    // Build the incremental update
-    int baseOffset = pdf.length;
-    StringBuilder update = new StringBuilder();
-    update.append('\n'); // separator after %%EOF
-
-    // Write new objects and record their offsets
-    Map<Integer, Integer> objOffsets = new LinkedHashMap<>();
-    for (Map.Entry<Integer, String> entry : newObjects.entrySet()) {
-      objOffsets.put(entry.getKey(), baseOffset + update.length());
-      update.append(entry.getValue());
-    }
-
+    // Xref / trailer section
     boolean xrefStream = usesXrefStreams(pdf, tail);
     if (xrefStream) {
       int xrefStreamObjNum = nextObj++;
       String infoRef = (infoObjNum > 0) ? (infoObjNum + " 0 R") : trailer.infoRef;
-      appendXrefStreamSection(
-          update,
-          xrefStreamObjNum,
-          objOffsets,
-          trailer.rootRef,
-          infoRef,
-          nextObj,
-          prevXrefOffset,
-          baseOffset);
+      byte[] xrefBytes =
+          buildXrefStreamBytes(
+              xrefStreamObjNum,
+              baseOffset + bytesWritten,
+              objOffsets,
+              trailer.rootRef,
+              infoRef,
+              nextObj,
+              prevXrefOffset);
+      update.writeBytes(xrefBytes);
     } else {
-      int xrefOffset = baseOffset + update.length();
-      update.append("xref\n");
+      int xrefOffset = baseOffset + bytesWritten;
+      StringBuilder xrefSb = new StringBuilder();
+      xrefSb.append("xref\n");
       for (Map.Entry<Integer, Integer> entry : objOffsets.entrySet()) {
-        update.append(entry.getKey()).append(" 1\n");
-        update.append(String.format("%010d", entry.getValue())).append(" 00000 n \r\n");
+        xrefSb.append(entry.getKey()).append(" 1\n");
+        xrefSb.append(String.format("%010d", entry.getValue())).append(" 00000 n \r\n");
       }
-      update.append("trailer\n");
-      update.append("<< /Size ").append(nextObj);
-      update.append(" /Root ").append(trailer.rootRef);
+      xrefSb.append("trailer\n");
+      xrefSb.append("<< /Size ").append(nextObj);
+      xrefSb.append(" /Root ").append(trailer.rootRef);
       if (infoObjNum > 0) {
-        update.append(" /Info ").append(infoObjNum).append(" 0 R");
+        xrefSb.append(" /Info ").append(infoObjNum).append(" 0 R");
       } else if (trailer.infoRef != null) {
-        update.append(" /Info ").append(trailer.infoRef);
+        xrefSb.append(" /Info ").append(trailer.infoRef);
       }
-      update.append(" /Prev ").append(prevXrefOffset);
-      update.append(" >>\n");
-      update.append("startxref\n");
-      update.append(xrefOffset).append("\n");
-      update.append("%%EOF\n");
+      xrefSb.append(" /Prev ").append(prevXrefOffset);
+      xrefSb.append(" >>\n");
+      xrefSb.append("startxref\n");
+      xrefSb.append(xrefOffset).append("\n");
+      xrefSb.append("%%EOF\n");
+      update.writeBytes(xrefSb.toString().getBytes(StandardCharsets.ISO_8859_1));
     }
 
-    byte[] updateBytes = update.toString().getBytes(StandardCharsets.ISO_8859_1);
+    byte[] updateBytes = update.toByteArray();
     byte[] result = new byte[pdf.length + updateBytes.length];
     System.arraycopy(pdf, 0, result, 0, pdf.length);
     System.arraycopy(updateBytes, 0, result, pdf.length, updateBytes.length);
@@ -474,6 +481,64 @@ final class PdfSaver {
     update.append("\nendstream\nendobj\n");
     update.append("startxref\n").append(xrefStreamOffset).append('\n');
     update.append("%%EOF\n");
+  }
+
+  /**
+   * Build a cross-reference stream section as raw bytes. Used by {@link #appendIncrementalUpdate}
+   * which assembles the update as a {@link ByteArrayOutputStream} to properly handle mixed
+   * encodings (UTF-8 XMP content + ISO-8859-1 PDF syntax).
+   *
+   * @param xrefStreamOffset the byte offset of this xref stream object (for startxref)
+   */
+  private static byte[] buildXrefStreamBytes(
+      int xrefStreamObjNum,
+      int xrefStreamOffset,
+      Map<Integer, Integer> objOffsets,
+      String rootRef,
+      String infoRef,
+      int size,
+      int prevXref) {
+    byte[] streamData = new byte[objOffsets.size() * 5];
+    StringBuilder indexParts = new StringBuilder();
+    int dataIdx = 0;
+    for (Map.Entry<Integer, Integer> entry : objOffsets.entrySet()) {
+      if (indexParts.length() > 0) indexParts.append(' ');
+      indexParts.append(entry.getKey()).append(" 1");
+      streamData[dataIdx++] = 1;
+      int offset = entry.getValue();
+      streamData[dataIdx++] = (byte) ((offset >> 24) & 0xFF);
+      streamData[dataIdx++] = (byte) ((offset >> 16) & 0xFF);
+      streamData[dataIdx++] = (byte) ((offset >> 8) & 0xFF);
+      streamData[dataIdx++] = (byte) (offset & 0xFF);
+    }
+
+    StringBuilder header = new StringBuilder();
+    header.append(xrefStreamObjNum).append(" 0 obj\n");
+    header.append("<< /Type /XRef");
+    header.append(" /Size ").append(size);
+    header.append(" /Root ").append(rootRef);
+    if (infoRef != null) {
+      header.append(" /Info ").append(infoRef);
+    }
+    header.append(" /Prev ").append(prevXref);
+    header.append(" /W [1 4 0]");
+    header.append(" /Index [").append(indexParts).append(']');
+    header.append(" /Length ").append(streamData.length);
+    header.append(" >>\nstream\n");
+
+    byte[] headerBytes = header.toString().getBytes(StandardCharsets.ISO_8859_1);
+    byte[] footerBytes = "\nendstream\nendobj\n".getBytes(StandardCharsets.ISO_8859_1);
+    byte[] startxrefBytes =
+        ("startxref\n" + xrefStreamOffset + "\n%%EOF\n").getBytes(StandardCharsets.ISO_8859_1);
+
+    ByteArrayOutputStream bos =
+        new ByteArrayOutputStream(
+            headerBytes.length + streamData.length + footerBytes.length + startxrefBytes.length);
+    bos.writeBytes(headerBytes);
+    bos.writeBytes(streamData);
+    bos.writeBytes(footerBytes);
+    bos.writeBytes(startxrefBytes);
+    return bos.toByteArray();
   }
 
   // --- Tail-based parsing (only parses end of file, immune to binary stream false matches) ---
