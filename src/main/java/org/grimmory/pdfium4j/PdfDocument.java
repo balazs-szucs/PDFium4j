@@ -1242,7 +1242,17 @@ public final class PdfDocument implements AutoCloseable {
    * @param path output file path
    */
   public void save(Path path) {
-    byte[] bytes = saveToBytes();
+    save(path, SaveOptions.DEFAULT);
+  }
+
+  /**
+   * Save the document to a file with custom save options.
+   *
+   * @param path output file path
+   * @param options save options controlling validation behavior
+   */
+  public void save(Path path, SaveOptions options) {
+    byte[] bytes = saveToBytes(options);
     try {
       Files.write(path, bytes);
     } catch (IOException e) {
@@ -1256,9 +1266,20 @@ public final class PdfDocument implements AutoCloseable {
    * @return the complete PDF file content
    */
   public byte[] saveToBytes() {
+    return saveToBytes(SaveOptions.DEFAULT);
+  }
+
+  /**
+   * Save the document to a byte array with custom save options.
+   *
+   * @param options save options controlling validation behavior
+   * @return the complete PDF file content
+   */
+  public byte[] saveToBytes(SaveOptions options) {
     ensureOpen();
     Map<MetadataTag, String> mergedMetadata = buildMergedMetadata();
-    return PdfSaver.saveToBytes(handle, mergedMetadata, pendingXmpMetadata);
+    return PdfSaver.saveToBytes(
+        handle, mergedMetadata, pendingXmpMetadata, options.skipValidation());
   }
 
   /**
@@ -1296,7 +1317,18 @@ public final class PdfDocument implements AutoCloseable {
    * @throws PdfiumException if saving fails
    */
   public void save(OutputStream out) {
-    byte[] bytes = saveToBytes();
+    save(out, SaveOptions.DEFAULT);
+  }
+
+  /**
+   * Save the document directly to an OutputStream with custom save options.
+   *
+   * @param out the output stream to write to
+   * @param options save options controlling validation behavior
+   * @throws PdfiumException if saving fails
+   */
+  public void save(OutputStream out, SaveOptions options) {
+    byte[] bytes = saveToBytes(options);
     try {
       out.write(bytes);
     } catch (IOException e) {
