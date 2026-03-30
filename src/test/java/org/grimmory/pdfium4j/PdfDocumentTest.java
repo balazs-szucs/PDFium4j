@@ -1470,7 +1470,8 @@ class PdfDocumentTest {
     assertTrue(streamKeyword > 0, "stream keyword should follow XMP object");
     int streamStart = streamKeyword + "stream\n".length();
     // Search for endstream in raw bytes from streamStart
-    int endstreamIdx = indexOf(savedBytes, "endstream".getBytes(StandardCharsets.ISO_8859_1), streamStart);
+    int endstreamIdx =
+        indexOf(savedBytes, "endstream".getBytes(StandardCharsets.ISO_8859_1), streamStart);
     assertTrue(endstreamIdx > 0, "endstream should be present");
     // The newline before endstream is part of the delimiter, not the content
     int actualContentLength = endstreamIdx - 1 - streamStart;
