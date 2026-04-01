@@ -83,8 +83,8 @@ final class PdfSaver {
    *     incremental update. Eliminates a full PDF re-open (~30-40% of save time). Safe for
    *     metadata-only changes.
    * @param originalBytes when non-null, use these as the base PDF bytes instead of calling
-   *     FPDF_SaveAsCopy. This avoids re-serializing through PDFium which unpacks Object Streams
-   *     and causes massive file bloating on complex PDFs.
+   *     FPDF_SaveAsCopy. This avoids re-serializing through PDFium which unpacks Object Streams and
+   *     causes massive file bloating on complex PDFs.
    */
   static byte[] saveToBytes(
       MemorySegment docHandle,

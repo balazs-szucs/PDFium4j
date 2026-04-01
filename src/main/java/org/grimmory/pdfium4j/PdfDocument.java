@@ -51,7 +51,7 @@ public final class PdfDocument implements AutoCloseable {
   private final Thread ownerThread;
   private final List<PdfPage> openPages;
   private volatile boolean closed = false;
-  private boolean structurallyModified = false;
+  private volatile boolean structurallyModified = false;
   private final Map<MetadataTag, String> pendingMetadata = new LinkedHashMap<>();
   private String pendingXmpMetadata = null;
 

@@ -754,6 +754,31 @@ class PdfDocumentTest {
 
   @Test
   @EnabledIf("pdfiumAvailable")
+  void importPages(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    try (PdfDocument doc1 = PdfDocument.open(testPdf);
+        PdfDocument doc2 = PdfDocument.open(testPdf)) {
+      int initialCount = doc1.pageCount();
+      doc1.importPages(doc2, "1", initialCount);
+      assertEquals(initialCount + 1, doc1.pageCount());
+
+      doc1.importAllPages(doc2);
+      assertEquals(initialCount + 1 + initialCount, doc1.pageCount());
+
+      Path out = tempDir.resolve("merged.pdf");
+      doc1.save(out);
+      assertTrue(Files.exists(out));
+
+      try (PdfDocument merged = PdfDocument.open(out)) {
+        assertEquals(doc1.pageCount(), merged.pageCount());
+      }
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
   void deletePageOutOfRange() throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
