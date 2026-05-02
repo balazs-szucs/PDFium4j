@@ -1,8 +1,11 @@
 package org.grimmory.pdfium4j;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.StringWriter;
 import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -83,6 +86,27 @@ public final class XmpMetadataWriter {
     return sw.toString();
   }
 
+  /**
+   * Serialize an {@link XmpMetadata} record directly to an {@link OutputStream} using
+   * UTF-8 encoding to avoid intermediate String allocations.
+   *
+   * @param metadata the metadata to serialize
+   * @param out the caller-owned stream to write to (this method never closes it)
+   * @throws IOException if an I/O error occurs
+   */
+  public void write(XmpMetadata metadata, OutputStream out) throws IOException {
+    Writer w = new OutputStreamWriter(out, StandardCharsets.UTF_8);
+    writeToWriter(metadata, w);
+    w.flush();
+  }
+
+  /**
+   * Internal serialization logic using a {@link Writer}.
+   *
+   * @param metadata the metadata to serialize
+   * @param w the writer to use
+   * @throws IOException if an I/O error occurs
+   */
   private void writeToWriter(XmpMetadata metadata, Writer w) throws IOException {
     w.write("<?xpacket begin=\"\uFEFF\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n");
     w.write("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n");

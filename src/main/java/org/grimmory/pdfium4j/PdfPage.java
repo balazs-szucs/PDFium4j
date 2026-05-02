@@ -4,9 +4,9 @@ import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_DOUBLE;
 import static java.lang.foreign.ValueLayout.JAVA_FLOAT;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_SHORT;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -19,6 +19,7 @@ import org.grimmory.pdfium4j.internal.AnnotBindings;
 import org.grimmory.pdfium4j.internal.BitmapBindings;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
+import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.internal.TextBindings;
 import org.grimmory.pdfium4j.internal.ViewBindings;
 import org.grimmory.pdfium4j.model.AnnotationType;
@@ -136,7 +137,7 @@ public final class PdfPage implements AutoCloseable {
   }
 
   /**
-   * Extract all text content from this page.
+   * Extract all text content from this page into a single string.
    *
    * @return the page text, or empty string if no text content
    */
@@ -149,18 +150,94 @@ public final class PdfPage implements AutoCloseable {
             return "";
           }
 
-          try (Arena arena = Arena.ofConfined()) {
-            long bufSize = ((long) charCount + 1) * 2;
-            MemorySegment buf = arena.allocate(bufSize);
+          long bufSize = ((long) charCount + 1) * 2;
+          MemorySegment buf = ScratchBuffer.get(bufSize);
 
-            int written =
-                (int) TextBindings.FPDFText_GetText.invokeExact(textPage, 0, charCount, buf);
-            if (written <= 0) {
-              return "";
+          int written =
+              (int) TextBindings.FPDFText_GetText.invokeExact(textPage, 0, charCount, buf);
+          if (written <= 0) {
+            return "";
+          }
+
+          // Reuses a thread-local char array to minimize heap churn during mass text extraction.
+          char[] chars = ScratchBuffer.getCharArray(written);
+          for (int i = 0; i < written; i++) {
+            // Cast via short is safe: char is unsigned 16-bit, short is signed 16-bit,
+            // the bit pattern is preserved by the narrowing cast.
+            chars[i] = (char) buf.get(JAVA_SHORT, i * 2L);
+          }
+          // Native text buffers are null-terminated; we exclude the terminator if present to maintain clean Java String semantics.
+          int effectiveLen = written;
+          if (written > 0 && chars[written - 1] == '\0') {
+            effectiveLen--;
+          }
+          return new String(chars, 0, effectiveLen);
+        });
+  }
+
+  /**
+   * Functional interface for character box visitation.
+   *
+   * @see #forEachCharBox(CharBoxVisitor)
+   */
+  @FunctionalInterface
+  public interface CharBoxVisitor {
+    /**
+     * Called for each character on the page.
+     *
+     * @param charCode Unicode character code
+     * @param left character left bound
+     * @param bottom character bottom bound
+     * @param right character right bound
+     * @param top character top bound
+     * @param fontSize character font size
+     */
+    void visit(int charCode, double left, double bottom, double right, double top, double fontSize);
+  }
+
+  /**
+   * Efficiently iterate over every character on the page without allocating a list of records.
+   * Useful for text analysis and search without GC pressure.
+   *
+   * @param visitor callback for each character found
+   */
+  public void forEachCharBox(CharBoxVisitor visitor) {
+    ensureOpen();
+    withTextPage(
+        "Failed to iterate char boxes",
+        textPage -> {
+          int charCount = (int) TextBindings.FPDFText_CountChars.invokeExact(textPage);
+          if (charCount <= 0) return null;
+
+          MemorySegment loopScratch = ScratchBuffer.getLoopScratch(4 * JAVA_DOUBLE.byteSize());
+          MemorySegment leftSeg = loopScratch.asSlice(0, JAVA_DOUBLE.byteSize());
+          MemorySegment rightSeg = loopScratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+          MemorySegment bottomSeg = loopScratch.asSlice(2 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+          MemorySegment topSeg = loopScratch.asSlice(3 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+
+          for (int i = 0; i < charCount; i++) {
+            int charCode = (int) TextBindings.FPDFText_GetUnicode.invokeExact(textPage, i);
+            if (charCode <= 0 || charCode == UNICODE_BOM || charCode == UNICODE_INVALID) {
+              continue;
             }
 
-            return FfmHelper.fromWideString(buf, (long) written * 2);
+            int ok =
+                (int)
+                    TextBindings.FPDFText_GetCharBox.invokeExact(
+                        textPage, i, leftSeg, rightSeg, bottomSeg, topSeg);
+
+            double left = 0, right = 0, bottom = 0, top = 0;
+            if (ok != 0) {
+              left = leftSeg.get(JAVA_DOUBLE, 0);
+              right = rightSeg.get(JAVA_DOUBLE, 0);
+              bottom = bottomSeg.get(JAVA_DOUBLE, 0);
+              top = topSeg.get(JAVA_DOUBLE, 0);
+            }
+
+            double fontSize = (double) TextBindings.FPDFText_GetFontSize.invokeExact(textPage, i);
+            visitor.visit(charCode, left, bottom, right, top, fontSize);
           }
+          return null;
         });
   }
 
@@ -398,46 +475,15 @@ public final class PdfPage implements AutoCloseable {
    * @return list of character info records, or empty list if no text
    */
   public List<TextCharInfo> extractTextWithBounds() {
-    return withTextPage(
-        "Failed to extract text with bounds",
-        textPage -> {
-          int charCount = (int) TextBindings.FPDFText_CountChars.invokeExact(textPage);
-          if (charCount <= 0) {
-            return List.of();
-          }
-
-          List<TextCharInfo> result = new ArrayList<>(charCount);
-          try (Arena arena = Arena.ofConfined()) {
-            MemorySegment leftSeg = arena.allocate(JAVA_DOUBLE);
-            MemorySegment rightSeg = arena.allocate(JAVA_DOUBLE);
-            MemorySegment bottomSeg = arena.allocate(JAVA_DOUBLE);
-            MemorySegment topSeg = arena.allocate(JAVA_DOUBLE);
-
-            for (int i = 0; i < charCount; i++) {
-              int charCode = (int) TextBindings.FPDFText_GetUnicode.invokeExact(textPage, i);
-              if (charCode <= 0 || charCode == UNICODE_BOM || charCode == UNICODE_INVALID) {
-                continue;
-              }
-
-              int ok =
-                  (int)
-                      TextBindings.FPDFText_GetCharBox.invokeExact(
-                          textPage, i, leftSeg, rightSeg, bottomSeg, topSeg);
-
-              double left = 0, right = 0, bottom = 0, top = 0;
-              if (ok != 0) {
-                left = leftSeg.get(JAVA_DOUBLE, 0);
-                right = rightSeg.get(JAVA_DOUBLE, 0);
-                bottom = bottomSeg.get(JAVA_DOUBLE, 0);
-                top = topSeg.get(JAVA_DOUBLE, 0);
-              }
-
-              double fontSize = (double) TextBindings.FPDFText_GetFontSize.invokeExact(textPage, i);
-              result.add(new TextCharInfo(charCode, left, bottom, right, top, fontSize));
-            }
-          }
-          return List.copyOf(result);
+    ensureOpen();
+    int count = charCount();
+    if (count <= 0) return Collections.emptyList();
+    List<TextCharInfo> result = new ArrayList<>(count);
+    forEachCharBox(
+        (charCode, left, bottom, right, top, fontSize) -> {
+          result.add(new TextCharInfo(charCode, left, bottom, right, top, fontSize));
         });
+    return List.copyOf(result);
   }
 
   /**
@@ -508,8 +554,8 @@ public final class PdfPage implements AutoCloseable {
   }
 
   private static PdfAnnotation.Rect getAnnotRect(MemorySegment annot) {
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment rectSeg = arena.allocate(AnnotBindings.FS_RECTF_LAYOUT);
+    try {
+      MemorySegment rectSeg = ScratchBuffer.get(AnnotBindings.FS_RECTF_LAYOUT.byteSize());
       int ok = (int) AnnotBindings.FPDFAnnot_GetRect.invokeExact(annot, rectSeg);
       if (ok != 0) {
         float left = rectSeg.get(JAVA_FLOAT, 0);
@@ -525,8 +571,9 @@ public final class PdfPage implements AutoCloseable {
   }
 
   private static Optional<String> getAnnotStringValue(MemorySegment annot, String key) {
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment keySeg = arena.allocateFrom(key);
+    try {
+      MemorySegment initialScratch = ScratchBuffer.utf8ProbeBuffer(key);
+      MemorySegment keySeg = FfmHelper.writeUtf8String(initialScratch, key);
 
       long needed =
           (long)
@@ -534,9 +581,20 @@ public final class PdfPage implements AutoCloseable {
                   annot, keySeg, MemorySegment.NULL, 0L);
       if (needed <= 2) return Optional.empty();
 
-      MemorySegment buf = arena.allocate(needed);
-      AnnotBindings.FPDFAnnot_GetStringValue.invokeExact(annot, keySeg, buf, needed);
-      String value = FfmHelper.fromWideString(buf, needed);
+        ScratchBuffer.KeyValueSlots keyAndValue;
+        if (initialScratch.byteSize() >= keySeg.byteSize() + needed) {
+        keyAndValue =
+          ScratchBuffer.keyAndWideValue(keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
+        } else {
+        keyAndValue = ScratchBuffer.utf8KeyAndWideValue(key, needed);
+        }
+      long copied =
+          (long)
+              AnnotBindings.FPDFAnnot_GetStringValue.invokeExact(
+              annot, keyAndValue.keySeg, keyAndValue.valueSeg, needed);
+        long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg, copied, needed);
+      if (byteLen == 0) return Optional.empty();
+        String value = FfmHelper.fromWideString(keyAndValue.valueSeg, byteLen);
       return value.isEmpty() ? Optional.empty() : Optional.of(value);
     } catch (Throwable t) {
       return Optional.empty();
@@ -630,19 +688,17 @@ public final class PdfPage implements AutoCloseable {
         int type = (int) EditBindings.FPDFPageObj_GetType.invokeExact(obj);
         if (type != EditBindings.FPDF_PAGEOBJ_IMAGE) continue;
 
-        try (Arena arena = Arena.ofConfined()) {
-          MemorySegment meta = arena.allocate(EditBindings.IMAGE_METADATA_LAYOUT);
-          int ok = (int) EditBindings.FPDFImageObj_GetImageMetadata.invokeExact(obj, handle, meta);
-          if (ok != 0) {
-            int w = meta.get(JAVA_INT, 0);
-            int h = meta.get(JAVA_INT, 4);
-            float hdpi = meta.get(JAVA_FLOAT, 8);
-            float vdpi = meta.get(JAVA_FLOAT, 12);
-            int bpp = meta.get(JAVA_INT, 16);
-            images.add(new EmbeddedImage(imageIndex, w, h, bpp, hdpi, vdpi));
-          } else {
-            images.add(new EmbeddedImage(imageIndex, 0, 0, 0, 0f, 0f));
-          }
+        MemorySegment meta = ScratchBuffer.get(EditBindings.IMAGE_METADATA_LAYOUT.byteSize());
+        int ok = (int) EditBindings.FPDFImageObj_GetImageMetadata.invokeExact(obj, handle, meta);
+        if (ok != 0) {
+          int w = meta.get(JAVA_INT, 0);
+          int h = meta.get(JAVA_INT, 4);
+          float hdpi = meta.get(JAVA_FLOAT, 8);
+          float vdpi = meta.get(JAVA_FLOAT, 12);
+          int bpp = meta.get(JAVA_INT, 16);
+          images.add(new EmbeddedImage(imageIndex, w, h, bpp, hdpi, vdpi));
+        } else {
+          images.add(new EmbeddedImage(imageIndex, 0, 0, 0, 0f, 0f));
         }
         imageIndex++;
       }
@@ -655,29 +711,33 @@ public final class PdfPage implements AutoCloseable {
   }
 
   private static String getWebLinkUrl(MemorySegment pageLink, int linkIndex) {
-    try (Arena arena = Arena.ofConfined()) {
+    try {
       int charCount =
           (int)
               TextBindings.FPDFLink_GetURL.invokeExact(pageLink, linkIndex, MemorySegment.NULL, 0);
       if (charCount <= 1) return "";
 
-      MemorySegment buf = arena.allocate((long) charCount * 2);
-      TextBindings.FPDFLink_GetURL.invokeExact(pageLink, linkIndex, buf, charCount);
-      return FfmHelper.fromWideString(buf, (long) charCount * 2);
+      MemorySegment buf = ScratchBuffer.get((long) charCount * 2);
+      long copied =
+          (long) TextBindings.FPDFLink_GetURL.invokeExact(pageLink, linkIndex, buf, charCount);
+      long byteLen =
+          FfmHelper.normalizeWideByteLength(buf, copied * 2, (long) charCount * 2);
+      return byteLen == 0 ? "" : FfmHelper.fromWideString(buf, byteLen);
     } catch (Throwable t) {
       return "";
     }
   }
 
   private static PdfAnnotation.Rect getWebLinkRect(MemorySegment pageLink, int linkIndex) {
-    try (Arena arena = Arena.ofConfined()) {
+    try {
       int rectCount = (int) TextBindings.FPDFLink_CountRects.invokeExact(pageLink, linkIndex);
       if (rectCount <= 0) return new PdfAnnotation.Rect(0, 0, 0, 0);
 
-      MemorySegment left = arena.allocate(JAVA_DOUBLE);
-      MemorySegment top = arena.allocate(JAVA_DOUBLE);
-      MemorySegment right = arena.allocate(JAVA_DOUBLE);
-      MemorySegment bottom = arena.allocate(JAVA_DOUBLE);
+      MemorySegment scratch = ScratchBuffer.get(4 * JAVA_DOUBLE.byteSize());
+      MemorySegment left = scratch.asSlice(0, JAVA_DOUBLE.byteSize());
+      MemorySegment top = scratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+      MemorySegment right = scratch.asSlice(2 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+      MemorySegment bottom = scratch.asSlice(3 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
 
       int ok =
           (int)

@@ -39,7 +39,7 @@ public final class KoReaderChecksum {
       long fileSize = fc.size();
       if (fileSize == 0) return Optional.empty();
       // Use positional reads into a reusable 1 KB buffer; avoids mapping the entire file
-      // when only up to 11 × 1 KB sample windows are needed.
+      // when only up to 11 x 1 KB sample windows are needed.
       return Optional.of(calculateFromChannel(fc, fileSize));
     } catch (IOException _) {
       return Optional.empty();

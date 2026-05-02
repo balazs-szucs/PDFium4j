@@ -10,10 +10,14 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import java.lang.foreign.MemorySegment;
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.model.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
@@ -498,7 +502,7 @@ class PdfDocumentTest {
 
     // Verify the raw file contains the xpacket marker
     byte[] rawBytes = Files.readAllBytes(pdf);
-    String rawStr = new String(rawBytes, java.nio.charset.StandardCharsets.ISO_8859_1);
+    String rawStr = new String(rawBytes, StandardCharsets.ISO_8859_1);
     assertTrue(rawStr.contains("<?xpacket begin="), "Saved file should contain xpacket marker");
     assertTrue(rawStr.contains("ExistingXmpSeries"), "Saved file should contain our XMP content");
 
@@ -507,6 +511,31 @@ class PdfDocumentTest {
       String xmpStr = doc2.xmpMetadataString();
       assertFalse(xmpStr.isEmpty(), "XMP should be found in file with existing XMP");
       assertTrue(xmpStr.contains("ExistingXmpSeries"), "XMP should contain series name");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void setEmptyXmpMetadataDoesNotOverwriteExistingXmp(@TempDir Path tempDir)
+      throws IOException, URISyntaxException {
+    var resource = getClass().getResource("/minimal.pdf");
+    if (resource == null) return;
+    Path originalPdf = Path.of(resource.toURI());
+
+    Path pdf = tempDir.resolve("existing-xmp-empty-update.pdf");
+    Files.copy(originalPdf, pdf);
+
+    String before;
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      before = doc.xmpMetadataString();
+      assertFalse(before.isEmpty(), "Fixture should contain XMP");
+      doc.setXmpMetadata("");
+      doc.save(pdf);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      String after = doc.xmpMetadataString();
+      assertEquals(before, after, "Empty raw XMP update should behave as no-op");
     }
   }
 
@@ -883,8 +912,6 @@ class PdfDocumentTest {
     }
   }
 
-  // --- Tests for new APIs (metadata(String), renderPageToBytes, RenderResult encoding, image
-  // extraction, isBlank) ---
 
   @Test
   @EnabledIf("pdfiumAvailable")
@@ -903,6 +930,47 @@ class PdfDocumentTest {
       Optional<String> title = doc.metadata("Title");
       assertTrue(title.isPresent(), "Title should be readable via string key");
       assertEquals("StringKeyTest", title.get());
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataRoundTripWithMultilingualValues(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path output = tempDir.resolve("meta-unicode-roundtrip.pdf");
+    String title = "Français 漢字 Русский";
+    String author = "Élodie 张伟 Иванов";
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, title);
+      doc.setMetadata(MetadataTag.AUTHOR, author);
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals(title, doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertEquals(author, doc.metadata(MetadataTag.AUTHOR).orElse(""));
+      assertEquals(title, doc.metadata("Title").orElse(""));
+      assertEquals(author, doc.metadata("Author").orElse(""));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void saveAndReopenWithUnicodeFilename(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path output = tempDir.resolve("résumé_日本語_русский_文件.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Unicode Filename");
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertTrue(doc.pageCount() > 0);
+      assertEquals("Unicode Filename", doc.metadata(MetadataTag.TITLE).orElse(""));
     }
   }
 
@@ -1148,7 +1216,40 @@ class PdfDocumentTest {
     return pdf.getBytes(StandardCharsets.US_ASCII);
   }
 
-  // --- Metadata save correctness tests ---
+  private static byte[] minimalEmptyPdf() {
+    String pdf =
+        """
+                %PDF-1.4
+                1 0 obj
+                << /Type /Catalog /Pages 2 0 R >>
+                endobj
+                2 0 obj
+                << /Type /Pages /Kids [3 0 R] /Count 1 >>
+                endobj
+                3 0 obj
+                << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>
+                endobj
+                4 0 obj
+                << /Length 0 >>
+                stream
+                endstream
+                endobj
+                xref
+                0 5
+                0000000000 65535 f \r
+                0000000009 00000 n \r
+                0000000058 00000 n \r
+                0000000115 00000 n \r
+                0000000212 00000 n \r
+                trailer
+                << /Size 5 /Root 1 0 R >>
+                startxref
+                262
+                %%EOF
+                """;
+    return pdf.getBytes(StandardCharsets.US_ASCII);
+  }
+
 
   @Test
   @EnabledIf("pdfiumAvailable")
@@ -1465,8 +1566,8 @@ class PdfDocumentTest {
               <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
                 <rdf:Description rdf:about=""
                     xmlns:dc="http://purl.org/dc/elements/1.1/">
-                  <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Ünîcödé Títlé — «Книга»</rdf:li></rdf:Alt></dc:title>
-                  <dc:creator><rdf:Seq><rdf:li>José García — 日本語著者</rdf:li></rdf:Seq></dc:creator>
+                  <dc:title><rdf:Alt><rdf:li xml:lang="x-default">Ünîcödé Títlé - «Книга»</rdf:li></rdf:Alt></dc:title>
+                  <dc:creator><rdf:Seq><rdf:li>José García - 日本語著者</rdf:li></rdf:Seq></dc:creator>
                 </rdf:Description>
               </rdf:RDF>
             </x:xmpmeta>
@@ -1553,8 +1654,6 @@ class PdfDocumentTest {
     }
   }
 
-  // --- Cross-reference stream (§7.5.8) tests ---
-
   /**
    * Create a minimal valid PDF that uses a cross-reference stream instead of a traditional xref
    * table. This is the format used by many modern PDF generators (e.g., Stirling-PDF, Chrome
@@ -1563,7 +1662,7 @@ class PdfDocumentTest {
   @SuppressWarnings("PMD.UnusedAssignment")
   private static byte[] minimalXrefStreamPdf() {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
-    List<Integer> offsets = new java.util.ArrayList<>();
+    List<Integer> offsets = new ArrayList<>();
 
     writeBytes(out, "%PDF-1.5\n");
 
@@ -1579,8 +1678,8 @@ class PdfDocumentTest {
     int xrefStreamOffset = out.size();
 
     // W=[1,4,0]: type(1 byte) + offset(4 bytes big-endian) + gen(0, implicit 0)
-    // Index=[0 5]: objects 0–4 contiguous
-    byte[] xrefData = new byte[5 * 5]; // 5 entries × 5 bytes
+    // Index=[0 5]: objects 0-4 contiguous
+    byte[] xrefData = new byte[5 * 5]; // 5 entries x 5 bytes
     int di = 0;
     // Object 0: free entry
     xrefData[di++] = 0;
@@ -1588,7 +1687,7 @@ class PdfDocumentTest {
     xrefData[di++] = 0;
     xrefData[di++] = 0;
     xrefData[di++] = 0;
-    // Objects 1–3: in-use
+    // Objects 1-3: in-use
     for (int off : offsets) {
       xrefData[di++] = 1;
       xrefData[di++] = (byte) ((off >> 24) & 0xFF);
@@ -1795,6 +1894,132 @@ class PdfDocumentTest {
 
     try (PdfDocument doc = PdfDocument.open(saved)) {
       assertEquals("From Bytes Title", doc.metadata(MetadataTag.TITLE).orElse(""));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void forEachCharBoxMatchesList() throws IOException {
+    Path pdf = getTestPdfWithText();
+    if (pdf == null) return;
+    try (PdfDocument doc = PdfDocument.open(pdf);
+         PdfPage page = doc.page(0)) {
+      List<TextCharInfo> list = page.extractTextWithBounds();
+      List<TextCharInfo> visitorList = new ArrayList<>();
+      page.forEachCharBox((code, l, b, r, t, fs) -> {
+        visitorList.add(new TextCharInfo(code, l, b, r, t, fs));
+      });
+      assertEquals(list.size(), visitorList.size());
+      for (int i = 0; i < list.size(); i++) {
+        assertEquals(list.get(i), visitorList.get(i));
+      }
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void optimizedExtractTextMatchesOriginal() throws IOException {
+    byte[] pdf = minimalPdfWithText();
+    try (PdfDocument doc = PdfDocument.open(pdf);
+         PdfPage page = doc.page(0)) {
+      String text = page.extractText();
+      // minimalPdfWithText() contains "Hello World"
+      assertTrue(text.contains("Hello"), "Extracted text should contain 'Hello'");
+      assertTrue(text.contains("World"), "Extracted text should contain 'World'");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void nestedDocumentClosingDoesNotInvalidateBuffer() throws IOException {
+    Path pdf = getTestPdf();
+    if (pdf == null) return;
+    
+    // Explicitly acquire so that the test's own get() call is reference-counted.
+    ScratchBuffer.acquire();
+    try (PdfDocument doc1 = PdfDocument.open(pdf)) {
+      MemorySegment first = ScratchBuffer.get(1024);
+      first.set(JAVA_BYTE, 0, (byte) 0x42);
+      
+      try (PdfDocument doc2 = PdfDocument.open(pdf)) {
+        // Nested document use
+        assertEquals(0x42, first.get(JAVA_BYTE, 0));
+      } // doc2.close() -> ScratchBuffer.release() (decrements count)
+      
+      // Memory should still be valid because doc1 and the test itself still have references
+      assertEquals(0x42, first.get(JAVA_BYTE, 0));
+    } finally {
+      ScratchBuffer.release();
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void forEachCharBoxOnTextPage() throws IOException {
+    // minimalPdfWithText() is a simple valid PDF with "Hello World"
+    byte[] pdf = minimalPdfWithText();
+    try (PdfDocument doc = PdfDocument.open(pdf);
+         PdfPage page = doc.page(0)) {
+      List<Integer> chars = new ArrayList<>();
+      page.forEachCharBox((code, l, b, r, t, fs) -> chars.add(code));
+      assertEquals(11, chars.size(), "Should have 11 characters");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void forEachCharBoxOnEmptyPage() throws IOException {
+    // minimalEmptyPdf() is a blank page
+    byte[] pdf = minimalEmptyPdf();
+    try (PdfDocument doc = PdfDocument.open(pdf);
+         PdfPage page = doc.page(0)) {
+      List<Integer> chars = new ArrayList<>();
+      page.forEachCharBox((code, l, b, r, t, fs) -> chars.add(code));
+      assertTrue(chars.isEmpty(), "Empty page should have no characters");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void forEachPageSizeMatchesList() throws IOException {
+    Path pdf = getTestPdf();
+    if (pdf == null) return;
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      List<PageSize> list = doc.allPageSizes();
+      List<PageSize> visitorList = new ArrayList<>();
+      doc.forEachPageSize((index, w, h) -> {
+        assertEquals(visitorList.size(), index);
+        visitorList.add(new PageSize(w, h));
+      });
+      assertEquals(list.size(), visitorList.size());
+      for (int i = 0; i < list.size(); i++) {
+        assertEquals(list.get(i), visitorList.get(i));
+      }
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void streamingXmpSaveMatchesStringSave() throws IOException {
+    XmpMetadata meta = XmpMetadata.builder()
+        .title("Test Optimization")
+        .creators(List.of("Agent"))
+        .build();
+    
+    Path pdf = getTestPdf();
+    if (pdf == null) return;
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      doc.setXmpMetadata(meta);
+      ByteArrayOutputStream bos = new ByteArrayOutputStream();
+      doc.save(bos);
+      byte[] savedBytes = bos.toByteArray();
+      
+      // Verify we can parse it back
+      try (PdfDocument savedDoc = PdfDocument.open(savedBytes)) {
+        XmpMetadata loaded = XmpMetadataParser.parseFrom(savedDoc);
+        assertEquals("Test Optimization", loaded.title().orElse(null));
+        assertEquals("Agent", loaded.creators().get(0));
+      }
     }
   }
 }

@@ -39,6 +39,7 @@ import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.model.MetadataTag;
+import org.grimmory.pdfium4j.model.XmpMetadata;
 
 /**
  * Handles saving PDF documents. Uses PDFium's native FPDF_SaveAsCopy for the base save, then
@@ -51,16 +52,17 @@ final class PdfSaver {
   private static final Map<Long, ByteArrayOutputStream> BUFFERS = new ConcurrentHashMap<>(16);
   private static final AtomicLong BUFFER_ID_SEQ = new AtomicLong();
 
-  /** Thread-local staging buffer for writeBlockCallback – avoids per-callback byte[] allocation. */
+  /** Reuses a large buffer to minimize heap churn during the heavy throughput of native-to-Java byte transfers. */
   private static final ThreadLocal<byte[]> WRITE_BUF =
       ThreadLocal.withInitial(() -> new byte[65536]);
+  private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
 
   /** Parameters for saving a PDF document. */
   record SaveParams(
       MemorySegment docHandle,
       Map<MetadataTag, String> allMetadata,
       boolean hasInfoUpdate,
-      String pendingXmp,
+      org.grimmory.pdfium4j.internal.XmpUpdate pendingXmp,
       SeekableByteChannel originalSource,
       Path sourcePath,
       byte[] originalBytes,
@@ -102,7 +104,7 @@ final class PdfSaver {
   }
 
   static void save(SaveParams params) throws IOException {
-    boolean hasXmpUpdate = params.pendingXmp() != null && !params.pendingXmp().isEmpty();
+    boolean hasXmpUpdate = hasXmpUpdate(params.pendingXmp());
     boolean hasUpdate = params.hasInfoUpdate() || hasXmpUpdate;
 
     try (Arena arena = Arena.ofConfined()) {
@@ -145,6 +147,7 @@ final class PdfSaver {
     } else if (params.originalSource() instanceof FileChannel fc) {
       return new BasePdf(fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size(), arena), null);
     } else if (params.originalSource() != null) {
+      // Creates a temporary file to hold document contents if the source channel is not seekable or lacks file-mapping capabilities.
       Path temp = Files.createTempFile("pdfium4j-base-", ".pdf");
       try {
         params.originalSource().position(0);
@@ -170,6 +173,7 @@ final class PdfSaver {
     long bufferId = BUFFER_ID_SEQ.incrementAndGet();
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     BUFFERS.put(bufferId, baos);
+    // Shared arena is required for native upcall stubs to ensure they remain valid during the asynchronous-like save callback flow.
     try (Arena arena = Arena.ofShared()) {
       if (EditBindings.FPDF_SaveAsCopy == null) {
         throw new PdfiumException("FPDF_SaveAsCopy not available in this PDFium build");
@@ -258,18 +262,21 @@ final class PdfSaver {
     int infoObjNum = 0;
     Map<MetadataTag, String> metadata = params.hasInfoUpdate() ? params.allMetadata() : null;
     if (metadata != null && !metadata.isEmpty()) {
-      infoObjNum = nextObj;
-      nextObj++;
+      infoObjNum = nextObj++;
       objOffsets.put(infoObjNum, baseOffset + update.size());
       update.write(buildInfoObject(infoObjNum, metadata));
     }
 
-    String xmp = params.pendingXmp();
-    if (xmp != null && !xmp.isEmpty()) {
-      int xmpObjNum = nextObj;
-      nextObj++;
+    org.grimmory.pdfium4j.internal.XmpUpdate xmp = params.pendingXmp();
+    int xmpObjNum = 0;
+    if (hasXmpUpdate(xmp)) {
+      xmpObjNum = nextObj++;
       objOffsets.put(xmpObjNum, baseOffset + update.size());
-      update.write(buildXmpObject(xmpObjNum, xmp));
+      if (xmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw) {
+        writeXmpObject(update, xmpObjNum, raw.xmp());
+      } else if (xmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Structured structured) {
+        writeXmpObject(update, xmpObjNum, structured.metadata());
+      }
 
       ObjectRef catalogRef = trailer.rootRef();
       String catalogDict = findObjectDictFromBytes(pdf, catalogRef.num, catalogRef.gen);
@@ -415,21 +422,33 @@ final class PdfSaver {
     return sb.toString().getBytes(StandardCharsets.ISO_8859_1);
   }
 
-  private static byte[] buildXmpObject(int num, String xmp) {
+  private static void writeXmpObject(OutputStream out, int num, String xmp) throws IOException {
     byte[] content = xmp.getBytes(StandardCharsets.UTF_8);
     String header =
         num
             + " 0 obj\n<< /Type /Metadata /Subtype /XML /Length "
             + content.length
             + " >>\nstream\n";
-    String footer = "\nendstream\nendobj\n";
-    byte[] hb = header.getBytes(StandardCharsets.ISO_8859_1);
-    byte[] fb = footer.getBytes(StandardCharsets.ISO_8859_1);
-    byte[] res = new byte[hb.length + content.length + fb.length];
-    System.arraycopy(hb, 0, res, 0, hb.length);
-    System.arraycopy(content, 0, res, hb.length, content.length);
-    System.arraycopy(fb, 0, res, hb.length + content.length, fb.length);
-    return res;
+    out.write(header.getBytes(StandardCharsets.ISO_8859_1));
+    out.write(content);
+    out.write("\nendstream\nendobj\n".getBytes(StandardCharsets.ISO_8859_1));
+  }
+
+  private static void writeXmpObject(OutputStream out, int num, XmpMetadata xmp) throws IOException {
+    // We must buffer the XMP content to determine the '/Length' field required by the PDF
+    // stream object before writing the stream content itself.
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    XMP_WRITER.write(xmp, baos);
+    byte[] content = baos.toByteArray();
+
+    String header =
+        num
+            + " 0 obj\n<< /Type /Metadata /Subtype /XML /Length "
+            + content.length
+            + " >>\nstream\n";
+    out.write(header.getBytes(StandardCharsets.ISO_8859_1));
+    out.write(content);
+    out.write("\nendstream\nendobj\n".getBytes(StandardCharsets.ISO_8859_1));
   }
 
   private static byte[] buildModifiedCatalog(
@@ -546,6 +565,14 @@ final class PdfSaver {
     } catch (Exception e) {
       return 0;
     }
+  }
+
+  private static boolean hasXmpUpdate(@CheckForNull org.grimmory.pdfium4j.internal.XmpUpdate xmp) {
+    if (xmp == null) return false;
+    if (xmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw) {
+      return raw.xmp() != null && !raw.xmp().isBlank();
+    }
+    return true;
   }
 
   private static int skipAsciiWhitespace(String s, int from) {

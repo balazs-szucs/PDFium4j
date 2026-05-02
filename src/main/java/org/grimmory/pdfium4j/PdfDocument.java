@@ -44,10 +44,13 @@ import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.DocBindings;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
+import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.internal.ViewBindings;
+import org.grimmory.pdfium4j.internal.XmpUpdate;
 import org.grimmory.pdfium4j.model.Bookmark;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.grimmory.pdfium4j.model.PageSize;
+import org.grimmory.pdfium4j.model.XmpMetadata;
 import org.grimmory.pdfium4j.model.PdfDiagnostic;
 import org.grimmory.pdfium4j.model.PdfErrorCode;
 import org.grimmory.pdfium4j.model.PdfProbeResult;
@@ -66,19 +69,21 @@ import org.grimmory.pdfium4j.model.RenderResult;
  */
 public final class PdfDocument implements AutoCloseable {
 
+  /** Tracks active native-to-Java byte channels by a unique ID to facilitate stateless native callbacks. */
   private static final Map<Long, SeekableByteChannel> CHANNELS = new ConcurrentHashMap<>(16);
   private static final AtomicLong CHANNEL_ID_SEQ = new AtomicLong();
   private static final Cleaner CLEANER = Cleaner.create();
   private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
 
   private static final MetadataTag[] METADATA_TAGS = MetadataTag.values();
+  private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
 
   private static final Pattern STATIC_INFO_PATTERN =
       Pattern.compile("/Info\\s+(\\d+)\\s+(\\d+)\\s+R");
 
   /**
-   * Matches /Key (literal value) – does not handle escaped parens in value, adequate for standard
-   * Info dict.
+   * Matches /Key (literal value). Note: Does not handle escaped parentheses, as these are
+   * extremely rare in standard Info dictionary keys.
    */
   private static final Pattern INFO_DICT_LITERAL_PATTERN =
       Pattern.compile("/(\\w+)\\s+\\(([^)\\\\]*)\\)");
@@ -87,7 +92,7 @@ public final class PdfDocument implements AutoCloseable {
   private static final Pattern INFO_DICT_HEX_PATTERN =
       Pattern.compile("/(\\w+)\\s+<([A-Fa-f0-9]*)>");
 
-  // Tail window for fallback file scanning (Info/XMP are typically near trailer/xref).
+  /** Limits the range for trailer-relative scanning to prevent excessive disk I/O on corrupt or oversized files. */
   private static final long FALLBACK_TAIL_SCAN_BYTES = 256L * 1024L;
 
   private final MemorySegment handle;
@@ -105,14 +110,15 @@ public final class PdfDocument implements AutoCloseable {
   /** Cached page count; -1 means not yet fetched or invalidated. */
   private volatile int cachedPageCount = -1;
 
-  /** Lazy-parsed fallback Info dict key→value map (populated at most once per document). */
+  /** Lazy-parsed fallback Info dict key-value map (populated at most once per document). */
   private Map<String, String> cachedFallbackMeta;
 
   /** Memoized XMP bytes from file-system fallback path. */
   private byte[] cachedFallbackXmp;
 
   private final Map<MetadataTag, String> pendingMetadata = LinkedHashMap.newLinkedHashMap(8);
-  private String pendingXmpMetadata = null;
+  private org.grimmory.pdfium4j.internal.XmpUpdate pendingXmp = null;
+
   private final CleanupState state;
   private final Cleaner.Cleanable cleanable;
 
@@ -137,6 +143,7 @@ public final class PdfDocument implements AutoCloseable {
     this.state = new CleanupState(channelId, sourceChannel, tempFile, docArena);
     this.cleanable = CLEANER.register(this, state);
 
+    ScratchBuffer.acquire();
     PdfiumLibrary.incrementDocumentCount();
   }
 
@@ -357,7 +364,7 @@ public final class PdfDocument implements AutoCloseable {
         long readPos = pos;
         while (bb.hasRemaining()) {
           int read = fc.read(bb, readPos);
-          if (read <= 0) return 0; // EOF before filling buffer – signal failure to PDFium
+          if (read <= 0) return 0; // EOF before filling buffer - signal failure to PDFium
           readPos += read;
         }
       } else {
@@ -417,9 +424,10 @@ public final class PdfDocument implements AutoCloseable {
 
   public PageSize pageSize(int index) {
     ensureOpen();
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment w = arena.allocate(JAVA_DOUBLE);
-      MemorySegment h = arena.allocate(JAVA_DOUBLE);
+    try {
+      MemorySegment scratch = ScratchBuffer.get(16); // 2 * 8 bytes for doubles
+      MemorySegment w = scratch.asSlice(0, JAVA_DOUBLE.byteSize());
+      MemorySegment h = scratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
       int ok = (int) ViewBindings.FPDF_GetPageSizeByIndex.invokeExact(handle, index, w, h);
       if (ok == 0) throwLastError("Failed to get page size " + index);
       return new PageSize((float) w.get(JAVA_DOUBLE, 0), (float) h.get(JAVA_DOUBLE, 0));
@@ -435,15 +443,58 @@ public final class PdfDocument implements AutoCloseable {
 
   public Optional<String> pageLabel(int index) {
     ensureOpen();
-    try (Arena arena = Arena.ofConfined()) {
+    try {
       long needed =
           (long) DocBindings.FPDF_GetPageLabel.invokeExact(handle, index, MemorySegment.NULL, 0L);
       if (needed <= 2) return Optional.empty();
-      MemorySegment buf = arena.allocate(needed);
-      DocBindings.FPDF_GetPageLabel.invokeExact(handle, index, buf, needed);
-      return Optional.of(FfmHelper.fromWideString(buf, needed));
+      MemorySegment buf = ScratchBuffer.get(needed);
+      long copied = (long) DocBindings.FPDF_GetPageLabel.invokeExact(handle, index, buf, needed);
+      long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
+      return byteLen == 0 ? Optional.empty() : Optional.of(FfmHelper.fromWideString(buf, byteLen));
     } catch (Throwable t) {
       return Optional.empty();
+    }
+  }
+
+  /**
+   * Functional interface for page size visitation.
+   *
+   * @see #forEachPageSize(PageSizeVisitor)
+   */
+  @FunctionalInterface
+  public interface PageSizeVisitor {
+    /**
+     * Called for each page in the document.
+     *
+     * @param pageIndex 0-indexed page number
+     * @param width page width in points
+     * @param height page height in points
+     */
+    void visit(int pageIndex, float width, float height);
+  }
+
+  /**
+   * Efficiently iterate over all page sizes without allocating a list of records.
+   *
+   * @param visitor callback for each page size found
+   */
+  public void forEachPageSize(PageSizeVisitor visitor) {
+    ensureOpen();
+    int count = pageCount();
+    if (count <= 0) return;
+    try {
+      MemorySegment loopScratch = ScratchBuffer.getLoopScratch(2 * JAVA_DOUBLE.byteSize());
+      MemorySegment w = loopScratch.asSlice(0, JAVA_DOUBLE.byteSize());
+      MemorySegment h = loopScratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+      for (int i = 0; i < count; i++) {
+        int ok = (int) ViewBindings.FPDF_GetPageSizeByIndex.invokeExact(handle, i, w, h);
+        if (ok == 0) throwLastError("Failed to get page size " + i);
+        visitor.visit(i, (float) w.get(JAVA_DOUBLE, 0), (float) h.get(JAVA_DOUBLE, 0));
+      }
+    } catch (PdfiumException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to get page sizes", t);
     }
   }
 
@@ -452,28 +503,14 @@ public final class PdfDocument implements AutoCloseable {
     int count = pageCount();
     if (count <= 0) return List.of();
     List<PageSize> sizes = new ArrayList<>(count);
-    // Reuse a single Arena and single pair of output segments for all pages avoids
-    // creating count×Arena and count×2×MemorySegment allocations in the loop.
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment w = arena.allocate(JAVA_DOUBLE);
-      MemorySegment h = arena.allocate(JAVA_DOUBLE);
-      for (int i = 0; i < count; i++) {
-        int ok = (int) ViewBindings.FPDF_GetPageSizeByIndex.invokeExact(handle, i, w, h);
-        if (ok == 0) throwLastError("Failed to get page size " + i);
-        sizes.add(new PageSize((float) w.get(JAVA_DOUBLE, 0), (float) h.get(JAVA_DOUBLE, 0)));
-      }
-    } catch (PdfiumException e) {
-      throw e;
-    } catch (Throwable t) {
-      throw new PdfiumException("Failed to get page sizes", t);
-    }
+    forEachPageSize((_, w, h) -> sizes.add(new PageSize(w, h)));
     return sizes;
   }
 
   public int fileVersion() {
     ensureOpen();
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment v = arena.allocate(JAVA_INT);
+    try {
+      MemorySegment v = ScratchBuffer.get(JAVA_INT.byteSize());
       int ok = (int) DocBindings.FPDF_GetFileVersion.invokeExact(handle, v);
       return ok != 0 ? v.get(JAVA_INT, 0) : 0;
     } catch (Throwable t) {
@@ -498,16 +535,29 @@ public final class PdfDocument implements AutoCloseable {
       String pending = pendingMetadata.get(tag);
       return (pending == null || pending.isEmpty()) ? Optional.empty() : Optional.of(pending);
     }
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment keySeg = arena.allocateFrom(tag.pdfKey());
+    try {
+      String key = tag.pdfKey();
+      MemorySegment initialScratch = ScratchBuffer.utf8ProbeBuffer(key);
+      MemorySegment keySeg = FfmHelper.writeUtf8String(initialScratch, key);
 
       long needed =
           (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, keySeg, MemorySegment.NULL, 0L);
       if (needed <= 2) return metadataFallback(tag);
 
-      MemorySegment buf = arena.allocate(needed);
-      DocBindings.FPDF_GetMetaText.invokeExact(handle, keySeg, buf, needed);
-      String val = FfmHelper.fromWideString(buf, needed);
+      ScratchBuffer.KeyValueSlots keyAndValue;
+      if (initialScratch.byteSize() >= keySeg.byteSize() + needed) {
+        keyAndValue =
+            ScratchBuffer.keyAndWideValue(keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
+      } else {
+        keyAndValue = ScratchBuffer.utf8KeyAndWideValue(key, needed);
+      }
+      long copied =
+          (long)
+              DocBindings.FPDF_GetMetaText.invokeExact(
+                  handle, keyAndValue.keySeg, keyAndValue.valueSeg, needed);
+      long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg, copied, needed);
+      if (byteLen == 0) return metadataFallback(tag);
+      String val = FfmHelper.fromWideString(keyAndValue.valueSeg, byteLen);
       return (val == null || val.isEmpty()) ? Optional.empty() : Optional.of(val);
     } catch (Throwable t) {
       return metadataFallback(tag);
@@ -680,14 +730,28 @@ public final class PdfDocument implements AutoCloseable {
       if (tag.pdfKey().equalsIgnoreCase(customKey)) return metadata(tag);
     // Support arbitrary /Info keys (e.g. /Language) via FPDF_GetMetaText
     ensureOpen();
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment keySeg = arena.allocateFrom(customKey);
+    try {
+      MemorySegment initialScratch = ScratchBuffer.utf8ProbeBuffer(customKey);
+      MemorySegment keySeg = FfmHelper.writeUtf8String(initialScratch, customKey);
+
       long needed =
           (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, keySeg, MemorySegment.NULL, 0L);
       if (needed > 2) {
-        MemorySegment buf = arena.allocate(needed);
-        DocBindings.FPDF_GetMetaText.invokeExact(handle, keySeg, buf, needed);
-        String val = FfmHelper.fromWideString(buf, needed);
+        ScratchBuffer.KeyValueSlots keyAndValue;
+        if (initialScratch.byteSize() >= keySeg.byteSize() + needed) {
+          keyAndValue =
+              ScratchBuffer.keyAndWideValue(
+                  keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
+        } else {
+          keyAndValue = ScratchBuffer.utf8KeyAndWideValue(customKey, needed);
+        }
+        long copied =
+            (long)
+                DocBindings.FPDF_GetMetaText.invokeExact(
+                    handle, keyAndValue.keySeg, keyAndValue.valueSeg, needed);
+        long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg, copied, needed);
+        if (byteLen == 0) return Optional.empty();
+        String val = FfmHelper.fromWideString(keyAndValue.valueSeg, byteLen);
         if (val != null && !val.isEmpty()) return Optional.of(val);
       }
     } catch (Throwable ignored) {
@@ -712,10 +776,18 @@ public final class PdfDocument implements AutoCloseable {
 
   public byte[] xmpMetadata() {
     ensureOpen();
-    if (pendingXmpMetadata != null) {
-      return pendingXmpMetadata.isEmpty()
-          ? EMPTY_BYTE_ARRAY
-          : pendingXmpMetadata.getBytes(StandardCharsets.UTF_8);
+    if (pendingXmp != null) {
+      if (pendingXmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw) {
+        return raw.xmp().getBytes(StandardCharsets.UTF_8);
+      } else if (pendingXmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Structured structured) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(1024);
+        try {
+          XMP_WRITER.write(structured.metadata(), baos);
+        } catch (IOException e) {
+          throw new PdfiumException("Failed to serialize pending XMP metadata", e);
+        }
+        return baos.toByteArray();
+      }
     }
     try (Arena arena = Arena.ofShared()) {
       if (DocBindings.FPDF_GetXMPMetadata != null) {
@@ -785,7 +857,9 @@ public final class PdfDocument implements AutoCloseable {
     ensureOpen();
     pendingMetadata.put(tag, value);
     try (Arena arena = Arena.ofConfined()) {
-      MemorySegment tagSeg = arena.allocateFrom(tag.pdfKey());
+      long keyUpperBound = Math.addExact(Math.multiplyExact((long) tag.pdfKey().length(), 4), 1);
+      MemorySegment tagSeg =
+          FfmHelper.writeUtf8String(arena.allocate(keyUpperBound, 1), tag.pdfKey());
       MemorySegment valSeg = FfmHelper.toWideString(arena, value);
       if (EditBindings.FPDF_SetMetaText != null) {
         int ok = (int) EditBindings.FPDF_SetMetaText.invokeExact(handle, tagSeg, valSeg);
@@ -802,9 +876,24 @@ public final class PdfDocument implements AutoCloseable {
     metadata.forEach(this::setMetadata);
   }
 
+  /**
+   * Set raw XMP metadata for the document. This will be embedded as-is during the next save.
+   *
+   * @param xmp raw XMP XML string
+   */
   public void setXmpMetadata(String xmp) {
     ensureOpen();
-    pendingXmpMetadata = xmp;
+    this.pendingXmp = (xmp == null || xmp.isBlank()) ? null : new XmpUpdate.Raw(xmp);
+  }
+
+  /**
+   * Set the XMP metadata for this document using a structured record.
+   *
+   * @param metadata the metadata to set
+   */
+  public void setXmpMetadata(XmpMetadata metadata) {
+    ensureOpen();
+    this.pendingXmp = new XmpUpdate.Structured(metadata);
   }
 
   public void insertBlankPage(int index, PageSize size) {
@@ -922,7 +1011,7 @@ public final class PdfDocument implements AutoCloseable {
               handle,
               buildMergedMetadata(),
               !pendingMetadata.isEmpty(),
-              pendingXmpMetadata,
+              pendingXmp,
               docSourceChannel,
               sourcePath,
               sourceBytes,
@@ -958,6 +1047,7 @@ public final class PdfDocument implements AutoCloseable {
     } catch (Throwable e) {
       PdfiumLibrary.ignore(e);
     } finally {
+      ScratchBuffer.release();
       cleanable.clean();
     }
   }
