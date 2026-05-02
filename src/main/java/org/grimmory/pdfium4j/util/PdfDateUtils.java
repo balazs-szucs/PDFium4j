@@ -31,18 +31,29 @@ public final class PdfDateUtils {
 
   private PdfDateUtils() {}
 
+  private static final String YEAR_GRP = "(?<year>\\d{4})";
+  private static final String MONTH_GRP = "(?<month>\\d{2})?";
+  private static final String DAY_GRP = "(?<day>\\d{2})?";
+  private static final String HOUR_GRP = "(?<hour>\\d{2})?";
+  private static final String MINUTE_GRP = "(?<minute>\\d{2})?";
+  private static final String SECOND_GRP = "(?<second>\\d{2})?";
+  private static final String OFFSET_GRP = "(?<offset>[+\\-Z])?";
+  private static final String OFF_HOUR_GRP = "(?<offsetHour>\\d{2})?";
+  private static final String OFF_MIN_GRP = "(?<offsetMinute>\\d{2})?";
+
   private static final Pattern PDF_DATE_PATTERN =
       Pattern.compile(
-          "^D:(?<year>\\d{4})"
-              + "(?<month>\\d{2})?"
-              + "(?<day>\\d{2})?"
-              + "(?<hour>\\d{2})?"
-              + "(?<minute>\\d{2})?"
-              + "(?<second>\\d{2})?"
-              + "(?<offset>[+\\-Z])?"
-              + "(?<offsetHour>\\d{2})?"
+          "^D:"
+              + YEAR_GRP
+              + MONTH_GRP
+              + DAY_GRP
+              + HOUR_GRP
+              + MINUTE_GRP
+              + SECOND_GRP
+              + OFFSET_GRP
+              + OFF_HOUR_GRP
               + "'?"
-              + "(?<offsetMinute>\\d{2})?"
+              + OFF_MIN_GRP
               + "'?$");
 
   private static final Pattern ISO_DATE_PATTERN = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$");
@@ -60,54 +71,70 @@ public final class PdfDateUtils {
 
     Matcher m = PDF_DATE_PATTERN.matcher(pdfDate);
     if (!m.matches()) {
-      // Fallback for ISO dates (sometimes found in XMP)
-      if (ISO_DATE_PATTERN.matcher(pdfDate).matches()) {
-        try {
-          return Optional.of(LocalDate.parse(pdfDate).atStartOfDay().atOffset(ZoneOffset.UTC));
-        } catch (Exception _) {
-          return Optional.empty();
-        }
-      }
-      return Optional.empty();
+      return tryParseIsoFallback(pdfDate);
     }
 
     try {
       int year = Integer.parseInt(m.group("year"));
-      int month = m.group("month") != null ? Integer.parseInt(m.group("month")) : 1;
-      int day = m.group("day") != null ? Integer.parseInt(m.group("day")) : 1;
-      int hour = m.group("hour") != null ? Integer.parseInt(m.group("hour")) : 0;
-      int minute = m.group("minute") != null ? Integer.parseInt(m.group("minute")) : 0;
-      int second = m.group("second") != null ? Integer.parseInt(m.group("second")) : 0;
+      int month = getGroupAsInt(m, "month", 1);
+      int day = getGroupAsInt(m, "day", 1);
+      int hour = getGroupAsInt(m, "hour", 0);
+      int minute = getGroupAsInt(m, "minute", 0);
+      int second = getGroupAsInt(m, "second", 0);
 
-      ZoneOffset offset = ZoneOffset.UTC;
-      String offsetSign = m.group("offset");
-      String offsetHourRaw = m.group("offsetHour");
-      String offsetMinuteRaw = m.group("offsetMinute");
-
-      if (offsetSign == null) {
-        if (offsetHourRaw != null || offsetMinuteRaw != null) {
-          return Optional.empty();
-        }
-      } else if ("Z".equalsIgnoreCase(offsetSign)) {
-        if (offsetHourRaw != null || offsetMinuteRaw != null) {
-          return Optional.empty();
-        }
-      } else {
-        if (offsetHourRaw == null) {
-          return Optional.empty();
-        }
-        int offsetHour = Integer.parseInt(offsetHourRaw);
-        int offsetMinute = offsetMinuteRaw != null ? Integer.parseInt(offsetMinuteRaw) : 0;
-        int totalOffsetMinutes = offsetHour * 60 + offsetMinute;
-        if ("-".equals(offsetSign)) {
-          totalOffsetMinutes = -totalOffsetMinutes;
-        }
-        offset = ZoneOffset.ofTotalSeconds(totalOffsetMinutes * 60);
+      ZoneOffset offset = parseZoneOffset(m);
+      if (offset == null) {
+        return Optional.empty();
       }
 
       return Optional.of(OffsetDateTime.of(year, month, day, hour, minute, second, 0, offset));
     } catch (Exception _) {
       return Optional.empty();
+    }
+  }
+
+  private static Optional<OffsetDateTime> tryParseIsoFallback(String dateStr) {
+    if (ISO_DATE_PATTERN.matcher(dateStr).matches()) {
+      try {
+        return Optional.of(LocalDate.parse(dateStr).atStartOfDay().atOffset(ZoneOffset.UTC));
+      } catch (Exception _) {
+        // fall through
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static int getGroupAsInt(Matcher m, String groupName, int defaultValue) {
+    String val = m.group(groupName);
+    return val != null ? Integer.parseInt(val) : defaultValue;
+  }
+
+  private static ZoneOffset parseZoneOffset(Matcher m) {
+    String offsetSign = m.group("offset");
+    String offsetHourRaw = m.group("offsetHour");
+    String offsetMinuteRaw = m.group("offsetMinute");
+
+    if (offsetSign == null || "Z".equalsIgnoreCase(offsetSign)) {
+      if (offsetHourRaw != null || offsetMinuteRaw != null) {
+        return null;
+      }
+      return ZoneOffset.UTC;
+    }
+
+    if (offsetHourRaw == null) {
+      return null;
+    }
+
+    try {
+      int offsetHour = Integer.parseInt(offsetHourRaw);
+      int offsetMinute = offsetMinuteRaw != null ? Integer.parseInt(offsetMinuteRaw) : 0;
+      int totalOffsetMinutes = offsetHour * 60 + offsetMinute;
+      if ("-".equals(offsetSign)) {
+        totalOffsetMinutes = -totalOffsetMinutes;
+      }
+      return ZoneOffset.ofTotalSeconds(totalOffsetMinutes * 60);
+    } catch (Exception _) {
+      return null;
     }
   }
 
@@ -136,19 +163,24 @@ public final class PdfDateUtils {
     if (totalSeconds % 60 != 0) {
       throw new IllegalArgumentException("PDF dates only support minute-precision offsets");
     }
+
     if (totalSeconds == 0) {
       sb.append("Z");
     } else {
-      int absSeconds = Math.abs(totalSeconds);
-      int hours = absSeconds / 3600;
-      int minutes = (absSeconds % 3600) / 60;
-      sb.append(totalSeconds >= 0 ? "+" : "-");
-      appendPadded(sb, hours, 2);
-      sb.append("'");
-      appendPadded(sb, minutes, 2);
-      sb.append("'");
+      appendOffset(sb, totalSeconds);
     }
     return sb.toString();
+  }
+
+  private static void appendOffset(StringBuilder sb, int totalSeconds) {
+    int absSeconds = Math.abs(totalSeconds);
+    int hours = absSeconds / 3600;
+    int minutes = (absSeconds % 3600) / 60;
+    sb.append(totalSeconds >= 0 ? "+" : "-");
+    appendPadded(sb, hours, 2);
+    sb.append("'");
+    appendPadded(sb, minutes, 2);
+    sb.append("'");
   }
 
   private static void appendPadded(StringBuilder sb, int value, int width) {

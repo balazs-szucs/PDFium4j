@@ -6,6 +6,7 @@ import static java.lang.foreign.ValueLayout.JAVA_FLOAT;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 import static java.lang.foreign.ValueLayout.JAVA_SHORT;
 
+import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
@@ -134,6 +135,60 @@ public final class PdfPage implements AutoCloseable {
     }
 
     return renderAtSize(w, h, flags, background);
+  }
+
+  /**
+   * Render into a caller-provided RGBA destination buffer to avoid output-buffer allocations.
+   *
+   * @param dpi render resolution
+   * @param destination destination byte buffer for packed RGBA output
+   * @return number of bytes written
+   */
+  public int renderInto(int dpi, byte[] destination) {
+    return renderInto(dpi, RenderFlags.DEFAULT, OPAQUE_WHITE, destination);
+  }
+
+  /**
+   * Render into a caller-provided RGBA destination buffer to avoid output-buffer allocations.
+   *
+   * @param dpi render resolution
+   * @param flags rendering flags
+   * @param destination destination byte buffer for packed RGBA output
+   * @return number of bytes written
+   */
+  public int renderInto(int dpi, RenderFlags flags, byte[] destination) {
+    return renderInto(dpi, flags, OPAQUE_WHITE, destination);
+  }
+
+  /**
+   * Render into a caller-provided RGBA destination buffer to avoid output-buffer allocations.
+   *
+   * @param dpi render resolution
+   * @param flags rendering flags
+   * @param background background color as 0xAARRGGBB
+   * @param destination destination byte buffer for packed RGBA output
+   * @return number of bytes written
+   */
+  public int renderInto(int dpi, RenderFlags flags, int background, byte[] destination) {
+    ensureOpen();
+    if (destination == null) {
+      throw new NullPointerException("destination must not be null");
+    }
+
+    PageSize size = size();
+    int w = size.widthPixels(dpi);
+    int h = size.heightPixels(dpi);
+    if (w <= 0 || h <= 0) {
+      return 0;
+    }
+
+    long requiredBytes = packedBytes(w, h);
+    if (requiredBytes > destination.length) {
+      throw new IllegalArgumentException(
+          "Destination too small: required " + requiredBytes + " bytes, got " + destination.length);
+    }
+    renderAtSizeInto(w, h, flags, background, destination, (int) requiredBytes);
+    return (int) requiredBytes;
   }
 
   /**
@@ -388,7 +443,7 @@ public final class PdfPage implements AutoCloseable {
       return new RenderResult(1, 1, new byte[4]);
     }
 
-    long requiredBytes = w * h * BYTES_PER_PIXEL;
+    long requiredBytes = (long) w * h * BYTES_PER_PIXEL;
     if (requiredBytes > maxMemoryBytes) {
       throw new PdfiumRenderException(
           "Rendering %dx%d at %d DPI requires %d bytes, which exceeds the limit of %d bytes."
@@ -428,38 +483,115 @@ public final class PdfPage implements AutoCloseable {
         throw new PdfiumRenderException("FPDFBitmap_Create failed for %dx%d".formatted(w, h));
       }
 
-      BitmapBindings.FPDFBitmap_FillRect.invokeExact(
-          bitmap, 0, 0, w, h, (long) (background & 0xFFFFFFFFL));
-
+      fillBitmap(bitmap, w, h, background);
       ViewBindings.FPDF_RenderPageBitmap.invokeExact(bitmap, handle, 0, 0, w, h, 0, flags.value());
 
-      MemorySegment buffer =
-          (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
-      int stride = (int) BitmapBindings.FPDFBitmap_GetStride.invokeExact(bitmap);
-
-      byte[] rgba = buffer.reinterpret(1L * stride * h).toArray(JAVA_BYTE);
-
-      if (stride != w * BYTES_PER_PIXEL) {
-        int rowLen = w * BYTES_PER_PIXEL;
-        byte[] packed = new byte[h * rowLen];
-        for (int row = 0; row < h; row++) {
-          System.arraycopy(rgba, row * stride, packed, row * rowLen, rowLen);
-        }
-        rgba = packed;
-      }
-
-      return new RenderResult(w, h, rgba);
+      return extractRenderResult(bitmap, w, h);
     } catch (PdfiumException e) {
       throw e;
     } catch (Throwable t) {
       throw new PdfiumRenderException("Failed to render page at %dx%d".formatted(w, h), t);
     } finally {
-      if (!FfmHelper.isNull(bitmap)) {
-        try {
-          BitmapBindings.FPDFBitmap_Destroy.invokeExact(bitmap);
-        } catch (Throwable e) {
-          PdfiumLibrary.ignore(e);
-        }
+      destroyBitmapQuietly(bitmap);
+    }
+  }
+
+  private void renderAtSizeInto(
+      int w, int h, RenderFlags flags, int background, byte[] destination, int requiredBytes) {
+    ensureOpen();
+    ensureRenderBudget(w, h);
+
+    MemorySegment bitmap = MemorySegment.NULL;
+    try {
+      bitmap = (MemorySegment) BitmapBindings.FPDFBitmap_Create.invokeExact(w, h, 1);
+      if (FfmHelper.isNull(bitmap)) {
+        throw new PdfiumRenderException("FPDFBitmap_Create failed for %dx%d".formatted(w, h));
+      }
+
+      fillBitmap(bitmap, w, h, background);
+      ViewBindings.FPDF_RenderPageBitmap.invokeExact(bitmap, handle, 0, 0, w, h, 0, flags.value());
+
+      extractRenderBytesInto(bitmap, w, h, destination, requiredBytes);
+    } catch (PdfiumException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumRenderException("Failed to render page at %dx%d".formatted(w, h), t);
+    } finally {
+      destroyBitmapQuietly(bitmap);
+    }
+  }
+
+  private static void fillBitmap(MemorySegment bitmap, int w, int h, int background)
+      throws Throwable {
+    BitmapBindings.FPDFBitmap_FillRect.invokeExact(
+        bitmap, 0, 0, w, h, (long) (background & 0xFFFFFFFFL));
+  }
+
+  private static RenderResult extractRenderResult(MemorySegment bitmap, int w, int h)
+      throws Throwable {
+    MemorySegment rawBuffer = (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
+    int stride = (int) BitmapBindings.FPDFBitmap_GetStride.invokeExact(bitmap);
+    long rowLen = (long) w * BYTES_PER_PIXEL;
+    if (stride < rowLen) {
+      throw new PdfiumRenderException(
+          "Bitmap stride " + stride + " is smaller than row length " + rowLen);
+    }
+    long nativeBytes = Math.multiplyExact((long) stride, (long) h);
+    MemorySegment buffer = rawBuffer.reinterpret(nativeBytes);
+    long packedLenLong = Math.multiplyExact((long) h, rowLen);
+    if (packedLenLong > Integer.MAX_VALUE) {
+      throw new PdfiumRenderException(
+          "Rendered bitmap size exceeds Java array limits: " + packedLenLong);
+    }
+    int packedLen = (int) packedLenLong;
+
+    if (stride == rowLen) {
+      return new RenderResult(w, h, buffer.reinterpret(packedLenLong).toArray(JAVA_BYTE));
+    }
+
+    byte[] packed = new byte[packedLen];
+    extractPackedRgba(buffer, w, h, stride, rowLen, packed, packedLen);
+    return new RenderResult(w, h, packed);
+  }
+
+  private static void extractRenderBytesInto(
+      MemorySegment bitmap, int w, int h, byte[] destination, int requiredBytes) throws Throwable {
+    MemorySegment rawBuffer = (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
+    int stride = (int) BitmapBindings.FPDFBitmap_GetStride.invokeExact(bitmap);
+    long rowLen = (long) w * BYTES_PER_PIXEL;
+    if (stride < rowLen) {
+      throw new PdfiumRenderException(
+          "Bitmap stride " + stride + " is smaller than row length " + rowLen);
+    }
+    long nativeBytes = Math.multiplyExact((long) stride, (long) h);
+    MemorySegment buffer = rawBuffer.reinterpret(nativeBytes);
+    extractPackedRgba(buffer, w, h, stride, rowLen, destination, requiredBytes);
+  }
+
+  private static void extractPackedRgba(
+      MemorySegment buffer, int w, int h, int stride, long rowLen, byte[] destination, int requiredBytes) {
+    if (stride == rowLen) {
+      MemorySegment.copy(buffer, JAVA_BYTE, 0, destination, 0, requiredBytes);
+      return;
+    }
+    int rowLenInt = (int) rowLen;
+    for (int row = 0; row < h; row++) {
+      long srcOffset = (long) row * stride;
+      int dstOffset = row * rowLenInt;
+      MemorySegment.copy(buffer, JAVA_BYTE, srcOffset, destination, dstOffset, rowLenInt);
+    }
+  }
+
+  private static long packedBytes(int w, int h) {
+    return Math.multiplyExact((long) w * BYTES_PER_PIXEL, (long) h);
+  }
+
+  private static void destroyBitmapQuietly(MemorySegment bitmap) {
+    if (!FfmHelper.isNull(bitmap)) {
+      try {
+        BitmapBindings.FPDFBitmap_Destroy.invokeExact(bitmap);
+      } catch (Throwable e) {
+        PdfiumLibrary.ignore(e);
       }
     }
   }
@@ -521,28 +653,9 @@ public final class PdfPage implements AutoCloseable {
 
       List<PdfAnnotation> result = new ArrayList<>(count);
       for (int i = 0; i < count; i++) {
-        MemorySegment annot = MemorySegment.NULL;
-        try {
-          annot = (MemorySegment) AnnotBindings.FPDFPage_GetAnnot.invokeExact(handle, i);
-          if (FfmHelper.isNull(annot)) continue;
-
-          int subtypeCode = (int) AnnotBindings.FPDFAnnot_GetSubtype.invokeExact(annot);
-          AnnotationType type = AnnotationType.fromCode(subtypeCode);
-
-          PdfAnnotation.Rect rect = getAnnotRect(annot);
-          Optional<String> contents = getAnnotStringValue(annot, "Contents");
-          Optional<String> author = getAnnotStringValue(annot, "T");
-          Optional<String> subject = getAnnotStringValue(annot, "Subj");
-
-          result.add(new PdfAnnotation(type, rect, contents, author, subject));
-        } finally {
-          if (!FfmHelper.isNull(annot)) {
-            try {
-              AnnotBindings.FPDFPage_CloseAnnot.invokeExact(annot);
-            } catch (Throwable e) {
-              PdfiumLibrary.ignore(e);
-            }
-          }
+        PdfAnnotation pdfAnnot = readAnnotation(i);
+        if (pdfAnnot != null) {
+          result.add(pdfAnnot);
         }
       }
       return List.copyOf(result);
@@ -798,6 +911,39 @@ public final class PdfPage implements AutoCloseable {
               + ownerThread.getName()
               + ", current="
               + current.getName());
+    }
+  }
+
+  @CheckForNull
+  private PdfAnnotation readAnnotation(int index) throws Throwable {
+    MemorySegment annot = MemorySegment.NULL;
+    try {
+      annot = (MemorySegment) AnnotBindings.FPDFPage_GetAnnot.invokeExact(handle, index);
+      if (FfmHelper.isNull(annot)) {
+        return null;
+      }
+
+      int subtypeCode = (int) AnnotBindings.FPDFAnnot_GetSubtype.invokeExact(annot);
+      AnnotationType type = AnnotationType.fromCode(subtypeCode);
+
+      PdfAnnotation.Rect rect = getAnnotRect(annot);
+      Optional<String> contents = getAnnotStringValue(annot, "Contents");
+      Optional<String> author = getAnnotStringValue(annot, "T");
+      Optional<String> subject = getAnnotStringValue(annot, "Subj");
+
+      return new PdfAnnotation(type, rect, contents, author, subject);
+    } finally {
+      closeAnnotationQuietly(annot);
+    }
+  }
+
+  private static void closeAnnotationQuietly(MemorySegment annot) {
+    if (!FfmHelper.isNull(annot)) {
+      try {
+        AnnotBindings.FPDFPage_CloseAnnot.invokeExact(annot);
+      } catch (Throwable e) {
+        PdfiumLibrary.ignore(e);
+      }
     }
   }
 

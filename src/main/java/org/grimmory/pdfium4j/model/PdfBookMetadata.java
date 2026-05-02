@@ -201,15 +201,33 @@ public record PdfBookMetadata(
   }
 
   private static Optional<LocalDate> parseDate(String dateStr) {
-    if (dateStr == null || dateStr.isEmpty()) return Optional.empty();
+    if (dateStr == null || dateStr.isEmpty()) {
+      return Optional.empty();
+    }
 
-    // Try PDF date format: D:YYYYMMDDHHmmSS+TZ
+    Optional<LocalDate> pdfDate = parsePdfDate(dateStr);
+    if (pdfDate.isPresent()) {
+      return pdfDate;
+    }
+
+    // Strip ISO 8601 time/timezone suffix for date-only parsing
+    String dateOnly = dateStr.contains("T") ? dateStr.substring(0, dateStr.indexOf('T')) : dateStr;
+
+    Optional<LocalDate> formattedDate = parseWithDateFormats(dateOnly);
+    if (formattedDate.isPresent()) {
+      return formattedDate;
+    }
+
+    return extractYearLastResort(dateStr);
+  }
+
+  private static Optional<LocalDate> parsePdfDate(String dateStr) {
     Matcher pdfMatcher = PDF_DATE_PATTERN.matcher(dateStr);
     if (pdfMatcher.find()) {
       int year = Integer.parseInt(pdfMatcher.group(1));
-      int month = pdfMatcher.group(2) != null ? Integer.parseInt(pdfMatcher.group(2)) : 1;
-      int day = pdfMatcher.group(3) != null ? Integer.parseInt(pdfMatcher.group(3)) : 1;
-      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      int month = getGroupOrDefault(pdfMatcher, 2, 1);
+      int day = getGroupOrDefault(pdfMatcher, 3, 1);
+      if (isValidDate(year, month, day)) {
         try {
           return Optional.of(LocalDate.of(year, month, day));
         } catch (DateTimeException e) {
@@ -217,10 +235,19 @@ public record PdfBookMetadata(
         }
       }
     }
+    return Optional.empty();
+  }
 
-    // Strip ISO 8601 time/timezone suffix for date-only parsing
-    String dateOnly = dateStr.contains("T") ? dateStr.substring(0, dateStr.indexOf('T')) : dateStr;
+  private static int getGroupOrDefault(Matcher m, int group, int defaultValue) {
+    String val = m.group(group);
+    return val != null ? Integer.parseInt(val) : defaultValue;
+  }
 
+  private static boolean isValidDate(int year, int month, int day) {
+    return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+  }
+
+  private static Optional<LocalDate> parseWithDateFormats(String dateOnly) {
     for (DateTimeFormatter fmt : DATE_FORMATS) {
       try {
         return Optional.of(LocalDate.parse(dateOnly, fmt));
@@ -228,8 +255,10 @@ public record PdfBookMetadata(
         PdfiumLibrary.ignore(e);
       }
     }
+    return Optional.empty();
+  }
 
-    // Last resort: extract 4-digit year
+  private static Optional<LocalDate> extractYearLastResort(String dateStr) {
     Matcher yearMatcher = FOUR_DIGIT_YEAR_PATTERN.matcher(dateStr);
     if (yearMatcher.find()) {
       int year = Integer.parseInt(yearMatcher.group(1));
@@ -237,7 +266,6 @@ public record PdfBookMetadata(
         return Optional.of(LocalDate.of(year, 1, 1));
       }
     }
-
     return Optional.empty();
   }
 

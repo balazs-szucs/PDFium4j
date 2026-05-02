@@ -171,7 +171,6 @@ public final class XmpMetadataParser {
   }
 
   private static XmpMetadata extractFromDocument(Document doc) {
-    // Dublin Core fields
     Optional<String> title = getFirstDcText(doc, "title");
     List<String> creators = getDcList(doc, "creator");
     Optional<String> description = getFirstDcText(doc, "description");
@@ -182,13 +181,10 @@ public final class XmpMetadataParser {
     Optional<String> rights = getFirstDcText(doc, "rights");
     List<String> identifiers = getDcList(doc, "identifier");
 
-    // PDF/A conformance
     Optional<String> pdfaConformance = extractPdfAConformance(doc);
 
-    // Calibre fields
     Map<String, String> calibreFields = extractCalibreFields(doc);
 
-    // Custom fields from all non-standard namespaces
     Map<String, String> simpleFields = LinkedHashMap.newLinkedHashMap(16);
     Map<String, List<String>> listFields = LinkedHashMap.newLinkedHashMap(16);
 
@@ -243,7 +239,6 @@ public final class XmpMetadataParser {
       }
     }
 
-    // XMP identifiers
     List<QualifiedIdentifier> xmpIdentifiers = extractXmpIdentifiers(doc);
 
     return new XmpMetadata(

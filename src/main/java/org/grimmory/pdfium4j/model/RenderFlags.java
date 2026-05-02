@@ -43,6 +43,16 @@ public record RenderFlags(int value) {
       return this;
     }
 
+    public Builder lcdText(boolean v) {
+      this.lcdText = v;
+      return this;
+    }
+
+    public Builder grayscale(boolean v) {
+      this.grayscale = v;
+      return this;
+    }
+
     public Builder antiAlias(boolean v) {
       this.antiAlias = v;
       return this;

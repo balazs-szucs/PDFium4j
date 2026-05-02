@@ -38,6 +38,7 @@ import java.util.regex.Pattern;
 import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
+import org.grimmory.pdfium4j.internal.IoUtils;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.grimmory.pdfium4j.model.XmpMetadata;
 
@@ -144,29 +145,31 @@ final class PdfSaver {
       try (FileChannel fc = FileChannel.open(params.sourcePath(), StandardOpenOption.READ)) {
         return new BasePdf(fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size(), arena), null);
       }
-    } else if (params.originalSource() instanceof FileChannel fc) {
+    }
+
+    SeekableByteChannel source = params.originalSource();
+    if (source instanceof FileChannel fc) {
       return new BasePdf(fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size(), arena), null);
-    } else if (params.originalSource() != null) {
-      // Creates a temporary file to hold document contents if the source channel is not seekable or lacks file-mapping capabilities.
-      Path temp = Files.createTempFile("pdfium4j-base-", ".pdf");
+    }
+    if (source != null) {
+      Path temp = IoUtils.createTempFile("pdfium4j-base-", ".pdf");
       try {
-        params.originalSource().position(0);
+        source.position(0);
         try (FileChannel fc =
             FileChannel.open(
                 temp,
                 StandardOpenOption.WRITE,
                 StandardOpenOption.TRUNCATE_EXISTING,
                 StandardOpenOption.READ)) {
-          copyAll(params.originalSource(), fc);
+          copyAll(source, fc);
           return new BasePdf(fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size(), arena), temp);
         }
       } catch (IOException e) {
         deleteIfExists(temp);
         throw e;
       }
-    } else {
-      return new BasePdf(MemorySegment.ofArray(nativeSaveBytes(params.docHandle())), null);
     }
+    return new BasePdf(MemorySegment.ofArray(nativeSaveBytes(params.docHandle())), null);
   }
 
   private static byte[] nativeSaveBytes(MemorySegment docHandle) {
@@ -291,7 +294,6 @@ final class PdfSaver {
     writeXrefTable(update, objOffsets);
     writeTrailer(update, trailer, infoObjNum, nextObj, prevXrefOffset, xrefOffset);
 
-    // Stream original source then update
     writeSource(params, pdf, params.out());
     update.writeTo(params.out());
   }
@@ -311,7 +313,6 @@ final class PdfSaver {
       while (i + count < totalObjs && sortedNums.get(i + count) == start + count) {
         count++;
       }
-      // Section header: "start count\n"
       int len = formatInt(intBuf, start);
       update.write(intBuf, intBuf.length - len, len);
       update.write(' ');

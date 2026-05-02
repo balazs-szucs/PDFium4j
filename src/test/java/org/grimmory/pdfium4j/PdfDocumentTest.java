@@ -1943,6 +1943,7 @@ class PdfDocumentTest {
       
       try (PdfDocument doc2 = PdfDocument.open(pdf)) {
         // Nested document use
+        assertTrue(doc2.pageCount() >= 0);
         assertEquals(0x42, first.get(JAVA_BYTE, 0));
       } // doc2.close() -> ScratchBuffer.release() (decrements count)
       

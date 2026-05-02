@@ -6,6 +6,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageWriteParam;
@@ -41,6 +42,22 @@ public record RenderResult(int width, int height, byte[] rgba) {
   @Override
   public byte[] rgba() {
     return rgba.clone();
+  }
+
+  /** Explicit deep comparison utility for tests and diagnostics. */
+  public boolean contentEquals(RenderResult other) {
+    return other != null
+        && width == other.width
+        && height == other.height
+        && Arrays.equals(rgba, other.rgba);
+  }
+
+  /** Explicit deep hash utility for tests and diagnostics. */
+  public int contentHashCode() {
+    int result = Integer.hashCode(width);
+    result = 31 * result + Integer.hashCode(height);
+    result = 31 * result + Arrays.hashCode(rgba);
+    return result;
   }
 
   /**

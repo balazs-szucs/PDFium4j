@@ -26,7 +26,7 @@ public final class ScratchBuffer {
   private static final long MAX_SIZE = 1024 * 1024 * 128; // 128MB safety limit
 
   private static final ThreadLocal<State> STATE = new ThreadLocal<>();
-  private static final ThreadLocal<Integer> USE_COUNT = ThreadLocal.withInitial(() -> 0);
+  private static final ThreadLocal<int[]> USE_COUNT = ThreadLocal.withInitial(() -> new int[] {0});
 
   private ScratchBuffer() {}
 
@@ -45,7 +45,7 @@ public final class ScratchBuffer {
     if (minBytes < 0 || minBytes > MAX_SIZE) {
       throw new IllegalArgumentException("Invalid scratch buffer size: " + minBytes);
     }
-    if (USE_COUNT.get() <= 0) {
+    if (USE_COUNT.get()[0] <= 0) {
       throw new IllegalStateException("ScratchBuffer.get() called without active acquire()");
     }
     State s = getOrCreateState();
@@ -99,30 +99,31 @@ public final class ScratchBuffer {
    * <p>Uses a thread-local primitive array to avoid boxing allocations on increment/decrement.
    */
   public static void acquire() {
-    USE_COUNT.set(USE_COUNT.get() + 1);
+    USE_COUNT.get()[0]++;
   }
 
   /**
    * Release and close all thread-local scratch state for the current thread.
    */
   public static void release() {
-    int count = USE_COUNT.get();
+    int[] countRef = USE_COUNT.get();
+    int count = countRef[0];
     if (count <= 0) return;
     count--;
-    USE_COUNT.set(count);
+    countRef[0] = count;
     if (count == 0) {
       State s = STATE.get();
       if (s != null) {
         s.close();
         STATE.remove();
-        USE_COUNT.remove();
       }
+      USE_COUNT.remove();
     }
   }
 
   /** Returns a thread-local char array for temporary string construction. */
   public static char[] getCharArray(int minChars) {
-    if (USE_COUNT.get() <= 0) {
+    if (USE_COUNT.get()[0] <= 0) {
       throw new IllegalStateException("ScratchBuffer.getCharArray() called without active acquire()");
     }
     State s = getOrCreateState();
@@ -131,7 +132,7 @@ public final class ScratchBuffer {
 
   /** Returns a thread-local byte array for temporary UTF-16LE decode staging. */
   public static byte[] getByteArray(int minBytes) {
-    if (USE_COUNT.get() <= 0) {
+    if (USE_COUNT.get()[0] <= 0) {
       throw new IllegalStateException("ScratchBuffer.getByteArray() called without active acquire()");
     }
     State s = getOrCreateState();
@@ -140,7 +141,7 @@ public final class ScratchBuffer {
 
   /** Returns a dedicated scratch slab for visitor loops that must survive nested get() calls. */
   public static MemorySegment getLoopScratch(long minBytes) {
-    if (USE_COUNT.get() <= 0) {
+    if (USE_COUNT.get()[0] <= 0) {
       throw new IllegalStateException("ScratchBuffer.getLoopScratch() called without active acquire()");
     }
     State s = getOrCreateState();
