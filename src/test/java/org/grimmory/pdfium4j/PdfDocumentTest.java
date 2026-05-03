@@ -6,6 +6,7 @@ import edu.umd.cs.findbugs.annotations.CheckForNull;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -17,6 +18,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.lang.foreign.MemorySegment;
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.model.*;
 import org.junit.jupiter.api.Test;
@@ -849,6 +851,61 @@ class PdfDocumentTest {
 
   @Test
   @EnabledIf("pdfiumAvailable")
+  void saveToSlowOutputStreamWithoutUpdates() throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      SlowOutputStream out = new SlowOutputStream();
+      doc.save(out);
+
+      byte[] saved = out.toByteArray();
+      assertTrue(saved.length > 0);
+      assertTrue(new String(saved, 0, 5, StandardCharsets.ISO_8859_1).startsWith("%PDF"));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataSaveToGenericOutputStreamIsRejected() throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Unsafe Stream Save");
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+      PdfiumException ex = assertThrows(PdfiumException.class, () -> doc.save(baos));
+      assertTrue(
+          ex.getMessage().contains("Failed to save document"),
+          "Public save(OutputStream) should surface a clear failure");
+      assertTrue(
+          ex.getCause() instanceof IOException
+              && ex.getCause().getMessage().contains("save(Path) or saveToBytes()"),
+          "Failure should explain the safe alternatives for incremental saves");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataSaveToBytesRemainsSupported() throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    byte[] saved;
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Bytes Metadata Save");
+      saved = doc.saveToBytes();
+    }
+
+    try (PdfDocument doc = PdfDocument.open(saved)) {
+      assertEquals("Bytes Metadata Save", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertTrue(doc.pageCount() > 0, "saveToBytes should still produce a readable PDF");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
   void setMetadataSingleTag(@TempDir Path tempDir) throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
@@ -909,6 +966,81 @@ class PdfDocumentTest {
     try (PdfDocument doc = PdfDocument.open(output)) {
       assertTrue(
           doc.metadata(MetadataTag.TITLE).isEmpty(), "Cleared title should read back as empty");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void setMetadataBlankModDateFallsBackToGeneratedDate(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path output = tempDir.resolve("meta-blank-moddate.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.MOD_DATE, "   ");
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      String modDate = doc.metadata(MetadataTag.MOD_DATE).orElse("");
+      assertTrue(!modDate.isBlank(), "ModDate should be auto-generated for blank input");
+      assertTrue(modDate.startsWith("D:"), "Generated ModDate should use PDF date format");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void setMetadataInvalidModDateFallsBackToGeneratedDate(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path output = tempDir.resolve("meta-invalid-moddate.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.MOD_DATE, "not-a-pdf-date");
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      String modDate = doc.metadata(MetadataTag.MOD_DATE).orElse("");
+      assertTrue(!modDate.isBlank(), "ModDate should not remain blank");
+      assertTrue(modDate.startsWith("D:"), "Invalid ModDate should be replaced by PDF date");
+      assertNotEquals("not-a-pdf-date", modDate);
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void setMetadataTimezoneModDateIsPreserved(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    String explicitModDate = "D:20260503112233+02'00'";
+    Path output = tempDir.resolve("meta-timezone-moddate.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.MOD_DATE, explicitModDate);
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals(explicitModDate, doc.metadata(MetadataTag.MOD_DATE).orElse(""));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void setMetadataDateOnlyModDateIsPreserved(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    String explicitModDate = "D:20260503";
+    Path output = tempDir.resolve("meta-dateonly-moddate.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.MOD_DATE, explicitModDate);
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals(explicitModDate, doc.metadata(MetadataTag.MOD_DATE).orElse(""));
     }
   }
 
@@ -1720,6 +1852,34 @@ class PdfDocumentTest {
     out.write(b, 0, b.length);
   }
 
+  private static byte[] appendAscii(byte[] data, String suffix) {
+    byte[] extra = suffix.getBytes(StandardCharsets.ISO_8859_1);
+    byte[] combined = new byte[data.length + extra.length];
+    System.arraycopy(data, 0, combined, 0, data.length);
+    System.arraycopy(extra, 0, combined, data.length, extra.length);
+    return combined;
+  }
+
+  private static final class SlowOutputStream extends OutputStream {
+    private final ByteArrayOutputStream delegate = new ByteArrayOutputStream();
+
+    @Override
+    public void write(int b) {
+      delegate.write(b);
+    }
+
+    @Override
+    public void write(byte[] b, int off, int len) {
+      for (int i = 0; i < len; i++) {
+        delegate.write(b[off + i]);
+      }
+    }
+
+    byte[] toByteArray() {
+      return delegate.toByteArray();
+    }
+  }
+
   @Test
   @EnabledIf("pdfiumAvailable")
   void metadataSaveWithXrefStreamPdf(@TempDir Path tempDir) throws IOException {
@@ -1741,6 +1901,29 @@ class PdfDocumentTest {
     try (PdfDocument doc = PdfDocument.open(output)) {
       assertEquals("XRef Stream Test", doc.metadata(MetadataTag.TITLE).orElse(""));
       assertEquals("Test Author", doc.metadata(MetadataTag.AUTHOR).orElse(""));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataSaveWithXrefStreamPdfIgnoresTrailingFalseTrailerTokens(@TempDir Path tempDir)
+      throws IOException {
+    byte[] xrefStreamPdf =
+        appendAscii(
+            minimalXrefStreamPdf(),
+            "\n9 0 obj\n<< /Root 99 0 R /Info 98 0 R /Size 999 >>\nendobj\n%");
+    Path source = tempDir.resolve("xref-stream-false-tail.pdf");
+    Files.write(source, xrefStreamPdf);
+
+    Path output = tempDir.resolve("xref-stream-false-tail-out.pdf");
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      doc.setMetadata(MetadataTag.TITLE, "Trailing Tokens Ignored");
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals("Trailing Tokens Ignored", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertEquals(1, doc.pageCount());
     }
   }
 
@@ -2011,9 +2194,8 @@ class PdfDocumentTest {
     if (pdf == null) return;
     try (PdfDocument doc = PdfDocument.open(pdf)) {
       doc.setXmpMetadata(meta);
-      ByteArrayOutputStream bos = new ByteArrayOutputStream();
-      doc.save(bos);
-      byte[] savedBytes = bos.toByteArray();
+      // XMP updates require saveToBytes() or save(Path) — generic OutputStream is rejected.
+      byte[] savedBytes = doc.saveToBytes();
       
       // Verify we can parse it back
       try (PdfDocument savedDoc = PdfDocument.open(savedBytes)) {
@@ -2022,5 +2204,258 @@ class PdfDocumentTest {
         assertEquals("Agent", loaded.creators().get(0));
       }
     }
+  }
+
+  // ── New edge-case & allocation-budget tests ──────────────────────────────────────────────────
+
+  /**
+   * A PDF with a /Encrypt entry in the trailer must be rejected for incremental save to prevent
+   * writing unencrypted Info/XMP bytes into an encrypted document body.
+   */
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void incrementalSaveOnEncryptedPdfFails(@TempDir Path tempDir) {
+    // Hand-crafted minimal PDF that has /Encrypt in the trailer dict.
+    byte[] encryptedPdf = buildMinimalPdfWithEncryptEntry();
+    Path source = tempDir.resolve("encrypted-fake.pdf");
+    Path output = tempDir.resolve("encrypted-out.pdf");
+    try {
+      Files.write(source, encryptedPdf);
+    } catch (IOException e) {
+      return;
+    }
+    // PDFium may refuse to open the fake /Encrypt entry — that is also acceptable.
+    // If it opens, the save must fail with an explicit encryption error.
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      doc.setMetadata(MetadataTag.TITLE, "Should Fail");
+      PdfiumException ex = assertThrows(PdfiumException.class, () -> doc.save(output));
+      String msg =
+          ex.getMessage() + (ex.getCause() != null ? " " + ex.getCause().getMessage() : "");
+      assertTrue(
+          msg.toLowerCase(java.util.Locale.ROOT).contains("encrypt"),
+          "Exception should mention encryption, got: " + msg);
+    } catch (PdfiumException ignored) {
+      // PDFium rejected the fake-encrypted PDF at open time — also acceptable.
+    }
+  }
+
+  /**
+   * An Info dictionary value containing ">>" inside a parenthesized string must round-trip
+   * correctly. The findDictionaryEnd scanner must not terminate early on the embedded ">>" token.
+   */
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void infoDictContainingDictTerminatorBytesRoundTrips(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    String trickyTitle = "Hello >> World";
+    String trickyAuthor = "Author (with parens >> and more)";
+
+    Path output = tempDir.resolve("tricky-meta.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, trickyTitle);
+      doc.setMetadata(MetadataTag.AUTHOR, trickyAuthor);
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals(trickyTitle, doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertEquals(trickyAuthor, doc.metadata(MetadataTag.AUTHOR).orElse(""));
+    }
+  }
+
+  /**
+   * Every incremental update must write a /Prev pointer so the xref chain remains intact.
+   * Verified by inspecting the bytes appended after the original file.
+   */
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void incrementalUpdateWritesPrevPointer(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    byte[] original = Files.readAllBytes(testPdf);
+    int originalSize = original.length;
+
+    Path output = tempDir.resolve("prev-check.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Prev Check");
+      doc.save(output);
+    }
+
+    byte[] saved = Files.readAllBytes(output);
+    assertTrue(saved.length > originalSize, "Saved file should be larger than original");
+
+    String updateSection =
+        new String(
+            saved,
+            originalSize,
+            saved.length - originalSize,
+            java.nio.charset.StandardCharsets.ISO_8859_1);
+    assertTrue(
+        updateSection.contains("/Prev"),
+        "/Prev must appear in the incremental update trailer; update section:\n" + updateSection);
+  }
+
+  /** Three chained incremental saves must each carry a correct /Prev pointer. */
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void threeChainedIncrementalSaves(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path first = tempDir.resolve("chain1.pdf");
+    Path second = tempDir.resolve("chain2.pdf");
+    Path third = tempDir.resolve("chain3.pdf");
+
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Chain 1");
+      doc.save(first);
+    }
+    try (PdfDocument doc = PdfDocument.open(first)) {
+      doc.setMetadata(MetadataTag.TITLE, "Chain 2");
+      doc.setMetadata(MetadataTag.AUTHOR, "Author 2");
+      doc.save(second);
+    }
+    try (PdfDocument doc = PdfDocument.open(second)) {
+      doc.setMetadata(MetadataTag.TITLE, "Chain 3");
+      doc.setMetadata(MetadataTag.AUTHOR, "Author 3");
+      doc.save(third);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(third)) {
+      assertEquals("Chain 3", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertEquals("Author 3", doc.metadata(MetadataTag.AUTHOR).orElse(""));
+      assertTrue(doc.pageCount() > 0);
+    }
+
+    byte[] firstBytes = Files.readAllBytes(first);
+    byte[] secondBytes = Files.readAllBytes(second);
+    byte[] thirdBytes = Files.readAllBytes(third);
+
+    String secondUpdate =
+        new String(
+            secondBytes,
+            firstBytes.length,
+            secondBytes.length - firstBytes.length,
+            java.nio.charset.StandardCharsets.ISO_8859_1);
+    assertTrue(secondUpdate.contains("/Prev"), "Second save must contain /Prev");
+
+    String thirdUpdate =
+        new String(
+            thirdBytes,
+            secondBytes.length,
+            thirdBytes.length - secondBytes.length,
+            java.nio.charset.StandardCharsets.ISO_8859_1);
+    assertTrue(thirdUpdate.contains("/Prev"), "Third save must contain /Prev");
+  }
+
+  /**
+   * A metadata-only save must not allocate more than 2 MB above baseline. This guards against
+   * regressions re-introducing large intermediate buffers (e.g. full-delta ByteArrayOutputStream).
+   */
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataOnlySaveAllocationBudget() throws IOException {
+    com.sun.management.ThreadMXBean tmxb =
+        (com.sun.management.ThreadMXBean)
+            java.lang.management.ManagementFactory.getThreadMXBean();
+    if (!tmxb.isThreadAllocatedMemoryEnabled()) {
+      return; // not supported on this JVM
+    }
+
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    // Warm up: trigger JIT before measuring
+    try (PdfDocument warmup = PdfDocument.open(testPdf)) {
+      warmup.setMetadata(MetadataTag.TITLE, "Warmup");
+      warmup.saveToBytes();
+    }
+
+    long threadId = Thread.currentThread().threadId();
+    long before = tmxb.getThreadAllocatedBytes(threadId);
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Allocation Budget Test");
+      doc.setMetadata(MetadataTag.AUTHOR, "Perf Author");
+      doc.saveToBytes();
+    }
+    long after = tmxb.getThreadAllocatedBytes(threadId);
+
+    long allocatedBytes = after - before;
+    long budgetBytes = 2L * 1024L * 1024L; // 2 MB — generous for JIT + GC metadata overhead
+    assertTrue(
+        allocatedBytes < budgetBytes,
+        "Metadata save allocated "
+            + allocatedBytes
+            + " bytes, exceeds 2 MB budget of "
+            + budgetBytes);
+  }
+
+  /**
+   * Repeated metadata saves from the same document must not grow their allocation per call
+   * (no cumulative heap buffering).
+   */
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void repeatedMetadataSaveStaysInAllocationBudget() throws IOException {
+    com.sun.management.ThreadMXBean tmxb =
+        (com.sun.management.ThreadMXBean)
+            java.lang.management.ManagementFactory.getThreadMXBean();
+    if (!tmxb.isThreadAllocatedMemoryEnabled()) {
+      return;
+    }
+
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    // Warm up
+    try (PdfDocument warmup = PdfDocument.open(testPdf)) {
+      warmup.setMetadata(MetadataTag.TITLE, "WU");
+      warmup.saveToBytes();
+      warmup.saveToBytes();
+      warmup.saveToBytes();
+    }
+
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Repeated Save");
+
+      long threadId = Thread.currentThread().threadId();
+
+      long b1 = tmxb.getThreadAllocatedBytes(threadId);
+      doc.saveToBytes();
+      long alloc1 = tmxb.getThreadAllocatedBytes(threadId) - b1;
+
+      long b2 = tmxb.getThreadAllocatedBytes(threadId);
+      doc.saveToBytes();
+      long alloc2 = tmxb.getThreadAllocatedBytes(threadId) - b2;
+
+      // Allow 3x slack for JIT variance, but not unbounded growth
+      assertTrue(
+          alloc2 < alloc1 * 3 + 65536,
+          "Allocation per save grew unexpectedly: first=" + alloc1 + " second=" + alloc2);
+    }
+  }
+
+  /** Builds a hand-crafted minimal PDF with /Encrypt in the trailer (no actual encryption). */
+  private static byte[] buildMinimalPdfWithEncryptEntry() {
+    String pdf =
+        "%PDF-1.4\n"
+            + "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+            + "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+            + "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n"
+            + "xref\n"
+            + "0 4\n"
+            + "0000000000 65535 f \r\n"
+            + "0000000009 00000 n \r\n"
+            + "0000000058 00000 n \r\n"
+            + "0000000117 00000 n \r\n"
+            + "trailer\n"
+            + "<< /Size 4 /Root 1 0 R /Encrypt 99 0 R >>\n"
+            + "startxref\n"
+            + "190\n"
+            + "%%EOF\n";
+    return pdf.getBytes(java.nio.charset.StandardCharsets.ISO_8859_1);
   }
 }

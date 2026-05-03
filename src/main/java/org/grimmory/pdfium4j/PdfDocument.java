@@ -263,7 +263,7 @@ public final class PdfDocument implements AutoCloseable {
       MemorySegment doc =
           (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(seg, data.length, pwdSeg);
       if (FfmHelper.isNull(doc)) {
-        int err = (int) ViewBindings.FPDF_GetLastError.invokeExact();
+        int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
         arena.close();
         throw mapOpenError("Failed to open document from bytes", err);
       }
@@ -303,7 +303,7 @@ public final class PdfDocument implements AutoCloseable {
       MemorySegment doc = (MemorySegment) ViewBindings.FPDF_LoadCustomDocument.invokeExact(fileAccess, pwdSeg);
 
       if (FfmHelper.isNull(doc)) {
-        int err = (int) ViewBindings.FPDF_GetLastError.invokeExact();
+        int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
         throw mapOpenError("Failed to open document: " + label, err);
       }
       return new PdfDocument(
@@ -1014,7 +1014,7 @@ public final class PdfDocument implements AutoCloseable {
     try {
       temp = IoUtils.createTempFile("pdfium4j-save-", ".pdf");
       try (OutputStream out = Files.newOutputStream(temp)) {
-        save(out);
+        save(out, true);
       }
       if (docSourceChannel != null) {
         docSourceChannel.close();
@@ -1063,13 +1063,17 @@ public final class PdfDocument implements AutoCloseable {
 
   private void saveToNewPath(Path path) {
     try (OutputStream out = Files.newOutputStream(path)) {
-      save(out);
+      save(out, true);
     } catch (IOException e) {
       throw new PdfiumException("Failed to save to " + path, e);
     }
   }
 
   public void save(OutputStream out) {
+    save(out, false);
+  }
+
+  private void save(OutputStream out, boolean allowIncrementalOutput) {
     ensureOpen();
     try {
       PdfSaver.SaveParams params =
@@ -1082,7 +1086,8 @@ public final class PdfDocument implements AutoCloseable {
               sourcePath,
               sourceBytes,
               structurallyModified,
-              out);
+              out,
+              allowIncrementalOutput);
       PdfSaver.save(params);
     } catch (IOException e) {
       throw new PdfiumException("Failed to save document", e);
@@ -1091,7 +1096,7 @@ public final class PdfDocument implements AutoCloseable {
 
   public byte[] saveToBytes() {
     ByteArrayOutputStream bos = new ByteArrayOutputStream();
-    save(bos);
+    save(bos, true);
     return bos.toByteArray();
   }
 
@@ -1147,7 +1152,7 @@ public final class PdfDocument implements AutoCloseable {
   private static void throwLastError(String message) {
     int err;
     try {
-      err = (int) ViewBindings.FPDF_GetLastError.invokeExact();
+      err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
     } catch (Throwable t) {
       err = 0;
     }
@@ -1188,7 +1193,7 @@ public final class PdfDocument implements AutoCloseable {
       MemorySegment doc =
           (MemorySegment) ViewBindings.FPDF_LoadDocument.invokeExact(pathSeg, MemorySegment.NULL);
       if (FfmHelper.isNull(doc)) {
-        int err = (int) ViewBindings.FPDF_GetLastError.invokeExact();
+        int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
         if (err == ViewBindings.FPDF_ERR_PASSWORD) return PdfProbeResult.ok(-1, true);
         return PdfProbeResult.error(
             PdfProbeResult.Status.CORRUPT, PdfErrorCode.fromCode(err), "Failed to probe document");
@@ -1220,7 +1225,7 @@ public final class PdfDocument implements AutoCloseable {
           (MemorySegment)
               ViewBindings.FPDF_LoadMemDocument.invokeExact(seg, data.length, MemorySegment.NULL);
       if (FfmHelper.isNull(doc)) {
-        int err = (int) ViewBindings.FPDF_GetLastError.invokeExact();
+        int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
         if (err == ViewBindings.FPDF_ERR_PASSWORD) return PdfProbeResult.ok(-1, true);
         return PdfProbeResult.error(
             PdfProbeResult.Status.CORRUPT, PdfErrorCode.fromCode(err), "Failed to probe document");
