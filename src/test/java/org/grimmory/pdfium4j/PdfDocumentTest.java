@@ -2026,6 +2026,46 @@ class PdfDocumentTest {
     return out.toByteArray();
   }
 
+  private static byte[] poisonedRootInfoTrailerPdf() {
+    byte[] base = minimalPdfWithText();
+    ByteArrayOutputStream out = new ByteArrayOutputStream(base.length + 256);
+    out.write(base, 0, base.length);
+    out.write('\n');
+
+    int infoOffset = out.size();
+    writeBytes(out, "6 0 obj\n<< /Title (Broken Root) /Author (Repair Test) >>\nendobj\n");
+
+    int xrefOffset = out.size();
+    writeBytes(out, "xref\n6 1\n");
+    writeBytes(out, String.format(java.util.Locale.ROOT, "%010d 00000 n \n", infoOffset));
+
+    int prevXref = extractStartxrefValue(base);
+    writeBytes(
+        out,
+        "trailer\n<< /Size 7 /Root 6 0 R /Info 6 0 R /Prev "
+            + prevXref
+            + " >>\nstartxref\n"
+            + xrefOffset
+            + "\n%%EOF\n");
+    return out.toByteArray();
+  }
+
+  private static int extractStartxrefValue(byte[] pdf) {
+    String text = new String(pdf, StandardCharsets.ISO_8859_1);
+    int idx = text.lastIndexOf("startxref");
+    assertTrue(idx >= 0, "PDF must contain startxref");
+
+    int pos = idx + "startxref".length();
+    while (pos < text.length() && Character.isWhitespace(text.charAt(pos))) {
+      pos++;
+    }
+    int end = pos;
+    while (end < text.length() && Character.isDigit(text.charAt(end))) {
+      end++;
+    }
+    return Integer.parseInt(text.substring(pos, end));
+  }
+
   private static void writeBytes(ByteArrayOutputStream out, String s) {
     byte[] b = s.getBytes(StandardCharsets.ISO_8859_1);
     out.write(b, 0, b.length);
@@ -2164,6 +2204,37 @@ class PdfDocumentTest {
     try (PdfDocument doc = PdfDocument.open(output)) {
       assertEquals("Split Headers", doc.metadata(MetadataTag.TITLE).orElse(""));
       assertTrue(doc.xmpMetadataString().contains("Split Headers"));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void repairFixesTrailerRootPointingToInfoObject(@TempDir Path tempDir) throws IOException {
+    Path source = tempDir.resolve("root-info-broken.pdf");
+    Files.write(source, poisonedRootInfoTrailerPdf());
+
+    Path repaired = tempDir.resolve("root-info-repaired.pdf");
+    PdfDocument.repair(source, repaired);
+
+    String repairedText = new String(Files.readAllBytes(repaired), StandardCharsets.ISO_8859_1);
+    assertTrue(
+        repairedText.lastIndexOf("/Root 1 0 R") > repairedText.lastIndexOf("/Root 6 0 R"),
+        "Repaired file should append a corrected /Root trailer entry");
+
+    try (PdfDocument doc = PdfDocument.open(repaired)) {
+      assertEquals(1, doc.pageCount());
+      assertEquals("Broken Root", doc.metadata(MetadataTag.TITLE).orElse(""));
+    }
+
+    Path saved = tempDir.resolve("root-info-repaired-saved.pdf");
+    try (PdfDocument doc = PdfDocument.open(repaired)) {
+      doc.setMetadata(MetadataTag.TITLE, "Repaired Title");
+      doc.save(saved);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(saved)) {
+      assertEquals(1, doc.pageCount());
+      assertEquals("Repaired Title", doc.metadata(MetadataTag.TITLE).orElse(""));
     }
   }
 

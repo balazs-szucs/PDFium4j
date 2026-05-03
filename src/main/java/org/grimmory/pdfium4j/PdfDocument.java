@@ -1159,6 +1159,57 @@ public final class PdfDocument implements AutoCloseable {
         path.toString(), pr.isValid(), pr.pageCount(), pr.needsPassword(), false, 0, List.of());
   }
 
+  public static void repair(Path source, Path target) {
+    if (source == null || target == null) {
+      throw new IllegalArgumentException("source and target must not be null");
+    }
+
+    if (source.equals(target)) {
+      repairInPlace(source);
+      return;
+    }
+
+    try (OutputStream out = Files.newOutputStream(target)) {
+      PdfSaver.repair(source, out);
+    } catch (IOException e) {
+      throw new PdfiumException("Failed to repair document: " + source, e);
+    }
+  }
+
+  public static void repair(Path path) {
+    if (path == null) {
+      throw new IllegalArgumentException("path must not be null");
+    }
+    repairInPlace(path);
+  }
+
+  public static byte[] repair(byte[] data) {
+    if (data == null || data.length == 0) {
+      throw new IllegalArgumentException("data is null or empty");
+    }
+    try {
+      return PdfSaver.repair(data);
+    } catch (IOException e) {
+      throw new PdfiumException("Failed to repair document from bytes", e);
+    }
+  }
+
+  private static void repairInPlace(Path path) {
+    Path temp = null;
+    try {
+      temp = IoUtils.createTempFile("pdfium4j-repair-", ".pdf");
+      try (OutputStream out = Files.newOutputStream(temp)) {
+        PdfSaver.repair(path, out);
+      }
+      Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+      temp = null;
+    } catch (IOException e) {
+      throw new PdfiumException("Failed to repair document: " + path, e);
+    } finally {
+      cleanupTempFile(temp);
+    }
+  }
+
   private Map<MetadataTag, String> buildMergedMetadata() {
     Map<MetadataTag, String> merged = LinkedHashMap.newLinkedHashMap(METADATA_TAGS.length);
     for (MetadataTag tag : METADATA_TAGS) {

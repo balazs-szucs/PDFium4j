@@ -208,7 +208,6 @@ tasks.register<Exec>("runPdfJsIngestion") {
     description = "Ingests Mozilla's pdf.js test corpus"
     commandLine("python3", "scripts/ingest_pdfjs.py")
 }
-
 tasks.register<JavaExec>("runCorpusMetadataStress") {
     group = "application"
     description = "Runs metadata save stress validation against corpus PDFs"
