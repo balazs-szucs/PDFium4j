@@ -1,6 +1,5 @@
 package org.grimmory.pdfium4j.internal;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
@@ -22,7 +21,6 @@ public final class ScratchBuffer {
 
   private static final long INITIAL_SIZE = 4096;
   private static final long STEADY_STATE_SIZE = 64L * 1024L;
-  private static final long INITIAL_PROBE_BYTES = 4096;
   private static final long MAX_SIZE = 1024 * 1024 * 128; // 128MB safety limit
 
   private static final ThreadLocal<State> STATE = new ThreadLocal<>();
@@ -102,9 +100,7 @@ public final class ScratchBuffer {
     USE_COUNT.get()[0]++;
   }
 
-  /**
-   * Release and close all thread-local scratch state for the current thread.
-   */
+  /** Release and close all thread-local scratch state for the current thread. */
   public static void release() {
     int[] countRef = USE_COUNT.get();
     int count = countRef[0];
@@ -124,7 +120,8 @@ public final class ScratchBuffer {
   /** Returns a thread-local char array for temporary string construction. */
   public static char[] getCharArray(int minChars) {
     if (USE_COUNT.get()[0] <= 0) {
-      throw new IllegalStateException("ScratchBuffer.getCharArray() called without active acquire()");
+      throw new IllegalStateException(
+          "ScratchBuffer.getCharArray() called without active acquire()");
     }
     State s = getOrCreateState();
     return s.getCharArray(minChars);
@@ -133,7 +130,8 @@ public final class ScratchBuffer {
   /** Returns a thread-local byte array for temporary UTF-16LE decode staging. */
   public static byte[] getByteArray(int minBytes) {
     if (USE_COUNT.get()[0] <= 0) {
-      throw new IllegalStateException("ScratchBuffer.getByteArray() called without active acquire()");
+      throw new IllegalStateException(
+          "ScratchBuffer.getByteArray() called without active acquire()");
     }
     State s = getOrCreateState();
     return s.getByteArray(minBytes);
@@ -142,7 +140,8 @@ public final class ScratchBuffer {
   /** Returns a dedicated scratch slab for visitor loops that must survive nested get() calls. */
   public static MemorySegment getLoopScratch(long minBytes) {
     if (USE_COUNT.get()[0] <= 0) {
-      throw new IllegalStateException("ScratchBuffer.getLoopScratch() called without active acquire()");
+      throw new IllegalStateException(
+          "ScratchBuffer.getLoopScratch() called without active acquire()");
     }
     State s = getOrCreateState();
     return s.getLoopScratch(minBytes);
@@ -162,7 +161,6 @@ public final class ScratchBuffer {
     return s;
   }
 
-  @SuppressFBWarnings({"EI_EXPOSE_REP", "EI_EXPOSE_REP2"})
   public static final class KeyValueSlots {
     public MemorySegment keySeg;
     public MemorySegment valueSeg;

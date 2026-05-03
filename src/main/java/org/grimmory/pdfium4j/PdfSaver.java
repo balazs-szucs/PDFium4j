@@ -5,6 +5,7 @@ import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -27,10 +28,13 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.zip.InflaterInputStream;
 import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
@@ -45,16 +49,17 @@ import org.grimmory.pdfium4j.model.MetadataTag;
  */
 final class PdfSaver {
 
-    /**
-     * Per-thread callback sink for native FPDF_SaveAsCopy bytes. Set for one save call and removed
-     * in finally so large backing arrays are not retained by pooled threads.
-     */
-    private static final ThreadLocal<ByteArrayOutputStream> SAVE_CALLBACK_TARGET =
+  /**
+   * Per-thread callback sink for native FPDF_SaveAsCopy bytes. Set for one save call and removed in
+   * finally so large backing arrays are not retained by pooled threads.
+   */
+  private static final ThreadLocal<ByteArrayOutputStream> SAVE_CALLBACK_TARGET =
       new ThreadLocal<>();
 
-    /** Reused per-thread staging buffer for native save callbacks; bounded to 64 KiB. */
-    private static final ThreadLocal<byte[]> SAVE_CALLBACK_BUF =
+  /** Reused per-thread staging buffer for native save callbacks; bounded to 64 KiB. */
+  private static final ThreadLocal<byte[]> SAVE_CALLBACK_BUF =
       ThreadLocal.withInitial(() -> new byte[65536]);
+
   private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
   private static final long INITIAL_TAIL_SCAN_BYTES = 64L * 1024L;
   private static final long SECONDARY_TAIL_SCAN_BYTES = 256L * 1024L;
@@ -83,11 +88,27 @@ final class PdfSaver {
 
   private static final Pattern METADATA_REF_PATTERN =
       Pattern.compile("/Metadata\\s+\\d+\\s+\\d+\\s+R\\b");
+  private static final Pattern FILTER_ARRAY_PATTERN = Pattern.compile("/Filter\\s*\\[([^\\]]+)\\]");
+  private static final Pattern FILTER_NAME_PATTERN = Pattern.compile("/Filter\\s*/([A-Za-z0-9]+)");
+  private static final Pattern LENGTH_PATTERN = Pattern.compile("/Length\\s+(\\d+)");
+  private static final Pattern LENGTH_REF_PATTERN =
+      Pattern.compile("/Length\\s+(\\d+)\\s+(\\d+)\\s+R");
+  private static final Pattern FIRST_PATTERN = Pattern.compile("/First\\s+(\\d+)");
+  private static final Pattern N_PATTERN = Pattern.compile("/N\\s+(\\d+)");
+  private static final Pattern PREV_PATTERN = Pattern.compile("/Prev\\s+(\\d+)");
+  private static final Pattern PREDICTOR_PATTERN = Pattern.compile("/Predictor\\s+(\\d+)");
+  private static final Pattern COLUMNS_PATTERN = Pattern.compile("/Columns\\s+(\\d+)");
+  private static final Pattern W_ARRAY_PATTERN =
+      Pattern.compile("/W\\s*\\[\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)\\s*\\]");
+  private static final Pattern INDEX_ARRAY_PATTERN = Pattern.compile("/Index\\s*\\[([^\\]]+)\\]");
+  private static final Pattern NAME_TOKEN_PATTERN = Pattern.compile("/([A-Za-z0-9]+)");
 
   private static final byte[] DICT_START = "<<".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] TRAILER_KEYWORD = "trailer".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] STARTXREF_KEYWORD =
-      "startxref".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] STARTXREF_KEYWORD = "startxref".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] XREF_KEYWORD = "xref".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] STREAM_KEYWORD = "stream".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] ENDSTREAM_KEYWORD = "endstream".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] TYPE_KEY = "/Type".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] XREF_TYPE_NAME = "/XRef".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] CATALOG_TYPE_NAME = "/Catalog".getBytes(StandardCharsets.ISO_8859_1);
@@ -182,7 +203,8 @@ final class PdfSaver {
   private static byte[] nativeSaveBytes(MemorySegment docHandle) {
     ByteArrayOutputStream baos = new ByteArrayOutputStream(65536);
     SAVE_CALLBACK_TARGET.set(baos);
-    // Shared arena is required for native upcall stubs to ensure they remain valid during the asynchronous-like save callback flow.
+    // Shared arena is required for native upcall stubs to ensure they remain valid during the
+    // asynchronous-like save callback flow.
     try (Arena arena = Arena.ofShared()) {
       if (EditBindings.FPDF_SaveAsCopy == null) {
         throw new PdfiumException("FPDF_SaveAsCopy not available in this PDFium build");
@@ -246,13 +268,21 @@ final class PdfSaver {
 
   private record DictionaryRange(long start, long endExclusive) {}
 
+  private record XrefEntry(int type, long field2, int field3) {}
+
+  private record XrefStreamSection(
+      TrailerFields trailerFields,
+      int[] widths,
+      int[] indexPairs,
+      long prevOffset,
+      byte[] decodedEntries) {}
+
   private static void writeIncrementalUpdate(SaveParams params, Arena arena) throws IOException {
     BasePdf base = getBaseSegment(params, arena);
     MemorySegment pdf = base.segment();
     try {
       ParsedTail parsedTail = parseTail(pdf);
-      performIncrementalUpdate(
-          pdf, params, parsedTail.trailer(), parsedTail.prevXrefOffset());
+      performIncrementalUpdate(pdf, params, parsedTail.trailer(), parsedTail.prevXrefOffset());
     } catch (IOException e) {
       throw new PdfiumException("Incremental update failed", e);
     } finally {
@@ -263,7 +293,7 @@ final class PdfSaver {
   private static void performIncrementalUpdate(
       MemorySegment pdf, SaveParams params, TrailerInfo trailer, long prevXrefOffset)
       throws IOException {
-    int nextObj = trailer.size();
+    int nextObj = determineNextObjectNumber(pdf, trailer.size());
     long baseOffset = pdf.byteSize();
 
     // Pre-build all update objects so we can determine exact byte offsets before writing anything
@@ -283,22 +313,20 @@ final class PdfSaver {
     }
 
     org.grimmory.pdfium4j.internal.XmpUpdate xmp = params.pendingXmp();
-    int xmpObjNum = 0;
     if (hasXmpUpdate(xmp)) {
-      xmpObjNum = nextObj++;
+      int xmpObjNum = nextObj++;
       objOffsets.put(xmpObjNum, baseOffset + updateSize);
       byte[] xmpBytes = buildXmpObjectBytes(xmpObjNum, xmp);
       objectBufs.add(xmpBytes);
       updateSize += xmpBytes.length;
 
       ObjectRef catalogRef = trailer.rootRef();
-      DictionaryRange catalogRange =
-          findObjectDictionaryRange(pdf, catalogRef.num, catalogRef.gen);
-      if (catalogRange == null) {
+      byte[] catalogDictBytes = resolveObjectDictionaryBytes(pdf, catalogRef, prevXrefOffset);
+      if (catalogDictBytes == null) {
         throw new IOException("Failed to find Catalog object for XMP update");
       }
       objOffsets.put(catalogRef.num, baseOffset + updateSize);
-      byte[] catalogBytes = buildModifiedCatalogBytes(pdf, catalogRef, catalogRange, xmpObjNum);
+      byte[] catalogBytes = buildModifiedCatalogBytes(catalogRef, catalogDictBytes, xmpObjNum);
       objectBufs.add(catalogBytes);
       updateSize += catalogBytes.length;
     }
@@ -342,10 +370,7 @@ final class PdfSaver {
         long offset = objOffsets.get(start + j);
         if (offset > MAX_XREF_OFFSET) {
           throw new IOException(
-              "Xref offset exceeds 10-digit table limit: "
-                  + offset
-                  + " for object "
-                  + (start + j));
+              "Xref offset exceeds 10-digit table limit: " + offset + " for object " + (start + j));
         }
         // Manual fixed-width formatting: 10 digits zero-padded "0000000000 00000 n \n"
         // Total 20 bytes.
@@ -459,8 +484,8 @@ final class PdfSaver {
    * Pre-renders the full XMP stream object to a byte array so the caller knows its size before
    * writing the enclosing xref table entry.
    */
-  private static byte[] buildXmpObjectBytes(
-      int num, org.grimmory.pdfium4j.internal.XmpUpdate xmp) throws IOException {
+  private static byte[] buildXmpObjectBytes(int num, org.grimmory.pdfium4j.internal.XmpUpdate xmp)
+      throws IOException {
     byte[] content;
     if (xmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw) {
       content = raw.xmp().getBytes(StandardCharsets.UTF_8);
@@ -487,9 +512,7 @@ final class PdfSaver {
   }
 
   private static byte[] buildModifiedCatalogBytes(
-      MemorySegment pdf, ObjectRef catalogRef, DictionaryRange range, int xmpObjNum) {
-    long dictLen = range.endExclusive() - range.start();
-    byte[] dictBytes = pdf.asSlice(range.start(), dictLen).toArray(JAVA_BYTE);
+      ObjectRef catalogRef, byte[] dictBytes, int xmpObjNum) {
     String oldDict = new String(dictBytes, StandardCharsets.ISO_8859_1);
     StringBuilder sb = new StringBuilder(oldDict.length() + 128);
     sb.append(catalogRef.num).append(" ").append(catalogRef.gen).append(" obj\n");
@@ -520,6 +543,10 @@ final class PdfSaver {
     if (parsed != null) {
       return parsed;
     }
+    parsed = tryParseTail(pdf, pdf.byteSize());
+    if (parsed != null) {
+      return parsed;
+    }
     throw new IOException("Failed to parse PDF trailer from tail window");
   }
 
@@ -534,13 +561,13 @@ final class PdfSaver {
       long prevXrefOffset = findLastStartxrefValue(tail);
       TrailerInfo trailer = parseTrailer(tail, pdf, prevXrefOffset);
       return new ParsedTail(trailer, prevXrefOffset);
-    } catch (IOException ignored) {
+    } catch (IOException _) {
       return null;
     }
   }
 
-  private static TrailerInfo parseTrailer(MemorySegment tail, MemorySegment pdf, long prevXrefOffset)
-      throws IOException {
+  private static TrailerInfo parseTrailer(
+      MemorySegment tail, MemorySegment pdf, long prevXrefOffset) throws IOException {
     ObjectRef rootRef = null;
     ObjectRef infoRef = null;
     int size = 0;
@@ -620,7 +647,15 @@ final class PdfSaver {
     if (rootRef == null) {
       throw new IOException("Failed to find PDF Root (Catalog) reference");
     }
-    if (!isCatalogObject(pdf, rootRef)) {
+
+    byte[] rootDict = null;
+    try {
+      rootDict = resolveObjectDictionaryBytes(pdf, rootRef, prevXrefOffset);
+    } catch (IOException ignored) {
+      // Some modern files store the catalog in compressed object streams. If resolution fails here,
+      // defer the hard failure until an XMP update actually needs the catalog bytes.
+    }
+    if (rootDict != null && !isCatalogDictionary(rootDict)) {
       throw new IOException("Trailer Root does not reference a Catalog object");
     }
 
@@ -661,8 +696,7 @@ final class PdfSaver {
         } else if (size == 0 && matchesNameTokenAt(tail, pos, SIZE_KEY, dictEndExclusive)) {
           hasSizeEntry = true;
           size = parseTrailerSize(tail, pos + SIZE_KEY.length, dictEndExclusive);
-        } else if (!hasEncrypt
-            && matchesNameTokenAt(tail, pos, ENCRYPT_KEY, dictEndExclusive)) {
+        } else if (!hasEncrypt && matchesNameTokenAt(tail, pos, ENCRYPT_KEY, dictEndExclusive)) {
           hasEncrypt = true;
         }
       }
@@ -673,29 +707,7 @@ final class PdfSaver {
 
   private static TrailerFields parseXrefStreamFields(MemorySegment pdf, long xrefOffset)
       throws IOException {
-    long limit = pdf.byteSize();
-    long objStart = skipAsciiWhitespace(pdf, xrefOffset, limit);
-    long numStart = objStart;
-    long numEnd = scanDigits(pdf, numStart, limit);
-    long genStart = skipAsciiWhitespace(pdf, numEnd, limit);
-    long genEnd = scanDigits(pdf, genStart, limit);
-    long objKeywordPos = skipAsciiWhitespace(pdf, genEnd, limit);
-    if (numEnd <= numStart || genEnd <= genStart) {
-      throw new IOException("startxref does not point to an indirect object");
-    }
-    if (!matchesNameTokenAt(pdf, objKeywordPos, OBJ_KEYWORD, limit)) {
-      throw new IOException("startxref indirect object is missing obj keyword");
-    }
-
-    long dictStart = indexOf(pdf, DICT_START, objKeywordPos + OBJ_KEYWORD.length);
-    if (dictStart < 0) {
-      throw new IOException("Failed to locate xref stream dictionary");
-    }
-    long dictEnd = findDictionaryEnd(pdf, dictStart);
-    if (dictEnd <= dictStart || !isXrefStreamDictionary(pdf, dictStart, dictEnd)) {
-      throw new IOException("startxref does not reference an XRef stream dictionary");
-    }
-    return parseTrailerDictionary(pdf, dictStart, dictEnd);
+    return parseXrefStreamSection(pdf, xrefOffset).trailerFields();
   }
 
   private static boolean isXrefStreamDictionary(
@@ -729,11 +741,556 @@ final class PdfSaver {
     return false;
   }
 
-  private static boolean isCatalogObject(MemorySegment pdf, ObjectRef ref) {
-    DictionaryRange range = findObjectDictionaryRange(pdf, ref.num, ref.gen);
-    return range != null
-        && dictionaryHasTopLevelNameValue(
-            pdf, range.start(), range.endExclusive(), TYPE_KEY, CATALOG_TYPE_NAME);
+  private static boolean isCatalogDictionary(byte[] dictBytes) {
+    if (dictBytes.length == 0) {
+      return false;
+    }
+    MemorySegment dict = MemorySegment.ofArray(dictBytes);
+    return dictionaryHasTopLevelNameValue(dict, 0, dict.byteSize(), TYPE_KEY, CATALOG_TYPE_NAME);
+  }
+
+  @CheckForNull
+  private static byte[] resolveObjectDictionaryBytes(
+      MemorySegment pdf, ObjectRef ref, long xrefOffset) throws IOException {
+    DictionaryRange directRange = findObjectDictionaryRange(pdf, ref.num, ref.gen);
+    if (directRange != null) {
+      long len = directRange.endExclusive() - directRange.start();
+      return pdf.asSlice(directRange.start(), len).toArray(JAVA_BYTE);
+    }
+    if (xrefOffset <= 0) {
+      return null;
+    }
+    return resolveObjectDictionaryBytesFromXref(pdf, ref, xrefOffset, new HashSet<>());
+  }
+
+  @CheckForNull
+  private static byte[] resolveObjectDictionaryBytesFromXref(
+      MemorySegment pdf, ObjectRef ref, long xrefOffset, Set<Long> visitedXrefs)
+      throws IOException {
+    if (xrefOffset <= 0 || !visitedXrefs.add(xrefOffset)) {
+      return null;
+    }
+
+    XrefStreamSection section;
+    try {
+      section = parseXrefStreamSection(pdf, xrefOffset);
+    } catch (IOException ignored) {
+      long prevClassicOffset = parseClassicXrefPrevOffset(pdf, xrefOffset);
+      return prevClassicOffset > 0
+          ? resolveObjectDictionaryBytesFromXref(pdf, ref, prevClassicOffset, visitedXrefs)
+          : null;
+    }
+
+    XrefEntry entry = findXrefEntry(section, ref.num);
+    if (entry != null) {
+      if (entry.type() == 1) {
+        DictionaryRange directRange = findObjectDictionaryRange(pdf, ref.num, ref.gen);
+        if (directRange != null) {
+          long len = directRange.endExclusive() - directRange.start();
+          return pdf.asSlice(directRange.start(), len).toArray(JAVA_BYTE);
+        }
+      } else if (entry.type() == 2) {
+        byte[] dict =
+            extractDictionaryFromObjectStream(pdf, ref.num, entry.field2(), entry.field3());
+        if (dict != null) {
+          return dict;
+        }
+      }
+    }
+
+    return section.prevOffset() > 0
+        ? resolveObjectDictionaryBytesFromXref(pdf, ref, section.prevOffset(), visitedXrefs)
+        : null;
+  }
+
+  private static long parseClassicXrefPrevOffset(MemorySegment pdf, long xrefOffset) {
+    long limit = pdf.byteSize();
+    long start = skipAsciiWhitespace(pdf, xrefOffset, limit);
+    if (!matchesBytesAt(pdf, start, XREF_KEYWORD)) {
+      return 0;
+    }
+    long trailerIdx = indexOf(pdf, TRAILER_KEYWORD, start + XREF_KEYWORD.length);
+    if (trailerIdx < 0) {
+      return 0;
+    }
+    long dictStart = indexOf(pdf, DICT_START, trailerIdx + TRAILER_KEYWORD.length);
+    if (dictStart < 0) {
+      return 0;
+    }
+    long dictEnd = findDictionaryEnd(pdf, dictStart);
+    if (dictEnd <= dictStart) {
+      return 0;
+    }
+    String dict =
+        new String(
+            pdf.asSlice(dictStart, dictEnd - dictStart).toArray(JAVA_BYTE),
+            StandardCharsets.ISO_8859_1);
+    return parseOptionalLong(dict, PREV_PATTERN);
+  }
+
+  private static XrefStreamSection parseXrefStreamSection(MemorySegment pdf, long xrefOffset)
+      throws IOException {
+    long limit = pdf.byteSize();
+    long objStart = skipAsciiWhitespace(pdf, xrefOffset, limit);
+    long numStart = objStart;
+    long numEnd = scanDigits(pdf, numStart, limit);
+    long genStart = skipAsciiWhitespace(pdf, numEnd, limit);
+    long genEnd = scanDigits(pdf, genStart, limit);
+    long objKeywordPos = skipAsciiWhitespace(pdf, genEnd, limit);
+    if (numEnd <= numStart || genEnd <= genStart) {
+      throw new IOException("startxref does not point to an indirect object");
+    }
+    if (!matchesNameTokenAt(pdf, objKeywordPos, OBJ_KEYWORD, limit)) {
+      throw new IOException("startxref indirect object is missing obj keyword");
+    }
+
+    long dictStart = indexOf(pdf, DICT_START, objKeywordPos + OBJ_KEYWORD.length);
+    if (dictStart < 0) {
+      throw new IOException("Failed to locate xref stream dictionary");
+    }
+    long dictEnd = findDictionaryEnd(pdf, dictStart);
+    if (dictEnd <= dictStart || !isXrefStreamDictionary(pdf, dictStart, dictEnd)) {
+      throw new IOException("startxref does not reference an XRef stream dictionary");
+    }
+
+    byte[] dictBytes = pdf.asSlice(dictStart, dictEnd - dictStart).toArray(JAVA_BYTE);
+    String dict = new String(dictBytes, StandardCharsets.ISO_8859_1);
+    TrailerFields trailerFields = parseTrailerDictionary(pdf, dictStart, dictEnd);
+    if (trailerFields.size() <= 0) {
+      throw new IOException("XRef stream dictionary is missing a valid /Size");
+    }
+
+    int[] widths = parseRequiredTriple(dict, W_ARRAY_PATTERN, "/W");
+    int[] indexPairs = parseIndexPairs(dict, trailerFields.size());
+    long prevOffset = parseOptionalLong(dict, PREV_PATTERN);
+    byte[] decodedEntries = decodeDirectStreamObject(pdf, dictEnd, dict);
+    return new XrefStreamSection(trailerFields, widths, indexPairs, prevOffset, decodedEntries);
+  }
+
+  @CheckForNull
+  private static XrefEntry findXrefEntry(XrefStreamSection section, int objNum) throws IOException {
+    int[] widths = section.widths();
+    int entryWidth = widths[0] + widths[1] + widths[2];
+    if (entryWidth <= 0) {
+      throw new IOException("XRef stream has invalid /W entry widths");
+    }
+
+    byte[] data = section.decodedEntries();
+    int pos = 0;
+    int[] indexPairs = section.indexPairs();
+    for (int i = 0; i < indexPairs.length; i += 2) {
+      int firstObj = indexPairs[i];
+      int count = indexPairs[i + 1];
+      for (int delta = 0; delta < count; delta++) {
+        if (pos + entryWidth > data.length) {
+          throw new IOException("XRef stream data is shorter than declared /Index coverage");
+        }
+        int currentObj = firstObj + delta;
+        int type = widths[0] == 0 ? 1 : (int) readUnsigned(data, pos, widths[0]);
+        long field2 = readUnsigned(data, pos + widths[0], widths[1]);
+        int field3 = (int) readUnsigned(data, pos + widths[0] + widths[1], widths[2]);
+        if (currentObj == objNum) {
+          return new XrefEntry(type, field2, field3);
+        }
+        pos += entryWidth;
+      }
+    }
+    return null;
+  }
+
+  @CheckForNull
+  private static byte[] extractDictionaryFromObjectStream(
+      MemorySegment pdf, int targetObjNum, long objStreamNum, int objectIndex) throws IOException {
+    if (objStreamNum <= 0 || objStreamNum > Integer.MAX_VALUE || objectIndex < 0) {
+      return null;
+    }
+    DictionaryRange objStreamRange = findObjectDictionaryRange(pdf, (int) objStreamNum, 0);
+    if (objStreamRange == null) {
+      return null;
+    }
+
+    byte[] objStreamDictBytes =
+        pdf.asSlice(objStreamRange.start(), objStreamRange.endExclusive() - objStreamRange.start())
+            .toArray(JAVA_BYTE);
+    String objStreamDict = new String(objStreamDictBytes, StandardCharsets.ISO_8859_1);
+    int objectCount = parseRequiredInt(objStreamDict, N_PATTERN, "/N");
+    int firstOffset = parseRequiredInt(objStreamDict, FIRST_PATTERN, "/First");
+    byte[] decodedStream =
+        decodeDirectStreamObject(pdf, objStreamRange.endExclusive(), objStreamDict);
+    if (firstOffset < 0 || firstOffset > decodedStream.length || objectIndex >= objectCount) {
+      throw new IOException("Object stream header indexes are invalid");
+    }
+
+    byte[] headerBytes = new byte[firstOffset];
+    System.arraycopy(decodedStream, 0, headerBytes, 0, firstOffset);
+    String header = new String(headerBytes, StandardCharsets.ISO_8859_1).trim();
+    if (header.isEmpty()) {
+      return null;
+    }
+    String[] parts = header.split("\\s+");
+    if (parts.length < objectCount * 2) {
+      throw new IOException("Object stream header is truncated");
+    }
+
+    int[] objNumbers = new int[objectCount];
+    int[] offsets = new int[objectCount];
+    for (int i = 0; i < objectCount; i++) {
+      objNumbers[i] = Integer.parseInt(parts[i * 2]);
+      offsets[i] = Integer.parseInt(parts[(i * 2) + 1]);
+    }
+
+    int resolvedIndex = objectIndex;
+    if (resolvedIndex >= objNumbers.length || objNumbers[resolvedIndex] != targetObjNum) {
+      resolvedIndex = -1;
+      for (int i = 0; i < objNumbers.length; i++) {
+        if (objNumbers[i] == targetObjNum) {
+          resolvedIndex = i;
+          break;
+        }
+      }
+      if (resolvedIndex < 0) {
+        return null;
+      }
+    }
+
+    int bodyStart = firstOffset + offsets[resolvedIndex];
+    int bodyEnd = decodedStream.length;
+    if (resolvedIndex + 1 < offsets.length) {
+      bodyEnd = firstOffset + offsets[resolvedIndex + 1];
+    }
+    if (bodyStart < 0 || bodyEnd <= bodyStart || bodyEnd > decodedStream.length) {
+      throw new IOException("Object stream object offsets are invalid");
+    }
+
+    byte[] objectBytes = new byte[bodyEnd - bodyStart];
+    System.arraycopy(decodedStream, bodyStart, objectBytes, 0, objectBytes.length);
+    MemorySegment objectSeg = MemorySegment.ofArray(objectBytes);
+    long dictStart = indexOf(objectSeg, DICT_START, 0);
+    if (dictStart < 0) {
+      return null;
+    }
+    long dictEnd = findDictionaryEnd(objectSeg, dictStart);
+    if (dictEnd <= dictStart) {
+      return null;
+    }
+    return objectSeg.asSlice(dictStart, dictEnd - dictStart).toArray(JAVA_BYTE);
+  }
+
+  private static byte[] decodeDirectStreamObject(
+      MemorySegment pdf, long dictEndExclusive, String dict) throws IOException {
+    long streamStart = findStreamDataStart(pdf, dictEndExclusive);
+    if (streamStart < 0) {
+      throw new IOException("Failed to locate stream payload after dictionary");
+    }
+
+    long rawLength = resolveIndirectLength(pdf, dict);
+    if (rawLength <= 0) {
+      rawLength = parseOptionalLong(dict, LENGTH_PATTERN);
+    }
+    if (rawLength <= 0 || streamStart + rawLength > pdf.byteSize()) {
+      long endstream = indexOf(pdf, ENDSTREAM_KEYWORD, streamStart);
+      if (endstream < 0) {
+        throw new IOException("Failed to determine stream length");
+      }
+      rawLength = endstream - streamStart;
+    }
+
+    byte[] raw = pdf.asSlice(streamStart, rawLength).toArray(JAVA_BYTE);
+    List<String> filters = parseFilterNames(dict);
+    byte[] decoded = raw;
+    for (String filter : filters) {
+      if (filter.equals("FlateDecode") || filter.equals("Fl")) {
+        decoded = inflate(decoded);
+      } else {
+        throw new IOException("Unsupported stream filter: " + filter);
+      }
+    }
+    decoded = applyPredictor(decoded, dict);
+    return decoded;
+  }
+
+  private static byte[] applyPredictor(byte[] decoded, String dict) throws IOException {
+    int predictor = (int) parseOptionalLong(dict, PREDICTOR_PATTERN);
+    if (predictor <= 1) {
+      return decoded;
+    }
+
+    if (predictor == 2) {
+      throw new IOException("TIFF predictor is not supported for PDF stream decoding");
+    }
+
+    if (predictor < 10 || predictor > 15) {
+      throw new IOException("Unsupported predictor value: " + predictor);
+    }
+
+    int columns = (int) parseOptionalLong(dict, COLUMNS_PATTERN);
+    if (columns <= 0) {
+      throw new IOException("PNG predictor requires a valid /Columns entry");
+    }
+    return undoPngPredictor(decoded, columns);
+  }
+
+  private static byte[] undoPngPredictor(byte[] data, int columns) throws IOException {
+    int rowSpan = columns + 1;
+    if (rowSpan <= 1 || (data.length % rowSpan) != 0) {
+      throw new IOException("PNG predictor stream length does not align to row size");
+    }
+
+    byte[] out = new byte[(data.length / rowSpan) * columns];
+    int src = 0;
+    int dst = 0;
+    while (src < data.length) {
+      int filter = data[src++] & 0xFF;
+      switch (filter) {
+        case 0 -> {
+          System.arraycopy(data, src, out, dst, columns);
+        }
+        case 1 -> {
+          for (int i = 0; i < columns; i++) {
+            int left = i == 0 ? 0 : out[dst + i - 1] & 0xFF;
+            out[dst + i] = (byte) ((data[src + i] + left) & 0xFF);
+          }
+        }
+        case 2 -> {
+          for (int i = 0; i < columns; i++) {
+            int up = dst < columns ? 0 : out[dst - columns + i] & 0xFF;
+            out[dst + i] = (byte) ((data[src + i] + up) & 0xFF);
+          }
+        }
+        case 3 -> {
+          for (int i = 0; i < columns; i++) {
+            int left = i == 0 ? 0 : out[dst + i - 1] & 0xFF;
+            int up = dst < columns ? 0 : out[dst - columns + i] & 0xFF;
+            out[dst + i] = (byte) ((data[src + i] + ((left + up) >>> 1)) & 0xFF);
+          }
+        }
+        case 4 -> {
+          for (int i = 0; i < columns; i++) {
+            int left = i == 0 ? 0 : out[dst + i - 1] & 0xFF;
+            int up = dst < columns ? 0 : out[dst - columns + i] & 0xFF;
+            int upLeft = (i == 0 || dst < columns) ? 0 : out[dst - columns + i - 1] & 0xFF;
+            out[dst + i] = (byte) ((data[src + i] + paeth(left, up, upLeft)) & 0xFF);
+          }
+        }
+        default -> throw new IOException("Unsupported PNG predictor filter: " + filter);
+      }
+      src += columns;
+      dst += columns;
+    }
+    return out;
+  }
+
+  private static int paeth(int left, int up, int upLeft) {
+    int p = left + up - upLeft;
+    int leftDist = Math.abs(p - left);
+    int upDist = Math.abs(p - up);
+    int upLeftDist = Math.abs(p - upLeft);
+    if (leftDist <= upDist && leftDist <= upLeftDist) {
+      return left;
+    }
+    if (upDist <= upLeftDist) {
+      return up;
+    }
+    return upLeft;
+  }
+
+  private static List<String> parseFilterNames(String dict) {
+    var arrayMatcher = FILTER_ARRAY_PATTERN.matcher(dict);
+    if (arrayMatcher.find()) {
+      List<String> filters = new ArrayList<>(4);
+      var nameMatcher = NAME_TOKEN_PATTERN.matcher(arrayMatcher.group(1));
+      while (nameMatcher.find()) {
+        filters.add(nameMatcher.group(1));
+      }
+      return filters;
+    }
+
+    var singleMatcher = FILTER_NAME_PATTERN.matcher(dict);
+    if (singleMatcher.find()) {
+      return List.of(singleMatcher.group(1));
+    }
+    return List.of();
+  }
+
+  private static long findStreamDataStart(MemorySegment pdf, long dictEndExclusive) {
+    long pos = skipAsciiWhitespace(pdf, dictEndExclusive, pdf.byteSize());
+    if (!matchesBytesAt(pdf, pos, STREAM_KEYWORD)) {
+      return -1;
+    }
+    long dataStart = pos + STREAM_KEYWORD.length;
+    if (dataStart < pdf.byteSize() && pdf.get(JAVA_BYTE, dataStart) == '\r') {
+      dataStart++;
+      if (dataStart < pdf.byteSize() && pdf.get(JAVA_BYTE, dataStart) == '\n') {
+        dataStart++;
+      }
+    } else if (dataStart < pdf.byteSize() && pdf.get(JAVA_BYTE, dataStart) == '\n') {
+      dataStart++;
+    }
+    return dataStart;
+  }
+
+  private static boolean matchesBytesAt(MemorySegment seg, long offset, byte[] token) {
+    if (offset < 0 || offset + token.length > seg.byteSize()) {
+      return false;
+    }
+    for (int i = 0; i < token.length; i++) {
+      if (seg.get(JAVA_BYTE, offset + i) != token[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static int[] parseRequiredTriple(String dict, Pattern pattern, String key)
+      throws IOException {
+    var matcher = pattern.matcher(dict);
+    if (!matcher.find()) {
+      throw new IOException("Missing required " + key + " entry");
+    }
+    return new int[] {
+      Integer.parseInt(matcher.group(1)),
+      Integer.parseInt(matcher.group(2)),
+      Integer.parseInt(matcher.group(3))
+    };
+  }
+
+  private static int[] parseIndexPairs(String dict, int defaultSize) throws IOException {
+    var matcher = INDEX_ARRAY_PATTERN.matcher(dict);
+    if (!matcher.find()) {
+      return new int[] {0, defaultSize};
+    }
+    String[] parts = matcher.group(1).trim().split("\\s+");
+    if ((parts.length & 1) != 0) {
+      throw new IOException("/Index array must contain an even number of integers");
+    }
+    int[] values = new int[parts.length];
+    for (int i = 0; i < parts.length; i++) {
+      values[i] = Integer.parseInt(parts[i]);
+    }
+    return values;
+  }
+
+  private static int parseRequiredInt(String dict, Pattern pattern, String key) throws IOException {
+    long value = parseOptionalLong(dict, pattern);
+    if (value < 0 || value > Integer.MAX_VALUE) {
+      throw new IOException("Missing or invalid " + key + " entry");
+    }
+    return (int) value;
+  }
+
+  private static long parseOptionalLong(String dict, Pattern pattern) {
+    var matcher = pattern.matcher(dict);
+    if (!matcher.find()) {
+      return -1;
+    }
+    try {
+      return Long.parseLong(matcher.group(1));
+    } catch (NumberFormatException e) {
+      return -1;
+    }
+  }
+
+  private static long resolveIndirectLength(MemorySegment pdf, String dict) {
+    var matcher = LENGTH_REF_PATTERN.matcher(dict);
+    if (!matcher.find()) {
+      return -1;
+    }
+
+    int objNum;
+    int genNum;
+    try {
+      objNum = Integer.parseInt(matcher.group(1));
+      genNum = Integer.parseInt(matcher.group(2));
+    } catch (NumberFormatException e) {
+      return -1;
+    }
+
+    return readDirectIntObject(pdf, objNum, genNum);
+  }
+
+  private static long readDirectIntObject(MemorySegment pdf, int objNum, int genNum) {
+    long idx = lastIndexOf(pdf, OBJ_KEYWORD, pdf.byteSize());
+    while (idx >= 0) {
+      ObjectRef headerRef = parseObjectHeaderRef(pdf, idx);
+      if (headerRef != null && headerRef.num == objNum && headerRef.gen == genNum) {
+        long start = skipAsciiWhitespace(pdf, idx + OBJ_KEYWORD.length, pdf.byteSize());
+        long end = scanDigits(pdf, start, pdf.byteSize());
+        if (end > start) {
+          return parsePositiveInt(pdf, start, end);
+        }
+        return -1;
+      }
+      idx = lastIndexOf(pdf, OBJ_KEYWORD, idx - 1);
+    }
+    return -1;
+  }
+
+  private static int determineNextObjectNumber(MemorySegment pdf, int trailerSize) {
+    int maxDirectObjectNumber = findMaxObjectNumber(pdf);
+    int next = Math.max(trailerSize, maxDirectObjectNumber + 1);
+    return next > 0 ? next : trailerSize;
+  }
+
+  @CheckForNull
+  private static ObjectRef parseObjectHeaderRef(MemorySegment seg, long objKeywordPos) {
+    long keywordEnd = objKeywordPos + OBJ_KEYWORD.length;
+    if (!matchesBytesAt(seg, objKeywordPos, OBJ_KEYWORD)
+        || !isObjectHeaderTerminator(seg, keywordEnd)) {
+      return null;
+    }
+
+    long genEnd = objKeywordPos;
+    while (genEnd > 0 && isAsciiWhitespace(seg, genEnd - 1)) {
+      genEnd--;
+    }
+    long genStart = genEnd;
+    while (genStart > 0 && isAsciiDigit(seg, genStart - 1)) {
+      genStart--;
+    }
+    if (genStart == genEnd) {
+      return null;
+    }
+
+    long separatorEnd = genStart;
+    while (separatorEnd > 0 && isAsciiWhitespace(seg, separatorEnd - 1)) {
+      separatorEnd--;
+    }
+    if (separatorEnd == genStart) {
+      return null;
+    }
+
+    long objEnd = separatorEnd;
+    long objStart = objEnd;
+    while (objStart > 0 && isAsciiDigit(seg, objStart - 1)) {
+      objStart--;
+    }
+    if (objStart == objEnd || !isAtLineBoundary(seg, objStart)) {
+      return null;
+    }
+
+    int num = parsePositiveInt(seg, objStart, objEnd);
+    int gen = parsePositiveInt(seg, genStart, genEnd);
+    if (num <= 0 || gen < 0) {
+      return null;
+    }
+    return new ObjectRef(num, gen);
+  }
+
+  private static long readUnsigned(byte[] data, int offset, int length) {
+    long value = 0;
+    for (int i = 0; i < length; i++) {
+      value = (value << 8) | (data[offset + i] & 0xFFL);
+    }
+    return value;
+  }
+
+  private static byte[] inflate(byte[] raw) throws IOException {
+    try (ByteArrayInputStream in = new ByteArrayInputStream(raw);
+        InflaterInputStream inflater = new InflaterInputStream(in);
+        ByteArrayOutputStream out = new ByteArrayOutputStream(raw.length * 2)) {
+      inflater.transferTo(out);
+      return out.toByteArray();
+    }
   }
 
   private static boolean dictionaryHasTopLevelNameValue(
@@ -952,9 +1509,9 @@ final class PdfSaver {
   /** Returns true if the byte at {@code idx} cannot appear inside an unescaped PDF name token. */
   private static boolean isPdfNameDelimiter(MemorySegment seg, long idx) {
     byte b = seg.get(JAVA_BYTE, idx);
-    return b == 0x00 || b == '\t' || b == '\n' || b == 0x0C || b == '\r' || b == ' '
-        || b == '(' || b == ')' || b == '<' || b == '>' || b == '[' || b == ']'
-        || b == '{' || b == '}' || b == '/' || b == '%';
+    return b == 0x00 || b == '\t' || b == '\n' || b == 0x0C || b == '\r' || b == ' ' || b == '('
+        || b == ')' || b == '<' || b == '>' || b == '[' || b == ']' || b == '{' || b == '}'
+        || b == '/' || b == '%';
   }
 
   private static long skipAsciiWhitespace(MemorySegment seg, long from, long endExclusive) {
@@ -987,7 +1544,7 @@ final class PdfSaver {
   }
 
   private static boolean isObjectHeaderTerminator(MemorySegment seg, long pos) {
-    return pos >= seg.byteSize() || isAsciiWhitespace(seg, pos);
+    return pos >= seg.byteSize() || isPdfNameDelimiter(seg, pos);
   }
 
   private static boolean hasValidObjectHeaderPrefix(MemorySegment seg, long markerPos) {
@@ -1016,7 +1573,7 @@ final class PdfSaver {
   }
 
   private static int findMaxObjectNumber(MemorySegment pdf) {
-    byte[] marker = " obj".getBytes(StandardCharsets.ISO_8859_1);
+    byte[] marker = OBJ_KEYWORD;
     int max = 0;
     long searchPos = 0;
     while (true) {
@@ -1025,19 +1582,11 @@ final class PdfSaver {
         break;
       }
       searchPos = pos + marker.length;
-      if (!isObjectHeaderTerminator(pdf, searchPos) || !hasValidObjectHeaderPrefix(pdf, pos)) {
+      ObjectRef ref = parseObjectHeaderRef(pdf, pos);
+      if (ref == null) {
         continue;
       }
-      long p = pos - 1;
-      while (p > 0 && isAsciiDigit(pdf, p - 1)) p--;
-      if (p <= 0 || !isAsciiWhitespace(pdf, p - 1)) continue;
-      p--;
-      while (p > 0 && isAsciiWhitespace(pdf, p - 1)) p--;
-      if (!isAsciiDigit(pdf, p)) continue;
-      long numEnd = p;
-      long numStart = numEnd;
-      while (numStart > 0 && isAsciiDigit(pdf, numStart - 1)) numStart--;
-      int num = parsePositiveInt(pdf, numStart, numEnd + 1);
+      int num = ref.num;
       if (num > max) {
         max = num;
       }
@@ -1054,18 +1603,16 @@ final class PdfSaver {
   }
 
   @CheckForNull
-  private static DictionaryRange findObjectDictionaryRange(MemorySegment pdf, int objNum, int genNum) {
-    byte[] marker = (objNum + " " + genNum + " obj").getBytes(StandardCharsets.ISO_8859_1);
+  private static DictionaryRange findObjectDictionaryRange(
+      MemorySegment pdf, int objNum, int genNum) {
+    byte[] marker = OBJ_KEYWORD;
     long searchFrom = pdf.byteSize();
     long idx;
     while (true) {
       idx = lastIndexOf(pdf, marker, searchFrom);
       if (idx < 0) return null;
-      if (idx > 0 && Character.isDigit((char) pdf.get(JAVA_BYTE, idx - 1))) {
-        searchFrom = idx - 1;
-        continue;
-      }
-      if (!isObjectHeaderTerminator(pdf, idx + marker.length)) {
+      ObjectRef headerRef = parseObjectHeaderRef(pdf, idx);
+      if (headerRef == null || headerRef.num != objNum || headerRef.gen != genNum) {
         searchFrom = idx - 1;
         continue;
       }

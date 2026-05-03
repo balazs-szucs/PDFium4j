@@ -221,7 +221,8 @@ public final class PdfPage implements AutoCloseable {
             // the bit pattern is preserved by the narrowing cast.
             chars[i] = (char) buf.get(JAVA_SHORT, i * 2L);
           }
-          // Native text buffers are null-terminated; we exclude the terminator if present to maintain clean Java String semantics.
+          // Native text buffers are null-terminated; we exclude the terminator if present to
+          // maintain clean Java String semantics.
           int effectiveLen = written;
           if (written > 0 && chars[written - 1] == '\0') {
             effectiveLen--;
@@ -266,9 +267,12 @@ public final class PdfPage implements AutoCloseable {
 
           MemorySegment loopScratch = ScratchBuffer.getLoopScratch(4 * JAVA_DOUBLE.byteSize());
           MemorySegment leftSeg = loopScratch.asSlice(0, JAVA_DOUBLE.byteSize());
-          MemorySegment rightSeg = loopScratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
-          MemorySegment bottomSeg = loopScratch.asSlice(2 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
-          MemorySegment topSeg = loopScratch.asSlice(3 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+          MemorySegment rightSeg =
+              loopScratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+          MemorySegment bottomSeg =
+              loopScratch.asSlice(2 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
+          MemorySegment topSeg =
+              loopScratch.asSlice(3 * JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
 
           for (int i = 0; i < charCount; i++) {
             int charCode = (int) TextBindings.FPDFText_GetUnicode.invokeExact(textPage, i);
@@ -529,7 +533,8 @@ public final class PdfPage implements AutoCloseable {
 
   private static RenderResult extractRenderResult(MemorySegment bitmap, int w, int h)
       throws Throwable {
-    MemorySegment rawBuffer = (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
+    MemorySegment rawBuffer =
+        (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
     int stride = (int) BitmapBindings.FPDFBitmap_GetStride.invokeExact(bitmap);
     long rowLen = (long) w * BYTES_PER_PIXEL;
     if (stride < rowLen) {
@@ -550,13 +555,14 @@ public final class PdfPage implements AutoCloseable {
     }
 
     byte[] packed = new byte[packedLen];
-    extractPackedRgba(buffer, w, h, stride, rowLen, packed, packedLen);
+    extractPackedRgba(buffer, h, stride, rowLen, packed, packedLen);
     return new RenderResult(w, h, packed);
   }
 
   private static void extractRenderBytesInto(
       MemorySegment bitmap, int w, int h, byte[] destination, int requiredBytes) throws Throwable {
-    MemorySegment rawBuffer = (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
+    MemorySegment rawBuffer =
+        (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
     int stride = (int) BitmapBindings.FPDFBitmap_GetStride.invokeExact(bitmap);
     long rowLen = (long) w * BYTES_PER_PIXEL;
     if (stride < rowLen) {
@@ -565,11 +571,11 @@ public final class PdfPage implements AutoCloseable {
     }
     long nativeBytes = Math.multiplyExact((long) stride, (long) h);
     MemorySegment buffer = rawBuffer.reinterpret(nativeBytes);
-    extractPackedRgba(buffer, w, h, stride, rowLen, destination, requiredBytes);
+    extractPackedRgba(buffer, h, stride, rowLen, destination, requiredBytes);
   }
 
   private static void extractPackedRgba(
-      MemorySegment buffer, int w, int h, int stride, long rowLen, byte[] destination, int requiredBytes) {
+      MemorySegment buffer, int h, int stride, long rowLen, byte[] destination, int requiredBytes) {
     if (stride == rowLen) {
       MemorySegment.copy(buffer, JAVA_BYTE, 0, destination, 0, requiredBytes);
       return;
@@ -694,20 +700,21 @@ public final class PdfPage implements AutoCloseable {
                   annot, keySeg, MemorySegment.NULL, 0L);
       if (needed <= 2) return Optional.empty();
 
-        ScratchBuffer.KeyValueSlots keyAndValue;
-        if (initialScratch.byteSize() >= keySeg.byteSize() + needed) {
+      ScratchBuffer.KeyValueSlots keyAndValue;
+      if (initialScratch.byteSize() >= keySeg.byteSize() + needed) {
         keyAndValue =
-          ScratchBuffer.keyAndWideValue(keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
-        } else {
+            ScratchBuffer.keyAndWideValue(
+                keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
+      } else {
         keyAndValue = ScratchBuffer.utf8KeyAndWideValue(key, needed);
-        }
+      }
       long copied =
           (long)
               AnnotBindings.FPDFAnnot_GetStringValue.invokeExact(
-              annot, keyAndValue.keySeg, keyAndValue.valueSeg, needed);
-        long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg, copied, needed);
+                  annot, keyAndValue.keySeg, keyAndValue.valueSeg, needed);
+      long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg, copied, needed);
       if (byteLen == 0) return Optional.empty();
-        String value = FfmHelper.fromWideString(keyAndValue.valueSeg, byteLen);
+      String value = FfmHelper.fromWideString(keyAndValue.valueSeg, byteLen);
       return value.isEmpty() ? Optional.empty() : Optional.of(value);
     } catch (Throwable t) {
       return Optional.empty();
@@ -833,8 +840,7 @@ public final class PdfPage implements AutoCloseable {
       MemorySegment buf = ScratchBuffer.get((long) charCount * 2);
       long copied =
           (long) TextBindings.FPDFLink_GetURL.invokeExact(pageLink, linkIndex, buf, charCount);
-      long byteLen =
-          FfmHelper.normalizeWideByteLength(buf, copied * 2, (long) charCount * 2);
+      long byteLen = FfmHelper.normalizeWideByteLength(buf, copied * 2, (long) charCount * 2);
       return byteLen == 0 ? "" : FfmHelper.fromWideString(buf, byteLen);
     } catch (Throwable t) {
       return "";

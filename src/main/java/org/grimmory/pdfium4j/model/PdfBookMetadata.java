@@ -227,7 +227,7 @@ public record PdfBookMetadata(
       int year = Integer.parseInt(pdfMatcher.group(1));
       int month = getGroupOrDefault(pdfMatcher, 2, 1);
       int day = getGroupOrDefault(pdfMatcher, 3, 1);
-      if (isValidDate(year, month, day)) {
+      if (isValidDate(month, day)) {
         try {
           return Optional.of(LocalDate.of(year, month, day));
         } catch (DateTimeException e) {
@@ -243,7 +243,7 @@ public record PdfBookMetadata(
     return val != null ? Integer.parseInt(val) : defaultValue;
   }
 
-  private static boolean isValidDate(int year, int month, int day) {
+  private static boolean isValidDate(int month, int day) {
     return month >= 1 && month <= 12 && day >= 1 && day <= 31;
   }
 

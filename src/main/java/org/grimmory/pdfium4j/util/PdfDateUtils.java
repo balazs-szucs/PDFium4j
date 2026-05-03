@@ -97,8 +97,8 @@ public final class PdfDateUtils {
     if (ISO_DATE_PATTERN.matcher(dateStr).matches()) {
       try {
         return Optional.of(LocalDate.parse(dateStr).atStartOfDay().atOffset(ZoneOffset.UTC));
-      } catch (Exception _) {
-        // fall through
+      } catch (java.time.format.DateTimeParseException e) {
+        return Optional.empty();
       }
     }
     return Optional.empty();

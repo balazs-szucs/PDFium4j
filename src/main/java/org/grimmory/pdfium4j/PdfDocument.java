@@ -51,12 +51,12 @@ import org.grimmory.pdfium4j.internal.XmpUpdate;
 import org.grimmory.pdfium4j.model.Bookmark;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.grimmory.pdfium4j.model.PageSize;
-import org.grimmory.pdfium4j.model.XmpMetadata;
 import org.grimmory.pdfium4j.model.PdfDiagnostic;
 import org.grimmory.pdfium4j.model.PdfErrorCode;
 import org.grimmory.pdfium4j.model.PdfProbeResult;
 import org.grimmory.pdfium4j.model.PdfProcessingPolicy;
 import org.grimmory.pdfium4j.model.RenderResult;
+import org.grimmory.pdfium4j.model.XmpMetadata;
 
 /**
  * Represents an open PDF document backed by native PDFium.
@@ -70,8 +70,12 @@ import org.grimmory.pdfium4j.model.RenderResult;
  */
 public final class PdfDocument implements AutoCloseable {
 
-  /** Tracks active native-to-Java byte channels by a unique ID to facilitate stateless native callbacks. */
+  /**
+   * Tracks active native-to-Java byte channels by a unique ID to facilitate stateless native
+   * callbacks.
+   */
   private static final Map<Long, SeekableByteChannel> CHANNELS = new ConcurrentHashMap<>(16);
+
   private static final AtomicLong CHANNEL_ID_SEQ = new AtomicLong();
   private static final Cleaner CLEANER = Cleaner.create();
   private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
@@ -83,8 +87,8 @@ public final class PdfDocument implements AutoCloseable {
       Pattern.compile("/Info\\s+(\\d+)\\s+(\\d+)\\s+R");
 
   /**
-   * Matches /Key (literal value). Note: Does not handle escaped parentheses, as these are
-   * extremely rare in standard Info dictionary keys.
+   * Matches /Key (literal value). Note: Does not handle escaped parentheses, as these are extremely
+   * rare in standard Info dictionary keys.
    */
   private static final Pattern INFO_DICT_LITERAL_PATTERN =
       Pattern.compile("/(\\w+)\\s+\\(([^)\\\\]*)\\)");
@@ -93,7 +97,10 @@ public final class PdfDocument implements AutoCloseable {
   private static final Pattern INFO_DICT_HEX_PATTERN =
       Pattern.compile("/(\\w+)\\s+<([A-Fa-f0-9]*)>");
 
-  /** Limits the range for trailer-relative scanning to prevent excessive disk I/O on corrupt or oversized files. */
+  /**
+   * Limits the range for trailer-relative scanning to prevent excessive disk I/O on corrupt or
+   * oversized files.
+   */
   private static final long FALLBACK_TAIL_SCAN_BYTES = 256L * 1024L;
 
   private final MemorySegment handle;
@@ -144,7 +151,8 @@ public final class PdfDocument implements AutoCloseable {
     this.sourceBytes = source.sourceBytes();
     this.policy = policy;
     this.ownerThread = ownerThread;
-    this.state = new CleanupState(source.channelId(), source.channel(), source.tempFile(), docArena);
+    this.state =
+        new CleanupState(source.channelId(), source.channel(), source.tempFile(), docArena);
     this.cleanable = CLEANER.register(this, state);
 
     ScratchBuffer.acquire();
@@ -215,16 +223,6 @@ public final class PdfDocument implements AutoCloseable {
     PdfProcessingPolicy resolvedPolicy = resolvePolicy(policy);
     PdfiumLibrary.ensureInitialized();
     try {
-      long size = Files.size(path);
-      if (size > resolvedPolicy.maxDocumentBytes()) {
-        throw new PdfiumException(
-            "Document size ("
-                + size
-                + " bytes) exceeds policy limit ("
-                + resolvedPolicy.maxDocumentBytes()
-                + ")",
-            null);
-      }
       SeekableByteChannel channel = Files.newByteChannel(path, StandardOpenOption.READ);
       return openFromChannel(channel, path, null, password, path.toString(), resolvedPolicy);
     } catch (IOException e) {
@@ -240,15 +238,6 @@ public final class PdfDocument implements AutoCloseable {
     PdfProcessingPolicy resolvedPolicy = resolvePolicy(policy);
     if (data == null || data.length == 0) {
       throw new IllegalArgumentException("data is null or empty");
-    }
-    if (data.length > resolvedPolicy.maxDocumentBytes()) {
-      throw new PdfiumException(
-          "Document size ("
-              + data.length
-              + " bytes) exceeds policy limit ("
-              + resolvedPolicy.maxDocumentBytes()
-              + ")",
-          null);
     }
     PdfiumLibrary.ensureInitialized();
     return loadDocumentFromBytes(data, password, resolvedPolicy);
@@ -299,8 +288,10 @@ public final class PdfDocument implements AutoCloseable {
       }
 
       MemorySegment fileAccess = setupFileAccess(docArena, channel, channelId);
-      MemorySegment pwdSeg = (password != null) ? docArena.allocateFrom(password) : MemorySegment.NULL;
-      MemorySegment doc = (MemorySegment) ViewBindings.FPDF_LoadCustomDocument.invokeExact(fileAccess, pwdSeg);
+      MemorySegment pwdSeg =
+          (password != null) ? docArena.allocateFrom(password) : MemorySegment.NULL;
+      MemorySegment doc =
+          (MemorySegment) ViewBindings.FPDF_LoadCustomDocument.invokeExact(fileAccess, pwdSeg);
 
       if (FfmHelper.isNull(doc)) {
         int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
@@ -319,8 +310,8 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
-  private static MemorySegment setupFileAccess(Arena arena, SeekableByteChannel channel, long channelId)
-      throws Throwable {
+  private static MemorySegment setupFileAccess(
+      Arena arena, SeekableByteChannel channel, long channelId) throws Throwable {
     MemorySegment fileAccess = arena.allocate(ViewBindings.FPDF_FILEACCESS_LAYOUT);
     fileAccess.set(JAVA_LONG, 0, channel.size());
     MethodHandle getBlockMH =
@@ -330,7 +321,8 @@ public final class PdfDocument implements AutoCloseable {
                 "getFileBlock",
                 MethodType.methodType(
                     int.class, MemorySegment.class, long.class, MemorySegment.class, long.class));
-    MemorySegment getBlockStub = Linker.nativeLinker().upcallStub(getBlockMH, ViewBindings.GET_BLOCK_DESC, arena);
+    MemorySegment getBlockStub =
+        Linker.nativeLinker().upcallStub(getBlockMH, ViewBindings.GET_BLOCK_DESC, arena);
     fileAccess.set(ADDRESS, 8, getBlockStub);
     fileAccess.set(ADDRESS, 16, MemorySegment.ofAddress(channelId));
     return fileAccess;
@@ -394,8 +386,7 @@ public final class PdfDocument implements AutoCloseable {
     return 1;
   }
 
-  private static int readFromSeekableChannel(
-      SeekableByteChannel channel, long pos, ByteBuffer bb)
+  private static int readFromSeekableChannel(SeekableByteChannel channel, long pos, ByteBuffer bb)
       throws IOException {
     synchronized (channel) {
       channel.position(pos);
@@ -574,7 +565,8 @@ public final class PdfDocument implements AutoCloseable {
       ScratchBuffer.KeyValueSlots keyAndValue;
       if (initialScratch.byteSize() >= keySeg.byteSize() + needed) {
         keyAndValue =
-            ScratchBuffer.keyAndWideValue(keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
+            ScratchBuffer.keyAndWideValue(
+                keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
       } else {
         keyAndValue = ScratchBuffer.utf8KeyAndWideValue(key, needed);
       }
@@ -781,7 +773,7 @@ public final class PdfDocument implements AutoCloseable {
         return Optional.empty();
       }
 
-        ScratchBuffer.KeyValueSlots keyAndValue =
+      ScratchBuffer.KeyValueSlots keyAndValue =
           resolveMetaBuffer(initialScratch, customKey, keySeg, needed);
       long copied =
           (long)
@@ -1185,10 +1177,6 @@ public final class PdfDocument implements AutoCloseable {
       return PdfProbeResult.error(PdfProbeResult.Status.UNREADABLE, PdfErrorCode.FILE, "Null path");
     PdfiumLibrary.ensureInitialized();
     try (Arena arena = Arena.ofConfined()) {
-      long size = Files.size(path);
-      if (size > policy.maxDocumentBytes()) {
-        return PdfProbeResult.error(PdfProbeResult.Status.CORRUPT, PdfErrorCode.FILE, "Document exceeds size limit");
-      }
       MemorySegment pathSeg = arena.allocateFrom(path.toString());
       MemorySegment doc =
           (MemorySegment) ViewBindings.FPDF_LoadDocument.invokeExact(pathSeg, MemorySegment.NULL);
@@ -1215,9 +1203,6 @@ public final class PdfDocument implements AutoCloseable {
     if (data == null || data.length == 0)
       return PdfProbeResult.error(
           PdfProbeResult.Status.UNREADABLE, PdfErrorCode.FILE, "Empty data");
-    if (data.length > policy.maxDocumentBytes()) {
-      return PdfProbeResult.error(PdfProbeResult.Status.CORRUPT, PdfErrorCode.FILE, "Document exceeds size limit");
-    }
     PdfiumLibrary.ensureInitialized();
     try (Arena arena = Arena.ofConfined()) {
       MemorySegment seg = arena.allocateFrom(JAVA_BYTE, data);

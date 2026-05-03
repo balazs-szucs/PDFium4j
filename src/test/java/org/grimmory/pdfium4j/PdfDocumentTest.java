@@ -1,5 +1,6 @@
 package org.grimmory.pdfium4j;
 
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static org.junit.jupiter.api.Assertions.*;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
@@ -7,6 +8,7 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.foreign.MemorySegment;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -16,8 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
-import java.lang.foreign.MemorySegment;
-import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+import java.util.zip.DeflaterOutputStream;
 import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.model.*;
@@ -60,6 +61,42 @@ class PdfDocumentTest {
     byte[] data = Files.readAllBytes(testPdf);
     try (PdfDocument doc = PdfDocument.open(data)) {
       assertTrue(doc.pageCount() > 0);
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void openFromPathIgnoresDocumentSizePolicy(@TempDir Path tempDir) throws IOException {
+    Path pdf = tempDir.resolve("small-valid.pdf");
+    Files.write(pdf, minimalPdfWithText());
+
+    PdfProcessingPolicy tinyPolicy =
+        new PdfProcessingPolicy(
+            PdfProcessingPolicy.Mode.STRICT,
+            1,
+            PdfProcessingPolicy.DEFAULT_MAX_RENDER_PIXELS,
+            PdfProcessingPolicy.DEFAULT_MAX_PARALLEL_THREADS,
+            PdfProcessingPolicy.DEFAULT_FILE_BACKED_THRESHOLD);
+
+    try (PdfDocument doc = PdfDocument.open(pdf, null, tinyPolicy)) {
+      assertEquals(1, doc.pageCount());
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void openFromBytesIgnoresDocumentSizePolicy() {
+    byte[] pdf = minimalPdfWithText();
+    PdfProcessingPolicy tinyPolicy =
+        new PdfProcessingPolicy(
+            PdfProcessingPolicy.Mode.STRICT,
+            1,
+            PdfProcessingPolicy.DEFAULT_MAX_RENDER_PIXELS,
+            PdfProcessingPolicy.DEFAULT_MAX_PARALLEL_THREADS,
+            PdfProcessingPolicy.DEFAULT_FILE_BACKED_THRESHOLD);
+
+    try (PdfDocument doc = PdfDocument.open(pdf, null, tinyPolicy)) {
+      assertEquals(1, doc.pageCount());
     }
   }
 
@@ -611,6 +648,43 @@ class PdfDocumentTest {
 
   @Test
   @EnabledIf("pdfiumAvailable")
+  void probePathIgnoresDocumentSizePolicy(@TempDir Path tempDir) throws IOException {
+    Path pdf = tempDir.resolve("probe-valid.pdf");
+    Files.write(pdf, minimalPdfWithText());
+
+    PdfProcessingPolicy tinyPolicy =
+        new PdfProcessingPolicy(
+            PdfProcessingPolicy.Mode.STRICT,
+            1,
+            PdfProcessingPolicy.DEFAULT_MAX_RENDER_PIXELS,
+            PdfProcessingPolicy.DEFAULT_MAX_PARALLEL_THREADS,
+            PdfProcessingPolicy.DEFAULT_FILE_BACKED_THRESHOLD);
+
+    PdfProbeResult result = PdfDocument.probe(pdf, tinyPolicy);
+    assertTrue(result.isValid());
+    assertEquals(PdfProbeResult.Status.OK, result.status());
+    assertEquals(1, result.pageCount());
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void probeBytesIgnoresDocumentSizePolicy() {
+    PdfProcessingPolicy tinyPolicy =
+        new PdfProcessingPolicy(
+            PdfProcessingPolicy.Mode.STRICT,
+            1,
+            PdfProcessingPolicy.DEFAULT_MAX_RENDER_PIXELS,
+            PdfProcessingPolicy.DEFAULT_MAX_PARALLEL_THREADS,
+            PdfProcessingPolicy.DEFAULT_FILE_BACKED_THRESHOLD);
+
+    PdfProbeResult result = PdfDocument.probe(minimalPdfWithText(), tinyPolicy);
+    assertTrue(result.isValid());
+    assertEquals(PdfProbeResult.Status.OK, result.status());
+    assertEquals(1, result.pageCount());
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
   void probeInvalidData() {
     PdfProbeResult result = PdfDocument.probe(new byte[] {0, 1, 2, 3, 4});
     assertFalse(result.isValid());
@@ -1044,7 +1118,6 @@ class PdfDocumentTest {
     }
   }
 
-
   @Test
   @EnabledIf("pdfiumAvailable")
   void metadataByStringKeyReadsStandardTag(@TempDir Path tempDir) throws IOException {
@@ -1381,7 +1454,6 @@ class PdfDocumentTest {
                 """;
     return pdf.getBytes(StandardCharsets.US_ASCII);
   }
-
 
   @Test
   @EnabledIf("pdfiumAvailable")
@@ -1847,6 +1919,113 @@ class PdfDocumentTest {
     return out.toByteArray();
   }
 
+  @SuppressWarnings("PMD.UnusedAssignment")
+  private static byte[] predictedCompactXrefStreamPdf() throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    List<Integer> offsets = new ArrayList<>();
+
+    writeBytes(out, "%PDF-1.5\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "1 0 obj<</Type/Catalog/Pages 2 0 R>>\nendobj\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>\nendobj\n");
+
+    int xrefStreamOffset = out.size();
+
+    byte[] xrefData = new byte[5 * 5];
+    int di = 0;
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    xrefData[di++] = 0;
+    for (int off : offsets) {
+      xrefData[di++] = 1;
+      xrefData[di++] = (byte) ((off >> 24) & 0xFF);
+      xrefData[di++] = (byte) ((off >> 16) & 0xFF);
+      xrefData[di++] = (byte) ((off >> 8) & 0xFF);
+      xrefData[di++] = (byte) (off & 0xFF);
+    }
+    xrefData[di++] = 1;
+    xrefData[di++] = (byte) ((xrefStreamOffset >> 24) & 0xFF);
+    xrefData[di++] = (byte) ((xrefStreamOffset >> 16) & 0xFF);
+    xrefData[di++] = (byte) ((xrefStreamOffset >> 8) & 0xFF);
+    xrefData[di] = (byte) (xrefStreamOffset & 0xFF);
+
+    byte[] predicted = new byte[5 * 6];
+    int src = 0;
+    int dst = 0;
+    while (src < xrefData.length) {
+      predicted[dst++] = 0;
+      System.arraycopy(xrefData, src, predicted, dst, 5);
+      src += 5;
+      dst += 5;
+    }
+
+    byte[] compressed;
+    try (ByteArrayOutputStream compressedOut = new ByteArrayOutputStream();
+        DeflaterOutputStream deflater = new DeflaterOutputStream(compressedOut)) {
+      deflater.write(predicted);
+      deflater.finish();
+      compressed = compressedOut.toByteArray();
+    }
+
+    writeBytes(
+        out,
+        "4 0 obj<</Type/XRef/Size 5/Root 1 0 R"
+            + "/W[1 4 0]/Index[0 5]/Filter/FlateDecode"
+            + "/DecodeParms<</Columns 5/Predictor 12>>/Length "
+            + compressed.length
+            + ">>stream\n");
+    out.write(compressed, 0, compressed.length);
+    writeBytes(out, "\nendstream\nendobj\nstartxref\n" + xrefStreamOffset + "\n%%EOF\n");
+
+    return out.toByteArray();
+  }
+
+  private static byte[] minimalPdfWithSplitObjectHeaders() throws IOException {
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    List<Integer> offsets = new ArrayList<>();
+
+    writeBytes(out, "%PDF-1.4\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "1\n0\nobj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "2\n0\nobj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    offsets.add(out.size());
+    writeBytes(
+        out,
+        "3\n0\nobj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]"
+            + " /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    offsets.add(out.size());
+    byte[] content = "BT /F1 12 Tf 72 720 Td (Hi) Tj ET\n".getBytes(StandardCharsets.ISO_8859_1);
+    writeBytes(out, "4\n0\nobj\n<< /Length " + content.length + " >>\nstream\n");
+    out.write(content, 0, content.length);
+    writeBytes(out, "endstream\nendobj\n");
+
+    offsets.add(out.size());
+    writeBytes(out, "5\n0\nobj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+
+    int xrefOffset = out.size();
+    writeBytes(out, "xref\n0 6\n0000000000 65535 f \r\n");
+    for (int offset : offsets) {
+      writeBytes(out, String.format(java.util.Locale.ROOT, "%010d 00000 n ", offset));
+      writeBytes(out, "\r\n");
+    }
+    writeBytes(out, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + xrefOffset + "\n%%EOF\n");
+
+    return out.toByteArray();
+  }
+
   private static void writeBytes(ByteArrayOutputStream out, String s) {
     byte[] b = s.getBytes(StandardCharsets.ISO_8859_1);
     out.write(b, 0, b.length);
@@ -1945,6 +2124,46 @@ class PdfDocumentTest {
       assertEquals("XRef Stream XMP", doc.metadata(MetadataTag.TITLE).orElse(""));
       String xmp = doc.xmpMetadataString();
       assertTrue(xmp.contains("XRef Stream XMP"), "XMP should contain title");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void xmpMetadataSaveWithPredictedCompactXrefStreamPdf(@TempDir Path tempDir) throws IOException {
+    byte[] xrefStreamPdf = predictedCompactXrefStreamPdf();
+    Path source = tempDir.resolve("xref-stream-predictor-compact.pdf");
+    Files.write(source, xrefStreamPdf);
+
+    Path output = tempDir.resolve("xref-stream-predictor-compact-out.pdf");
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      doc.setMetadata(MetadataTag.TITLE, "Predicted Compact XRef");
+      doc.setXmpMetadata(buildBookloreXmp("Predicted Compact XRef", "Predictor Author"));
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals("Predicted Compact XRef", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertTrue(
+          doc.xmpMetadataString().contains("Predicted Compact XRef"), "XMP should contain title");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void xmpMetadataSaveWithSplitObjectHeaderPdf(@TempDir Path tempDir) throws IOException {
+    Path source = tempDir.resolve("split-object-headers.pdf");
+    Files.write(source, minimalPdfWithSplitObjectHeaders());
+
+    Path output = tempDir.resolve("split-object-headers-out.pdf");
+    try (PdfDocument doc = PdfDocument.open(source)) {
+      doc.setMetadata(MetadataTag.TITLE, "Split Headers");
+      doc.setXmpMetadata(buildBookloreXmp("Split Headers", "Header Author"));
+      doc.save(output);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(output)) {
+      assertEquals("Split Headers", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertTrue(doc.xmpMetadataString().contains("Split Headers"));
     }
   }
 
@@ -2086,12 +2305,13 @@ class PdfDocumentTest {
     Path pdf = getTestPdfWithText();
     if (pdf == null) return;
     try (PdfDocument doc = PdfDocument.open(pdf);
-         PdfPage page = doc.page(0)) {
+        PdfPage page = doc.page(0)) {
       List<TextCharInfo> list = page.extractTextWithBounds();
       List<TextCharInfo> visitorList = new ArrayList<>();
-      page.forEachCharBox((code, l, b, r, t, fs) -> {
-        visitorList.add(new TextCharInfo(code, l, b, r, t, fs));
-      });
+      page.forEachCharBox(
+          (code, l, b, r, t, fs) -> {
+            visitorList.add(new TextCharInfo(code, l, b, r, t, fs));
+          });
       assertEquals(list.size(), visitorList.size());
       for (int i = 0; i < list.size(); i++) {
         assertEquals(list.get(i), visitorList.get(i));
@@ -2104,7 +2324,7 @@ class PdfDocumentTest {
   void optimizedExtractTextMatchesOriginal() throws IOException {
     byte[] pdf = minimalPdfWithText();
     try (PdfDocument doc = PdfDocument.open(pdf);
-         PdfPage page = doc.page(0)) {
+        PdfPage page = doc.page(0)) {
       String text = page.extractText();
       // minimalPdfWithText() contains "Hello World"
       assertTrue(text.contains("Hello"), "Extracted text should contain 'Hello'");
@@ -2117,19 +2337,20 @@ class PdfDocumentTest {
   void nestedDocumentClosingDoesNotInvalidateBuffer() throws IOException {
     Path pdf = getTestPdf();
     if (pdf == null) return;
-    
+
     // Explicitly acquire so that the test's own get() call is reference-counted.
     ScratchBuffer.acquire();
     try (PdfDocument doc1 = PdfDocument.open(pdf)) {
+      assertTrue(doc1.pageCount() > 0);
       MemorySegment first = ScratchBuffer.get(1024);
       first.set(JAVA_BYTE, 0, (byte) 0x42);
-      
+
       try (PdfDocument doc2 = PdfDocument.open(pdf)) {
         // Nested document use
         assertTrue(doc2.pageCount() >= 0);
         assertEquals(0x42, first.get(JAVA_BYTE, 0));
       } // doc2.close() -> ScratchBuffer.release() (decrements count)
-      
+
       // Memory should still be valid because doc1 and the test itself still have references
       assertEquals(0x42, first.get(JAVA_BYTE, 0));
     } finally {
@@ -2143,7 +2364,7 @@ class PdfDocumentTest {
     // minimalPdfWithText() is a simple valid PDF with "Hello World"
     byte[] pdf = minimalPdfWithText();
     try (PdfDocument doc = PdfDocument.open(pdf);
-         PdfPage page = doc.page(0)) {
+        PdfPage page = doc.page(0)) {
       List<Integer> chars = new ArrayList<>();
       page.forEachCharBox((code, l, b, r, t, fs) -> chars.add(code));
       assertEquals(11, chars.size(), "Should have 11 characters");
@@ -2156,7 +2377,7 @@ class PdfDocumentTest {
     // minimalEmptyPdf() is a blank page
     byte[] pdf = minimalEmptyPdf();
     try (PdfDocument doc = PdfDocument.open(pdf);
-         PdfPage page = doc.page(0)) {
+        PdfPage page = doc.page(0)) {
       List<Integer> chars = new ArrayList<>();
       page.forEachCharBox((code, l, b, r, t, fs) -> chars.add(code));
       assertTrue(chars.isEmpty(), "Empty page should have no characters");
@@ -2171,10 +2392,11 @@ class PdfDocumentTest {
     try (PdfDocument doc = PdfDocument.open(pdf)) {
       List<PageSize> list = doc.allPageSizes();
       List<PageSize> visitorList = new ArrayList<>();
-      doc.forEachPageSize((index, w, h) -> {
-        assertEquals(visitorList.size(), index);
-        visitorList.add(new PageSize(w, h));
-      });
+      doc.forEachPageSize(
+          (index, w, h) -> {
+            assertEquals(visitorList.size(), index);
+            visitorList.add(new PageSize(w, h));
+          });
       assertEquals(list.size(), visitorList.size());
       for (int i = 0; i < list.size(); i++) {
         assertEquals(list.get(i), visitorList.get(i));
@@ -2185,18 +2407,16 @@ class PdfDocumentTest {
   @Test
   @EnabledIf("pdfiumAvailable")
   void streamingXmpSaveMatchesStringSave() throws IOException {
-    XmpMetadata meta = XmpMetadata.builder()
-        .title("Test Optimization")
-        .creators(List.of("Agent"))
-        .build();
-    
+    XmpMetadata meta =
+        XmpMetadata.builder().title("Test Optimization").creators(List.of("Agent")).build();
+
     Path pdf = getTestPdf();
     if (pdf == null) return;
     try (PdfDocument doc = PdfDocument.open(pdf)) {
       doc.setXmpMetadata(meta);
       // XMP updates require saveToBytes() or save(Path) — generic OutputStream is rejected.
       byte[] savedBytes = doc.saveToBytes();
-      
+
       // Verify we can parse it back
       try (PdfDocument savedDoc = PdfDocument.open(savedBytes)) {
         XmpMetadata loaded = XmpMetadataParser.parseFrom(savedDoc);
@@ -2266,8 +2486,8 @@ class PdfDocumentTest {
   }
 
   /**
-   * Every incremental update must write a /Prev pointer so the xref chain remains intact.
-   * Verified by inspecting the bytes appended after the original file.
+   * Every incremental update must write a /Prev pointer so the xref chain remains intact. Verified
+   * by inspecting the bytes appended after the original file.
    */
   @Test
   @EnabledIf("pdfiumAvailable")
@@ -2359,8 +2579,7 @@ class PdfDocumentTest {
   @EnabledIf("pdfiumAvailable")
   void metadataOnlySaveAllocationBudget() throws IOException {
     com.sun.management.ThreadMXBean tmxb =
-        (com.sun.management.ThreadMXBean)
-            java.lang.management.ManagementFactory.getThreadMXBean();
+        (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
     if (!tmxb.isThreadAllocatedMemoryEnabled()) {
       return; // not supported on this JVM
     }
@@ -2394,15 +2613,14 @@ class PdfDocumentTest {
   }
 
   /**
-   * Repeated metadata saves from the same document must not grow their allocation per call
-   * (no cumulative heap buffering).
+   * Repeated metadata saves from the same document must not grow their allocation per call (no
+   * cumulative heap buffering).
    */
   @Test
   @EnabledIf("pdfiumAvailable")
   void repeatedMetadataSaveStaysInAllocationBudget() throws IOException {
     com.sun.management.ThreadMXBean tmxb =
-        (com.sun.management.ThreadMXBean)
-            java.lang.management.ManagementFactory.getThreadMXBean();
+        (com.sun.management.ThreadMXBean) java.lang.management.ManagementFactory.getThreadMXBean();
     if (!tmxb.isThreadAllocatedMemoryEnabled()) {
       return;
     }

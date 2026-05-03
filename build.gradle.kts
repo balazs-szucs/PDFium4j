@@ -170,8 +170,7 @@ tasks.register<JavaExec>("runCorpusProcessor") {
     forwardSystemProperties(
         listOf(
             "corpus.dir",
-            "corpus.outDir",
-            "corpus.maxDocumentBytes"
+            "corpus.outDir"
         )
     )
     doFirst {
@@ -204,6 +203,12 @@ tasks.register<JavaExec>("runPdfBoxCorpusGenerator") {
     }
 }
 
+tasks.register<Exec>("runPdfJsIngestion") {
+    group = "application"
+    description = "Ingests Mozilla's pdf.js test corpus"
+    commandLine("python3", "scripts/ingest_pdfjs.py")
+}
+
 tasks.register<JavaExec>("runCorpusMetadataStress") {
     group = "application"
     description = "Runs metadata save stress validation against corpus PDFs"
@@ -220,8 +225,7 @@ tasks.register<JavaExec>("runCorpusMetadataStress") {
             "corpus.limit",
             "corpus.seed",
             "corpus.includeRegex",
-            "corpus.failFast",
-            "corpus.maxDocumentBytes"
+            "corpus.failFast"
         )
     )
     doFirst {

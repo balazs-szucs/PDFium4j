@@ -6,9 +6,9 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.nio.file.InvalidPathException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
@@ -25,8 +25,8 @@ public final class NativeLoader {
    * extraction and {@code System.loadLibrary("pdfium")} lookup.
    */
   public static final String PROP_LIBRARY_PATH = "pdfium4j.library.path";
-  public static final String PROP_LIBRARY_PATH_ALLOW_UNSAFE =
-      "pdfium4j.library.path.allowUnsafe";
+
+  public static final String PROP_LIBRARY_PATH_ALLOW_UNSAFE = "pdfium4j.library.path.allowUnsafe";
 
   private static volatile boolean loaded = false;
   private static volatile Throwable loadError = null;
@@ -237,13 +237,13 @@ public final class NativeLoader {
     return osKey + "-" + detectArch();
   }
 
-  @SuppressFBWarnings(
-      value = "DMI_HARDCODED_ABSOLUTE_FILENAME",
-      justification = "Musl detection requires probing standard linker locations")
   private static boolean isMusl() {
     return probeLibDirForMusl() || probeProcMapsForMusl();
   }
 
+  @SuppressFBWarnings(
+      value = "DMI_HARDCODED_ABSOLUTE_FILENAME",
+      justification = "Musl detection requires probing standard linker locations")
   private static boolean probeLibDirForMusl() {
     try {
       Path ldMusl = Path.of("/lib");

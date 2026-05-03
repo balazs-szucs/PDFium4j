@@ -98,8 +98,8 @@ public final class XmpMetadataWriter {
   }
 
   /**
-   * Serialize an {@link XmpMetadata} record directly to an {@link OutputStream} using
-   * UTF-8 encoding to avoid intermediate String allocations.
+   * Serialize an {@link XmpMetadata} record directly to an {@link OutputStream} using UTF-8
+   * encoding to avoid intermediate String allocations.
    *
    * @param metadata the metadata to serialize
    * @param out the caller-owned stream to write to (this method never closes it)
