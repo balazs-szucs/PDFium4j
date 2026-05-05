@@ -5,7 +5,6 @@ import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -34,7 +33,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
-import java.util.zip.InflaterInputStream;
+import java.util.zip.DataFormatException;
+import java.util.zip.Inflater;
 import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
@@ -53,17 +53,35 @@ final class PdfSaver {
    * Per-thread callback sink for native FPDF_SaveAsCopy bytes. Set for one save call and removed in
    * finally so large backing arrays are not retained by pooled threads.
    */
-  private static final ThreadLocal<ByteArrayOutputStream> SAVE_CALLBACK_TARGET =
-      new ThreadLocal<>();
+  private static final int SAVE_CALLBACK_INITIAL_CAPACITY = 8192;
+
+  private static final int SAVE_CALLBACK_MAX_RETAINED_CAPACITY = 65536;
+  private static final int STREAM_DECODE_INITIAL_CAPACITY = 8192;
+  private static final int STREAM_DECODE_MAX_RETAINED_CAPACITY = 65536;
+
+  private static final ThreadLocal<ReusableByteArrayOutputStream> SAVE_CALLBACK_TARGET =
+      ThreadLocal.withInitial(
+          () -> new ReusableByteArrayOutputStream(SAVE_CALLBACK_INITIAL_CAPACITY));
 
   /** Reused per-thread staging buffer for native save callbacks; bounded to 64 KiB. */
   private static final ThreadLocal<byte[]> SAVE_CALLBACK_BUF =
-      ThreadLocal.withInitial(() -> new byte[65536]);
+      ThreadLocal.withInitial(() -> new byte[8192]);
+
+  private static final ThreadLocal<ReusableByteArrayOutputStream> STREAM_DECODE_TARGET =
+      ThreadLocal.withInitial(
+          () -> new ReusableByteArrayOutputStream(STREAM_DECODE_INITIAL_CAPACITY));
+
+  private static final ThreadLocal<byte[]> STREAM_DECODE_BUF =
+      ThreadLocal.withInitial(() -> new byte[8192]);
 
   private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
   private static final long INITIAL_TAIL_SCAN_BYTES = 64L * 1024L;
   private static final long SECONDARY_TAIL_SCAN_BYTES = 256L * 1024L;
   private static final long TAIL_SCAN_BYTES = 1024L * 1024L;
+  private static final long[] TAIL_SCAN_STEPS =
+      new long[] {
+        INITIAL_TAIL_SCAN_BYTES, SECONDARY_TAIL_SCAN_BYTES, TAIL_SCAN_BYTES, Long.MAX_VALUE
+      };
   private static final long XREF_OFFSET_FUZZ_BYTES = 1024L;
   private static final long MAX_XREF_OFFSET = 9_999_999_999L;
 
@@ -116,6 +134,7 @@ final class PdfSaver {
   private static final byte[] PAGES_TYPE_NAME = "/Pages".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] ROOT_KEY = "/Root".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] INFO_KEY = "/Info".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] PREV_KEY = "/Prev".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] PAGES_KEY = "/Pages".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] SIZE_KEY = "/Size".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] OBJ_KEYWORD = "obj".getBytes(StandardCharsets.ISO_8859_1);
@@ -255,8 +274,8 @@ final class PdfSaver {
   }
 
   private static byte[] nativeSaveBytes(MemorySegment docHandle) {
-    ByteArrayOutputStream baos = new ByteArrayOutputStream(65536);
-    SAVE_CALLBACK_TARGET.set(baos);
+    ReusableByteArrayOutputStream baos = SAVE_CALLBACK_TARGET.get();
+    baos.resetForReuse(SAVE_CALLBACK_MAX_RETAINED_CAPACITY);
     // Shared arena is required for native upcall stubs to ensure they remain valid during the
     // asynchronous-like save callback flow.
     try (Arena arena = Arena.ofShared()) {
@@ -284,14 +303,14 @@ final class PdfSaver {
     } catch (Throwable t) {
       throw new PdfiumException("Failed to save document", t);
     } finally {
-      SAVE_CALLBACK_TARGET.remove();
+      baos.resetForReuse(SAVE_CALLBACK_MAX_RETAINED_CAPACITY);
     }
   }
 
   @SuppressWarnings({"PMD.UnusedFormalParameter", "unused"})
   private static int writeBlockCallback(MemorySegment pThis, MemorySegment pData, long size) {
     if (FfmHelper.isNull(pThis) || FfmHelper.isNull(pData)) return 0;
-    ByteArrayOutputStream baos = SAVE_CALLBACK_TARGET.get();
+    ReusableByteArrayOutputStream baos = SAVE_CALLBACK_TARGET.get();
     if (baos == null) return 0;
     if (size <= 0) return 0;
     // Reinterpret pData to expose its full size before copying.
@@ -332,6 +351,22 @@ final class PdfSaver {
       int[] indexPairs,
       long prevOffset,
       byte[] decodedEntries) {}
+
+  private static final class ReusableByteArrayOutputStream extends ByteArrayOutputStream {
+    private final int initialCapacity;
+
+    ReusableByteArrayOutputStream(int initialCapacity) {
+      super(initialCapacity);
+      this.initialCapacity = initialCapacity;
+    }
+
+    void resetForReuse(int maxRetainedCapacity) {
+      if (buf.length > maxRetainedCapacity) {
+        buf = new byte[initialCapacity];
+      }
+      reset();
+    }
+  }
 
   private static void writeIncrementalUpdate(SaveParams params, Arena arena) throws IOException {
     BasePdf base = getBaseSegment(params, arena);
@@ -546,17 +581,16 @@ final class PdfSaver {
    */
   private static byte[] buildXmpObjectBytes(int num, org.grimmory.pdfium4j.internal.XmpUpdate xmp)
       throws IOException {
-    byte[] content;
-    if (xmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw) {
-      content = raw.xmp().getBytes(StandardCharsets.UTF_8);
-    } else if (xmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Structured structured) {
-      // Must buffer to learn the serialized length before writing the PDF stream header.
-      ByteArrayOutputStream baos = new ByteArrayOutputStream(8192);
-      XMP_WRITER.write(structured.metadata(), baos);
-      content = baos.toByteArray();
-    } else {
-      throw new IOException("Unknown XmpUpdate type: " + xmp.getClass().getSimpleName());
-    }
+    byte[] content =
+        switch (xmp) {
+          case org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw ->
+              raw.xmp().getBytes(StandardCharsets.UTF_8);
+          case org.grimmory.pdfium4j.internal.XmpUpdate.Structured structured -> {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(8192);
+            XMP_WRITER.write(structured.metadata(), baos);
+            yield baos.toByteArray();
+          }
+        };
     byte[] header =
         (num
                 + " 0 obj\n<< /Type /Metadata /Subtype /XML /Length "
@@ -591,21 +625,11 @@ final class PdfSaver {
   }
 
   private static ParsedTail parseTail(MemorySegment pdf) throws IOException {
-    ParsedTail parsed = tryParseTail(pdf, INITIAL_TAIL_SCAN_BYTES);
-    if (parsed != null) {
-      return parsed;
-    }
-    parsed = tryParseTail(pdf, SECONDARY_TAIL_SCAN_BYTES);
-    if (parsed != null) {
-      return parsed;
-    }
-    parsed = tryParseTail(pdf, TAIL_SCAN_BYTES);
-    if (parsed != null) {
-      return parsed;
-    }
-    parsed = tryParseTail(pdf, pdf.byteSize());
-    if (parsed != null) {
-      return parsed;
+    for (long step : TAIL_SCAN_STEPS) {
+      ParsedTail parsed = tryParseTail(pdf, Math.min(pdf.byteSize(), step));
+      if (parsed != null) {
+        return parsed;
+      }
     }
     throw new IOException("Failed to parse PDF trailer from tail window");
   }
@@ -1011,11 +1035,32 @@ final class PdfSaver {
     if (dictEnd <= dictStart) {
       return 0;
     }
-    String dict =
-        new String(
-            pdf.asSlice(dictStart, dictEnd - dictStart).toArray(JAVA_BYTE),
-            StandardCharsets.ISO_8859_1);
-    return parseOptionalLong(dict, PREV_PATTERN);
+    long prevPos = dictStart + DICT_START.length;
+    int depth = 1;
+    while (prevPos < dictEnd - 1) {
+      byte b1 = pdf.get(JAVA_BYTE, prevPos);
+      byte b2 = pdf.get(JAVA_BYTE, prevPos + 1);
+      if (b1 == '<' && b2 == '<') {
+        depth++;
+        prevPos += 2;
+        continue;
+      }
+      if (b1 == '>' && b2 == '>') {
+        depth--;
+        if (depth == 0) {
+          return 0;
+        }
+        prevPos += 2;
+        continue;
+      }
+      if (depth == 1 && b1 == '/' && matchesNameTokenAt(pdf, prevPos, PREV_KEY, dictEnd)) {
+        long numStart = skipAsciiWhitespace(pdf, prevPos + PREV_KEY.length, dictEnd);
+        long numEnd = scanDigits(pdf, numStart, dictEnd);
+        return numEnd > numStart ? parsePositiveLong(pdf, numStart, numEnd) : 0;
+      }
+      prevPos++;
+    }
+    return 0;
   }
 
   private static long locateClassicXrefOffset(MemorySegment pdf, long hintedOffset) {
@@ -1136,23 +1181,10 @@ final class PdfSaver {
       throw new IOException("Object stream header indexes are invalid");
     }
 
-    byte[] headerBytes = new byte[firstOffset];
-    System.arraycopy(decodedStream, 0, headerBytes, 0, firstOffset);
-    String header = new String(headerBytes, StandardCharsets.ISO_8859_1).trim();
-    if (header.isEmpty()) {
-      return null;
-    }
-    String[] parts = header.split("\\s+");
-    if (parts.length < objectCount * 2) {
-      throw new IOException("Object stream header is truncated");
-    }
-
+    MemorySegment decodedSeg = MemorySegment.ofArray(decodedStream);
     int[] objNumbers = new int[objectCount];
     int[] offsets = new int[objectCount];
-    for (int i = 0; i < objectCount; i++) {
-      objNumbers[i] = Integer.parseInt(parts[i * 2]);
-      offsets[i] = Integer.parseInt(parts[(i * 2) + 1]);
-    }
+    parseObjectStreamHeader(decodedSeg, firstOffset, objectCount, objNumbers, offsets);
 
     int resolvedIndex = objectIndex;
     if (resolvedIndex >= objNumbers.length || objNumbers[resolvedIndex] != targetObjNum) {
@@ -1177,9 +1209,7 @@ final class PdfSaver {
       throw new IOException("Object stream object offsets are invalid");
     }
 
-    byte[] objectBytes = new byte[bodyEnd - bodyStart];
-    System.arraycopy(decodedStream, bodyStart, objectBytes, 0, objectBytes.length);
-    MemorySegment objectSeg = MemorySegment.ofArray(objectBytes);
+    MemorySegment objectSeg = decodedSeg.asSlice(bodyStart, bodyEnd - bodyStart);
     long dictStart = indexOf(objectSeg, DICT_START, 0);
     if (dictStart < 0) {
       return null;
@@ -1500,11 +1530,35 @@ final class PdfSaver {
   }
 
   private static byte[] inflate(byte[] raw) throws IOException {
-    try (ByteArrayInputStream in = new ByteArrayInputStream(raw);
-        InflaterInputStream inflater = new InflaterInputStream(in);
-        ByteArrayOutputStream out = new ByteArrayOutputStream(raw.length * 2)) {
-      inflater.transferTo(out);
+    Inflater inflater = new Inflater();
+    ReusableByteArrayOutputStream out = STREAM_DECODE_TARGET.get();
+    byte[] chunk = STREAM_DECODE_BUF.get();
+    out.resetForReuse(STREAM_DECODE_MAX_RETAINED_CAPACITY);
+    try {
+      inflater.setInput(raw);
+      while (!inflater.finished()) {
+        int read = inflater.inflate(chunk);
+        if (read > 0) {
+          out.write(chunk, 0, read);
+          continue;
+        }
+        if (inflater.needsDictionary()) {
+          throw new IOException("Flate stream requires an unsupported preset dictionary");
+        }
+        if (inflater.needsInput()) {
+          break;
+        }
+        throw new IOException("Failed to inflate Flate stream");
+      }
+      if (!inflater.finished()) {
+        throw new IOException("Flate stream ended before inflater reached stream end");
+      }
       return out.toByteArray();
+    } catch (DataFormatException e) {
+      throw new IOException("Failed to inflate Flate stream", e);
+    } finally {
+      inflater.end();
+      out.resetForReuse(STREAM_DECODE_MAX_RETAINED_CAPACITY);
     }
   }
 
@@ -1792,31 +1846,6 @@ final class PdfSaver {
     return pos >= seg.byteSize() || isPdfNameDelimiter(seg, pos);
   }
 
-  private static boolean hasValidObjectHeaderPrefix(MemorySegment seg, long markerPos) {
-    long genEnd = markerPos;
-    long genStart = genEnd;
-    while (genStart > 0 && isAsciiDigit(seg, genStart - 1)) {
-      genStart--;
-    }
-    if (genStart == genEnd) {
-      return false;
-    }
-    long separatorEnd = genStart;
-    long separatorStart = separatorEnd;
-    while (separatorStart > 0 && isAsciiWhitespace(seg, separatorStart - 1)) {
-      separatorStart--;
-    }
-    if (separatorStart == separatorEnd) {
-      return false;
-    }
-    long objEnd = separatorStart;
-    long objStart = objEnd;
-    while (objStart > 0 && isAsciiDigit(seg, objStart - 1)) {
-      objStart--;
-    }
-    return objStart < objEnd && isAtLineBoundary(seg, objStart);
-  }
-
   private static int findMaxObjectNumber(MemorySegment pdf) {
     byte[] marker = OBJ_KEYWORD;
     int max = 0;
@@ -1841,10 +1870,11 @@ final class PdfSaver {
 
   private static boolean hasXmpUpdate(@CheckForNull org.grimmory.pdfium4j.internal.XmpUpdate xmp) {
     if (xmp == null) return false;
-    if (xmp instanceof org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw) {
-      return raw.xmp() != null && !raw.xmp().isBlank();
-    }
-    return true;
+    return switch (xmp) {
+      case org.grimmory.pdfium4j.internal.XmpUpdate.Raw raw ->
+          raw.xmp() != null && !raw.xmp().isBlank();
+      case org.grimmory.pdfium4j.internal.XmpUpdate.Structured _ -> true;
+    };
   }
 
   @CheckForNull
@@ -1889,6 +1919,50 @@ final class PdfSaver {
       }
     }
     return (int) value;
+  }
+
+  private static long parsePositiveLong(MemorySegment seg, long start, long endExclusive) {
+    if (start < 0 || endExclusive <= start || endExclusive > seg.byteSize()) {
+      return -1;
+    }
+    long value = 0;
+    for (long i = start; i < endExclusive; i++) {
+      byte b = seg.get(JAVA_BYTE, i);
+      if (b < '0' || b > '9') {
+        return -1;
+      }
+      value = (value * 10) + (b - '0');
+      if (value < 0 || value > MAX_XREF_OFFSET) {
+        return -1;
+      }
+    }
+    return value;
+  }
+
+  private static void parseObjectStreamHeader(
+      MemorySegment decodedSeg, int firstOffset, int objectCount, int[] objNumbers, int[] offsets)
+      throws IOException {
+    long pos = 0;
+    for (int i = 0; i < objectCount; i++) {
+      pos = skipAsciiWhitespace(decodedSeg, pos, firstOffset);
+      long objEnd = scanDigits(decodedSeg, pos, firstOffset);
+      if (objEnd <= pos) {
+        throw new IOException("Object stream header is truncated");
+      }
+      int objNumber = parsePositiveInt(decodedSeg, pos, objEnd);
+      pos = skipAsciiWhitespace(decodedSeg, objEnd, firstOffset);
+      long offsetEnd = scanDigits(decodedSeg, pos, firstOffset);
+      if (offsetEnd <= pos) {
+        throw new IOException("Object stream header is truncated");
+      }
+      int offset = parsePositiveInt(decodedSeg, pos, offsetEnd);
+      if (objNumber < 0 || offset < 0) {
+        throw new IOException("Object stream header contains invalid object references");
+      }
+      objNumbers[i] = objNumber;
+      offsets[i] = offset;
+      pos = offsetEnd;
+    }
   }
 
   private static boolean isAsciiDigit(MemorySegment seg, long idx) {
