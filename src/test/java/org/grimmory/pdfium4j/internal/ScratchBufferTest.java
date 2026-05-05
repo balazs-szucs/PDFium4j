@@ -2,6 +2,7 @@ package org.grimmory.pdfium4j.internal;
 
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -25,6 +26,42 @@ class ScratchBufferTest {
   }
 
   @Test
+  void acquireScopeProvidesValidBuffer() {
+    // Release the setup acquire to test scope isolation
+    ScratchBuffer.release();
+    try {
+      assertThrows(IllegalStateException.class, () -> ScratchBuffer.get(8));
+
+      try (var _ = ScratchBuffer.acquireScope()) {
+        MemorySegment s = ScratchBuffer.get(8);
+        assertTrue(s.byteSize() >= 8);
+        s.set(JAVA_BYTE, 0, (byte) 0x11);
+      }
+
+      assertThrows(IllegalStateException.class, () -> ScratchBuffer.get(8));
+    } finally {
+      ScratchBuffer.acquire();
+    }
+  }
+
+  @Test
+  void acquireScopeIsReentrant() {
+    try (var _ = ScratchBuffer.acquireScope()) {
+      MemorySegment s1 = ScratchBuffer.get(8);
+      s1.set(JAVA_BYTE, 0, (byte) 0x22);
+
+      try (var _ = ScratchBuffer.acquireScope()) {
+        MemorySegment s2 = ScratchBuffer.get(16);
+        assertEquals((byte) 0x22, s1.get(JAVA_BYTE, 0));
+        s2.set(JAVA_BYTE, 0, (byte) 0x33);
+      }
+
+      // Buffer should still be valid after inner scope closes
+      assertEquals((byte) 0x33, ScratchBuffer.get(16).get(JAVA_BYTE, 0));
+    }
+  }
+
+  @Test
   void utf8KeyAndWideValueUsesUtf8ByteOffset() {
     String key = "Ünî";
     long valueBytes = 32;
@@ -34,13 +71,13 @@ class ScratchBufferTest {
     MemorySegment scratch = MemorySegment.ofArray(new byte[32]);
     MemorySegment expectedKey = FfmHelper.writeUtf8String(scratch, key);
 
-    assertEquals(expectedKey.byteSize(), pair.keySeg.byteSize());
-    assertEquals(valueBytes, pair.valueSeg.byteSize());
+    assertEquals(expectedKey.byteSize(), pair.keySeg().byteSize());
+    assertEquals(valueBytes, pair.valueSeg().byteSize());
 
-    long keyTerminatorOffset = pair.keySeg.byteSize() - 1;
-    assertEquals(0, pair.keySeg.get(JAVA_BYTE, keyTerminatorOffset));
-    pair.valueSeg.set(JAVA_BYTE, 0, (byte) 0x7F);
-    assertEquals(0, pair.keySeg.get(JAVA_BYTE, keyTerminatorOffset));
+    long keyTerminatorOffset = pair.keySeg().byteSize() - 1;
+    assertEquals(0, pair.keySeg().get(JAVA_BYTE, keyTerminatorOffset));
+    pair.valueSeg().set(JAVA_BYTE, 0, (byte) 0x7F);
+    assertEquals(0, pair.keySeg().get(JAVA_BYTE, keyTerminatorOffset));
   }
 
   @Test
@@ -58,10 +95,9 @@ class ScratchBufferTest {
 
   @Test
   void utf8ProbeBufferClampsToMax() {
-    // MAX_SIZE is 128MB. keyBytes + 1024.
-    // If keyBytes is huge, it should clamp.
-    MemorySegment probe = ScratchBuffer.utf8ProbeBuffer("a".repeat(1024 * 1024 * 128 + 100));
-    assertTrue(probe.byteSize() <= 1024L * 1024L * 128L);
+    long maxSize = 1024L * 1024L * 128L;
+    assertEquals(maxSize, ScratchBuffer.probeSize(maxSize));
+    assertEquals(maxSize, ScratchBuffer.probeSize(Long.MAX_VALUE));
   }
 
   @Test
@@ -108,7 +144,8 @@ class ScratchBufferTest {
                 address1.set(s.address());
                 ready.countDown();
                 go.await();
-              } catch (InterruptedException ignored) {
+              } catch (InterruptedException _) {
+                Thread.currentThread().interrupt();
               } finally {
                 ScratchBuffer.release();
               }
@@ -122,7 +159,8 @@ class ScratchBufferTest {
                 address2.set(s.address());
                 ready.countDown();
                 go.await();
-              } catch (InterruptedException ignored) {
+              } catch (InterruptedException _) {
+                Thread.currentThread().interrupt();
               } finally {
                 ScratchBuffer.release();
               }

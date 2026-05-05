@@ -1,5 +1,6 @@
 package org.grimmory.pdfium4j.internal;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
@@ -21,7 +22,6 @@ public final class ScratchBuffer {
 
   private static final long INITIAL_SIZE = 4096;
   private static final long STEADY_STATE_SIZE = 64L * 1024L;
-  private static final long MAX_SIZE = 1024 * 1024 * 128; // 128MB safety limit
 
   private static final ThreadLocal<State> STATE = new ThreadLocal<>();
   private static final ThreadLocal<int[]> USE_COUNT = ThreadLocal.withInitial(() -> new int[] {0});
@@ -53,8 +53,12 @@ public final class ScratchBuffer {
   /** Returns a probe buffer for two-phase UTF-8 key APIs. */
   public static MemorySegment utf8ProbeBuffer(String key) {
     long keyBytes = FfmHelper.utf8ByteLengthWithNull(key);
-    // Clamp to MAX_SIZE to avoid overflow and respect safety limits.
-    // We add a smaller probe (1KB) to minimize over-allocation.
+    if (keyBytes < 0) {
+        throw new IllegalArgumentException("Invalid UTF-8 probe size: " + keyBytes);
+    }
+    if (keyBytes >= MAX_SIZE - 1024) {
+        return get(MAX_SIZE);
+    }
     long total = Math.min(keyBytes + 1024, MAX_SIZE);
     return get(total);
   }
@@ -85,6 +89,10 @@ public final class ScratchBuffer {
 
   /** Wrap existing key and value segments into the reusable thread-local slot holder. */
   public static KeyValueSlots keyAndWideValue(MemorySegment keySeg, MemorySegment valueSeg) {
+    if (USE_COUNT.get()[0] <= 0) {
+      throw new IllegalStateException(
+          "ScratchBuffer.keyAndWideValue() called without active acquire()");
+    }
     State s = getOrCreateState();
     s.keyValueSlots.keySeg = keySeg;
     s.keyValueSlots.valueSeg = valueSeg;
@@ -98,6 +106,37 @@ public final class ScratchBuffer {
    */
   public static void acquire() {
     USE_COUNT.get()[0]++;
+  }
+
+  /**
+   * Acquires the scratch buffer and returns a zero-allocation AutoCloseable scope.
+   *
+   * <p>Usage:
+   *
+   * <pre>{@code
+   * try (var scope = ScratchBuffer.acquireScope()) {
+   *     // use ScratchBuffer.get(...) safely
+   * }
+   * }</pre>
+   */
+  public static Scope acquireScope() {
+    acquire();
+    return Scope.INSTANCE;
+  }
+
+  /**
+   * A stateless, zero-allocation token used exclusively to hook into Java's try-with-resources
+   * mechanism.
+   */
+  public static final class Scope implements AutoCloseable {
+    private static final Scope INSTANCE = new Scope();
+
+    private Scope() {}
+
+    @Override
+    public void close() {
+      release();
+    }
   }
 
   /** Release and close all thread-local scratch state for the current thread. */
@@ -161,9 +200,36 @@ public final class ScratchBuffer {
     return s;
   }
 
+  /**
+   * Transient holder backed by the current thread's scratch state.
+   *
+   * <p>Instances are reused. Callers must consume the returned segments immediately and must not
+   * retain this holder or its segments across subsequent {@link ScratchBuffer} calls or across
+   * {@link #release()}.
+   */
   public static final class KeyValueSlots {
-    public MemorySegment keySeg;
-    public MemorySegment valueSeg;
+    private MemorySegment keySeg;
+    private MemorySegment valueSeg;
+
+    /**
+     * Returns the current key segment view.
+     *
+     * <p>The returned segment is transient scratch state and must not be retained.
+     */
+    @SuppressFBWarnings("EI_EXPOSE_REP")
+    public MemorySegment keySeg() {
+        return keySeg;
+    }
+
+    /**
+     * Returns the current value segment view.
+     *
+     * <p>The returned segment is transient scratch state and must not be retained.
+     */
+    @SuppressFBWarnings("EI_EXPOSE_REP")
+    public MemorySegment valueSeg() {
+        return valueSeg;
+    }
   }
 
   private static final class State {
@@ -172,6 +238,7 @@ public final class ScratchBuffer {
     private Arena loopArena;
     private MemorySegment segment;
     private MemorySegment steadySegment;
+    private MemorySegment largestSegment;
     private MemorySegment loopScratch;
     private char[] charArray;
     private byte[] byteArray;
@@ -187,6 +254,7 @@ public final class ScratchBuffer {
       this.arenas.add(this.arena);
       this.segment = arena.allocate(INITIAL_SIZE, 8);
       this.steadySegment = segment;
+      this.largestSegment = segment;
       this.loopArena = Arena.ofConfined();
       this.arenas.add(this.loopArena);
       this.loopScratch = loopArena.allocate(64, 8);
@@ -232,6 +300,10 @@ public final class ScratchBuffer {
       }
 
       if (segment.byteSize() < minBytes) {
+        if (largestSegment != null && largestSegment.byteSize() >= minBytes) {
+          segment = largestSegment;
+          return segment;
+        }
         if (minBytes > 1024 * 1024) {
           // Large scratch allocations are rare and might indicate a logic error or
           // extremely large metadata.
@@ -250,6 +322,8 @@ public final class ScratchBuffer {
       this.segment = arena.allocate(size, 8);
       if (size <= STEADY_STATE_SIZE) {
         this.steadySegment = this.segment;
+      } else {
+        this.largestSegment = this.segment;
       }
     }
 
@@ -262,6 +336,7 @@ public final class ScratchBuffer {
         }
       }
       arenas.clear();
+      largestSegment = null;
       keyValueSlots.keySeg = null;
       keyValueSlots.valueSeg = null;
     }
