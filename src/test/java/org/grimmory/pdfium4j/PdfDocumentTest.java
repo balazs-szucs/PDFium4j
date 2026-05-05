@@ -7,6 +7,7 @@ import edu.umd.cs.findbugs.annotations.CheckForNull;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.lang.foreign.MemorySegment;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.model.*;
 import org.junit.jupiter.api.Test;
@@ -538,6 +540,31 @@ class PdfDocumentTest {
 
   @Test
   @EnabledIf("pdfiumAvailable")
+  void setEmptyXmpMetadataDoesNotOverwriteExistingXmp(@TempDir Path tempDir)
+      throws IOException, URISyntaxException {
+    var resource = getClass().getResource("/minimal.pdf");
+    if (resource == null) return;
+    Path originalPdf = Path.of(resource.toURI());
+
+    Path pdf = tempDir.resolve("existing-xmp-empty-update.pdf");
+    Files.copy(originalPdf, pdf);
+
+    String before;
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      before = doc.xmpMetadataString();
+      assertFalse(before.isEmpty(), "Fixture should contain XMP");
+      doc.setXmpMetadata("");
+      doc.save(pdf);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      String after = doc.xmpMetadataString();
+      assertEquals(before, after, "Empty raw XMP update should behave as no-op");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
   void saveToBytes() throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
@@ -841,6 +868,61 @@ class PdfDocumentTest {
       byte[] saved = baos.toByteArray();
       assertTrue(saved.length > 0);
       assertTrue(new String(saved, 0, 5, StandardCharsets.ISO_8859_1).startsWith("%PDF"));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void saveToSlowOutputStreamWithoutUpdates() throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      SlowOutputStream out = new SlowOutputStream();
+      doc.save(out);
+
+      byte[] saved = out.toByteArray();
+      assertTrue(saved.length > 0);
+      assertTrue(new String(saved, 0, 5, StandardCharsets.ISO_8859_1).startsWith("%PDF"));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataSaveToGenericOutputStreamIsRejected() throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Unsafe Stream Save");
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+      PdfiumException ex = assertThrows(PdfiumException.class, () -> doc.save(baos));
+      assertTrue(
+          ex.getMessage().contains("Failed to save document"),
+          "Public save(OutputStream) should surface a clear failure");
+      assertTrue(
+          ex.getCause() instanceof IOException
+              && ex.getCause().getMessage().contains("save(Path) or saveToBytes()"),
+          "Failure should explain the safe alternatives for incremental saves");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void metadataSaveToBytesRemainsSupported() throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    byte[] saved;
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setMetadata(MetadataTag.TITLE, "Bytes Metadata Save");
+      saved = doc.saveToBytes();
+    }
+
+    try (PdfDocument doc = PdfDocument.open(saved)) {
+      assertEquals("Bytes Metadata Save", doc.metadata(MetadataTag.TITLE).orElse(""));
+      assertTrue(doc.pageCount() > 0, "saveToBytes should still produce a readable PDF");
     }
   }
 
@@ -1647,6 +1729,67 @@ class PdfDocumentTest {
     out.write(b, 0, b.length);
   }
 
+  private static byte[] poisonedRootInfoTrailerPdf() {
+    byte[] base = minimalPdfWithText();
+    ByteArrayOutputStream out = new ByteArrayOutputStream(base.length + 256);
+    out.write(base, 0, base.length);
+    out.write('\n');
+
+    int infoOffset = out.size();
+    writeBytes(out, "6 0 obj\n<< /Title (Broken Root) /Author (Repair Test) >>\nendobj\n");
+
+    int xrefOffset = out.size();
+    writeBytes(out, "xref\n6 1\n");
+    writeBytes(out, String.format(java.util.Locale.ROOT, "%010d 00000 n ", infoOffset));
+    out.write('\n');
+
+    int prevXref = extractStartxrefValue(base);
+    writeBytes(
+        out,
+        "trailer\n<< /Size 7 /Root 6 0 R /Info 6 0 R /Prev "
+            + prevXref
+            + " >>\nstartxref\n"
+            + xrefOffset
+            + "\n%%EOF\n");
+    return out.toByteArray();
+  }
+
+  private static int extractStartxrefValue(byte[] pdf) {
+    String text = new String(pdf, StandardCharsets.ISO_8859_1);
+    int idx = text.lastIndexOf("startxref");
+    assertTrue(idx >= 0, "PDF must contain startxref");
+
+    int pos = idx + "startxref".length();
+    while (pos < text.length() && Character.isWhitespace(text.charAt(pos))) {
+      pos++;
+    }
+    int end = pos;
+    while (end < text.length() && Character.isDigit(text.charAt(end))) {
+      end++;
+    }
+    return Integer.parseInt(text.substring(pos, end));
+  }
+
+  private static final class SlowOutputStream extends OutputStream {
+    private final ByteArrayOutputStream delegate = new ByteArrayOutputStream();
+
+    @Override
+    public void write(int b) {
+      delegate.write(b);
+    }
+
+    @Override
+    public void write(byte[] b, int off, int len) {
+      for (int i = 0; i < len; i++) {
+        delegate.write(b[off + i]);
+      }
+    }
+
+    byte[] toByteArray() {
+      return delegate.toByteArray();
+    }
+  }
+
   @Test
   @EnabledIf("pdfiumAvailable")
   void metadataSaveWithXrefStreamPdf(@TempDir Path tempDir) throws IOException {
@@ -1723,6 +1866,37 @@ class PdfDocumentTest {
 
   @Test
   @EnabledIf("pdfiumAvailable")
+  void repairFixesTrailerRootPointingToInfoObject(@TempDir Path tempDir) throws IOException {
+    Path source = tempDir.resolve("root-info-broken.pdf");
+    Files.write(source, poisonedRootInfoTrailerPdf());
+
+    Path repaired = tempDir.resolve("root-info-repaired.pdf");
+    PdfDocument.repair(source, repaired);
+
+    String repairedText = new String(Files.readAllBytes(repaired), StandardCharsets.ISO_8859_1);
+    assertTrue(
+        repairedText.lastIndexOf("/Root 1 0 R") > repairedText.lastIndexOf("/Root 6 0 R"),
+        "Repaired file should append a corrected /Root trailer entry");
+
+    try (PdfDocument doc = PdfDocument.open(repaired)) {
+      assertEquals(1, doc.pageCount());
+      assertEquals("Broken Root", doc.metadata(MetadataTag.TITLE).orElse(""));
+    }
+
+    Path saved = tempDir.resolve("root-info-repaired-saved.pdf");
+    try (PdfDocument doc = PdfDocument.open(repaired)) {
+      doc.setMetadata(MetadataTag.TITLE, "Repaired Title");
+      doc.save(saved);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(saved)) {
+      assertEquals(1, doc.pageCount());
+      assertEquals("Repaired Title", doc.metadata(MetadataTag.TITLE).orElse(""));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
   void metadataOnlySaveDoesNotBloatFile(@TempDir Path tempDir) throws IOException {
     Path testPdf = getTestPdf();
     if (testPdf == null) return;
@@ -1778,6 +1952,26 @@ class PdfDocumentTest {
       XmpMetadata parsed = XmpMetadataParser.parse(doc.xmpMetadata());
       assertEquals("XMP Title", parsed.title().orElse(""));
       assertTrue(doc.pageCount() > 0, "Saved PDF must have pages");
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void streamingXmpSaveMatchesStringSave() throws IOException {
+    XmpMetadata meta =
+        XmpMetadata.builder().title("Test Optimization").creators(List.of("Agent")).build();
+
+    Path pdf = getTestPdf();
+    if (pdf == null) return;
+    try (PdfDocument doc = PdfDocument.open(pdf)) {
+      doc.setXmpMetadata(meta);
+      byte[] savedBytes = doc.saveToBytes();
+
+      try (PdfDocument savedDoc = PdfDocument.open(savedBytes)) {
+        XmpMetadata loaded = XmpMetadataParser.parseFrom(savedDoc);
+        assertEquals("Test Optimization", loaded.title().orElse(null));
+        assertEquals("Agent", loaded.creators().get(0));
+      }
     }
   }
 
