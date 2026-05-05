@@ -22,6 +22,7 @@ public final class ScratchBuffer {
 
   private static final long INITIAL_SIZE = 4096;
   private static final long STEADY_STATE_SIZE = 64L * 1024L;
+  private static final long MAX_SIZE = 1024L * 1024L * 128L; // 128MB safety limit
 
   private static final ThreadLocal<State> STATE = new ThreadLocal<>();
   private static final ThreadLocal<int[]> USE_COUNT = ThreadLocal.withInitial(() -> new int[] {0});
@@ -52,15 +53,17 @@ public final class ScratchBuffer {
 
   /** Returns a probe buffer for two-phase UTF-8 key APIs. */
   public static MemorySegment utf8ProbeBuffer(String key) {
-    long keyBytes = FfmHelper.utf8ByteLengthWithNull(key);
+    return get(probeSize(FfmHelper.utf8ByteLengthWithNull(key)));
+  }
+
+  static long probeSize(long keyBytes) {
     if (keyBytes < 0) {
-        throw new IllegalArgumentException("Invalid UTF-8 probe size: " + keyBytes);
+      throw new IllegalArgumentException("Invalid UTF-8 probe size: " + keyBytes);
     }
     if (keyBytes >= MAX_SIZE - 1024) {
-        return get(MAX_SIZE);
+      return MAX_SIZE;
     }
-    long total = Math.min(keyBytes + 1024, MAX_SIZE);
-    return get(total);
+    return keyBytes + 1024;
   }
 
   /**
@@ -81,10 +84,7 @@ public final class ScratchBuffer {
     MemorySegment scratch = get(total);
     MemorySegment keySeg = FfmHelper.writeUtf8String(scratch, key);
     MemorySegment valueSeg = scratch.asSlice(keySeg.byteSize(), valueBytes);
-    State s = getOrCreateState();
-    s.keyValueSlots.keySeg = keySeg;
-    s.keyValueSlots.valueSeg = valueSeg;
-    return s.keyValueSlots;
+    return keyAndWideValue(keySeg, valueSeg);
   }
 
   /** Wrap existing key and value segments into the reusable thread-local slot holder. */
@@ -218,7 +218,7 @@ public final class ScratchBuffer {
      */
     @SuppressFBWarnings("EI_EXPOSE_REP")
     public MemorySegment keySeg() {
-        return keySeg;
+      return keySeg;
     }
 
     /**
@@ -228,7 +228,7 @@ public final class ScratchBuffer {
      */
     @SuppressFBWarnings("EI_EXPOSE_REP")
     public MemorySegment valueSeg() {
-        return valueSeg;
+      return valueSeg;
     }
   }
 
@@ -331,8 +331,8 @@ public final class ScratchBuffer {
       for (Arena a : arenas) {
         try {
           a.close();
-        } catch (Exception ignored) {
-          // Already closed or thread dead
+        } catch (Exception _) {
+          continue;
         }
       }
       arenas.clear();

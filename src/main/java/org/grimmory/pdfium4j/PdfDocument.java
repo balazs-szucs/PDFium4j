@@ -142,8 +142,6 @@ public final class PdfDocument implements AutoCloseable {
     this.ownerThread = ownerThread;
     this.state = new CleanupState(channelId, sourceChannel, tempFile, docArena);
     this.cleanable = CLEANER.register(this, state);
-
-    ScratchBuffer.acquire();
     PdfiumLibrary.incrementDocumentCount();
   }
 
@@ -424,7 +422,7 @@ public final class PdfDocument implements AutoCloseable {
 
   public PageSize pageSize(int index) {
     ensureOpen();
-    try {
+    try (var _ = ScratchBuffer.acquireScope()) {
       MemorySegment scratch = ScratchBuffer.get(16);
       MemorySegment w = scratch.asSlice(0, JAVA_DOUBLE.byteSize());
       MemorySegment h = scratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
@@ -438,12 +436,14 @@ public final class PdfDocument implements AutoCloseable {
 
   public List<Bookmark> bookmarks() {
     ensureOpen();
-    return BookmarkReader.readBookmarks(handle);
+    try (var _ = ScratchBuffer.acquireScope()) {
+      return BookmarkReader.readBookmarks(handle);
+    }
   }
 
   public Optional<String> pageLabel(int index) {
     ensureOpen();
-    try {
+    try (var _ = ScratchBuffer.acquireScope()) {
       long needed =
           (long) DocBindings.FPDF_GetPageLabel.invokeExact(handle, index, MemorySegment.NULL, 0L);
       if (needed <= 2) return Optional.empty();
@@ -461,7 +461,7 @@ public final class PdfDocument implements AutoCloseable {
     int count = pageCount();
     if (count <= 0) return List.of();
     List<PageSize> sizes = new ArrayList<>(count);
-    try {
+    try (var _ = ScratchBuffer.acquireScope()) {
       MemorySegment loopScratch = ScratchBuffer.getLoopScratch(2 * JAVA_DOUBLE.byteSize());
       MemorySegment w = loopScratch.asSlice(0, JAVA_DOUBLE.byteSize());
       MemorySegment h = loopScratch.asSlice(JAVA_DOUBLE.byteSize(), JAVA_DOUBLE.byteSize());
@@ -480,7 +480,7 @@ public final class PdfDocument implements AutoCloseable {
 
   public int fileVersion() {
     ensureOpen();
-    try {
+    try (var _ = ScratchBuffer.acquireScope()) {
       MemorySegment v = ScratchBuffer.get(JAVA_INT.byteSize());
       int ok = (int) DocBindings.FPDF_GetFileVersion.invokeExact(handle, v);
       return ok != 0 ? v.get(JAVA_INT, 0) : 0;
@@ -506,7 +506,7 @@ public final class PdfDocument implements AutoCloseable {
       String pending = pendingMetadata.get(tag);
       return (pending == null || pending.isEmpty()) ? Optional.empty() : Optional.of(pending);
     }
-    try {
+    try (var _ = ScratchBuffer.acquireScope()) {
       String key = tag.pdfKey();
       MemorySegment initialScratch = ScratchBuffer.utf8ProbeBuffer(key);
       MemorySegment keySeg = FfmHelper.writeUtf8String(initialScratch, key);
@@ -520,10 +520,10 @@ public final class PdfDocument implements AutoCloseable {
       long copied =
           (long)
               DocBindings.FPDF_GetMetaText.invokeExact(
-                  handle, keyAndValue.keySeg, keyAndValue.valueSeg, needed);
-      long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg, copied, needed);
+                  handle, keyAndValue.keySeg(), keyAndValue.valueSeg(), needed);
+      long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg(), copied, needed);
       if (byteLen == 0) return metadataFallback(tag);
-      String val = FfmHelper.fromWideString(keyAndValue.valueSeg, byteLen);
+      String val = FfmHelper.fromWideString(keyAndValue.valueSeg(), byteLen);
       return (val == null || val.isEmpty()) ? Optional.empty() : Optional.of(val);
     } catch (Throwable t) {
       return metadataFallback(tag);
@@ -705,7 +705,7 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   private Optional<String> tryGetMetaText(String customKey) {
-    try {
+    try (var _ = ScratchBuffer.acquireScope()) {
       MemorySegment initialScratch = ScratchBuffer.utf8ProbeBuffer(customKey);
       MemorySegment keySeg = FfmHelper.writeUtf8String(initialScratch, customKey);
       long needed =
@@ -719,12 +719,12 @@ public final class PdfDocument implements AutoCloseable {
       long copied =
           (long)
               DocBindings.FPDF_GetMetaText.invokeExact(
-                  handle, keyAndValue.keySeg, keyAndValue.valueSeg, needed);
-      long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg, copied, needed);
+                  handle, keyAndValue.keySeg(), keyAndValue.valueSeg(), needed);
+      long byteLen = FfmHelper.normalizeWideByteLength(keyAndValue.valueSeg(), copied, needed);
       if (byteLen == 0) {
         return Optional.empty();
       }
-      String val = FfmHelper.fromWideString(keyAndValue.valueSeg, byteLen);
+      String val = FfmHelper.fromWideString(keyAndValue.valueSeg(), byteLen);
       return (val == null || val.isEmpty()) ? Optional.empty() : Optional.of(val);
     } catch (Throwable _) {
       return Optional.empty();
@@ -1041,7 +1041,6 @@ public final class PdfDocument implements AutoCloseable {
     } catch (Throwable e) {
       PdfiumLibrary.ignore(e);
     } finally {
-      ScratchBuffer.release();
       cleanable.clean();
     }
   }

@@ -101,6 +101,28 @@ class ScratchBufferTest {
   }
 
   @Test
+  void oscillatingRequestsReuseLargestSegment() {
+    MemorySegment large = ScratchBuffer.get(10L * 1024L * 1024L);
+
+    ScratchBuffer.get(8);
+    MemorySegment medium = ScratchBuffer.get(5L * 1024L * 1024L);
+
+    assertSame(large, medium);
+  }
+
+  @Test
+  void keyAndWideValueRequiresAcquire() {
+    ScratchBuffer.release();
+    try {
+      MemorySegment key = MemorySegment.ofArray(new byte[8]);
+      MemorySegment value = MemorySegment.ofArray(new byte[8]);
+      assertThrows(IllegalStateException.class, () -> ScratchBuffer.keyAndWideValue(key, value));
+    } finally {
+      ScratchBuffer.acquire();
+    }
+  }
+
+  @Test
   void rejectsSizesAboveSafetyLimit() {
     assertThrows(IllegalArgumentException.class, () -> ScratchBuffer.get(128L * 1024L * 1024L + 1));
   }
