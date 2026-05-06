@@ -553,19 +553,7 @@ final class PdfSaver {
       return pdf.asSlice(valPos, endPos - valPos + 1);
   }
 
-  private static long findHexEnd(MemorySegment pdf, long start, long limit) {
-      for (long i = start + 1; i < limit; i++) {
-          byte b = pdf.get(JAVA_BYTE, i);
-          if (b == '>') return i + 1;
-          if (b == '<') {
-              // Nested? Unlikely but let's be safe
-              i = findHexEnd(pdf, i, limit) - 1;
-          }
-      }
-      return limit;
-  }
-
-  private static boolean isCatalogAt(MemorySegment pdf, long headerPos) {
+    private static boolean isCatalogAt(MemorySegment pdf, long headerPos) {
       try {
           long dictStart = indexOf(pdf, DICT_START, headerPos);
           if (dictStart < 0) return false;
@@ -601,15 +589,7 @@ final class PdfSaver {
       }
   }
 
-  private static DictionaryRange findObjectDictionaryRangeFromHeader(MemorySegment pdf, long headerPos) {
-      long dictStart = indexOf(pdf, DICT_START, headerPos);
-      if (dictStart < 0) return null;
-      long dictEnd = findDictionaryEnd(pdf, dictStart);
-      if (dictEnd <= dictStart) return null;
-      return new DictionaryRange(dictStart, dictEnd);
-  }
-
-  private static void writeSource(SaveParams params, MemorySegment baseSegment, OutputStream out)
+    private static void writeSource(SaveParams params, MemorySegment baseSegment, OutputStream out)
       throws IOException {
     WritableByteChannel target = Channels.newChannel(out);
     if (!params.structurallyModified() && params.originalSource() instanceof FileChannel fc) {
@@ -667,11 +647,7 @@ final class PdfSaver {
         null);
   }
 
-  private static byte[] nativeSaveBytes(MemorySegment docHandle) {
-    return nativeSaveBytes(docHandle, 0, 0);
-  }
-
-  private static byte[] nativeSaveBytes(MemorySegment docHandle, int saveFlags, int sourceFileVersion) {
+    private static byte[] nativeSaveBytes(MemorySegment docHandle, int saveFlags, int sourceFileVersion) {
     ReusableByteArrayOutputStream baos = SAVE_CALLBACK_TARGET.get();
     baos.resetForReuse(SAVE_CALLBACK_MAX_RETAINED_CAPACITY);
     // Shared arena is required for native upcall stubs to ensure they remain valid during the
@@ -1177,19 +1153,8 @@ final class PdfSaver {
       out.write(longBuf, pos, longBuf.length - pos);
   }
 
-  private static void writeRef(OutputStream out, ObjectRef ref) throws IOException {
-      byte[] intBuf = REPAIR_INT_BUF.get();
-      int len = formatInt(intBuf, ref.num());
-      out.write(intBuf, intBuf.length - len, len);
-      out.write(' ');
-      len = formatInt(intBuf, ref.gen());
-      out.write(intBuf, intBuf.length - len, len);
-      out.write(R_REF_SUFFIX);
-  }
 
-
-
-  private static byte[] buildInfoObject(int num, Map<MetadataTag, String> metadata) {
+    private static byte[] buildInfoObject(int num, Map<MetadataTag, String> metadata) {
     StringBuilder sb = new StringBuilder((metadata.size() << 6) + 64);
     sb.append(num).append(" 0 obj\n<<\n");
     for (Map.Entry<MetadataTag, String> entry : metadata.entrySet()) {
@@ -1412,59 +1377,7 @@ final class PdfSaver {
     return new TrailerInfo(rootRef, infoRef, size, null, null, null);
   }
 
-  private static TrailerInfo recoverTrailerInfo(
-      MemorySegment pdf, long currentXrefOffset, @CheckForNull TrailerInfo fallback)
-      throws IOException {
-    ObjectRef recoveredInfo = fallback != null ? fallback.infoRef() : null;
-    int recoveredSize = fallback != null ? fallback.size() : 0;
-
-    if (fallback != null && isValidCatalogRoot(pdf, fallback.rootRef(), currentXrefOffset)) {
-      if (!isUsableInfoRef(pdf, recoveredInfo, currentXrefOffset)) {
-        recoveredInfo = null;
-      }
-      if (recoveredSize <= 0) {
-        recoveredSize = findMaxObjectNumber(pdf) + 1;
-      }
-      if (recoveredSize > 0) {
-        return new TrailerInfo(fallback.rootRef(), recoveredInfo, recoveredSize, null, null, null);
-      }
-    }
-
-    if (currentXrefOffset > 0) {
-      Set<Long> visited = HashSet.newHashSet(16);
-      long xrefOffset = currentXrefOffset;
-      while (xrefOffset > 0 && visited.add(xrefOffset)) {
-        TrailerSection section = parseTrailerSectionAtXref(pdf, xrefOffset);
-        TrailerFields fields = section.fields();
-        if (recoveredSize <= 0 && fields.size() > 0) {
-          recoveredSize = fields.size();
-        }
-        if (recoveredInfo == null && fields.infoRef() != null) {
-          recoveredInfo = fields.infoRef();
-        }
-
-        ObjectRef candidateRoot = fields.rootRef();
-        if (candidateRoot != null && isValidCatalogRoot(pdf, candidateRoot, xrefOffset)) {
-          if (!isUsableInfoRef(pdf, recoveredInfo, currentXrefOffset)) {
-            recoveredInfo = null;
-          }
-          if (recoveredSize <= 0) {
-            recoveredSize = findMaxObjectNumber(pdf) + 1;
-          }
-          if (recoveredSize <= 0) {
-            throw new IOException("Failed to determine next PDF object number");
-          }
-          return new TrailerInfo(candidateRoot, recoveredInfo, recoveredSize, null, null, null);
-        }
-
-        xrefOffset = section.prevOffset();
-      }
-    }
-
-    throw new IOException("Failed to recover a valid Catalog root from trailer chain");
-  }
-
-  private static TrailerFields parseTrailerDictionary(
+    private static TrailerFields parseTrailerDictionary(
       MemorySegment tail, long dictStart, long dictEndExclusive) {
     long rootPos = findTopLevelKey(tail, dictStart, dictEndExclusive, ROOT_KEY);
     ObjectRef rootRef =
@@ -1487,41 +1400,7 @@ final class PdfSaver {
     return parseXrefStreamSection(pdf, xrefOffset).trailerFields();
   }
 
-  private static TrailerSection parseTrailerSectionAtXref(MemorySegment pdf, long xrefOffset)
-      throws IOException {
-    try {
-      XrefStreamSection section = parseXrefStreamSection(pdf, xrefOffset);
-      return new TrailerSection(section.trailerFields(), xrefOffset, section.prevOffset());
-    } catch (IOException _) {
-      TrailerFields fields = parseClassicXrefTrailerFields(pdf, xrefOffset);
-      return new TrailerSection(fields, xrefOffset, parseClassicXrefPrevOffset(pdf, xrefOffset));
-    }
-  }
-
-  private static TrailerFields parseClassicXrefTrailerFields(MemorySegment pdf, long xrefOffset)
-      throws IOException {
-    long resolvedOffset = locateClassicXrefOffset(pdf, xrefOffset);
-    if (resolvedOffset < 0) {
-      throw new IOException("startxref does not reference a classic xref table");
-    }
-    long limit = pdf.byteSize();
-    long start = skipAsciiWhitespace(pdf, resolvedOffset, limit);
-    long trailerIdx = indexOf(pdf, TRAILER_KEYWORD, start + XREF_KEYWORD.length);
-    if (trailerIdx < 0) {
-      throw new IOException("Classic xref table is missing trailer dictionary");
-    }
-    long dictStart = indexOf(pdf, DICT_START, trailerIdx + TRAILER_KEYWORD.length);
-    if (dictStart < 0) {
-      throw new IOException("Failed to locate classic xref trailer dictionary");
-    }
-    long dictEnd = findDictionaryEnd(pdf, dictStart);
-    if (dictEnd <= dictStart) {
-      throw new IOException("Classic xref trailer dictionary is malformed");
-    }
-    return parseTrailerDictionary(pdf, dictStart, dictEnd);
-  }
-
-  private static boolean isXrefStreamDictionary(
+    private static boolean isXrefStreamDictionary(
       MemorySegment seg, long dictStart, long dictEndExclusive) {
     long typePos = findTopLevelKey(seg, dictStart, dictEndExclusive, TYPE_KEY);
     if (typePos < 0) return false;
@@ -1543,38 +1422,7 @@ final class PdfSaver {
            findTopLevelKey(seg, start, end, new byte[]{'/', 'C', 'o', 'u', 'n', 't'}) >= 0;
   }
 
-  private static boolean isValidCatalogRoot(MemorySegment pdf, ObjectRef rootRef, long xrefOffset)
-      throws IOException {
-    DictionaryRange rootRange = resolveObjectDictionaryRange(pdf, rootRef, xrefOffset);
-    if (rootRange == null || !isCatalogDictionary(pdf, rootRange.start(), rootRange.endExclusive())) {
-      return false;
-    }
-    
-    ObjectRef pagesRef = findTopLevelObjectRef(pdf, rootRange.start(), rootRange.endExclusive());
-    if (pagesRef == null) {
-      return false;
-    }
-
-    DictionaryRange pagesRange = resolveObjectDictionaryRange(pdf, pagesRef, xrefOffset);
-    return pagesRange != null && isPagesDictionary(pdf, pagesRange.start(), pagesRange.endExclusive());
-  }
-
-  private static boolean isUsableInfoRef(
-      MemorySegment pdf, @CheckForNull ObjectRef infoRef, long xrefOffset) {
-    if (infoRef == null) {
-      return true;
-    }
-    try {
-      DictionaryRange infoRange = resolveObjectDictionaryRange(pdf, infoRef, xrefOffset);
-      return infoRange != null 
-          && !isCatalogDictionary(pdf, infoRange.start(), infoRange.endExclusive()) 
-          && !isPagesDictionary(pdf, infoRange.start(), infoRange.endExclusive());
-    } catch (IOException _) {
-      return false;
-    }
-  }
-
-  @CheckForNull
+    @CheckForNull
   private static byte[] resolveObjectDictionaryBytes(
       MemorySegment pdf, ObjectRef ref, long xrefOffset) throws IOException {
     DictionaryRange range = resolveObjectDictionaryRange(pdf, ref, xrefOffset);
@@ -2260,13 +2108,7 @@ final class PdfSaver {
     return matchesNameTokenAt(seg, valPos, value, dictEndExclusive);
   }
 
-  @CheckForNull
-  private static ObjectRef tryExtractEncryptRefAt(MemorySegment pdf, long encryptKeyPos, long limit) {
-    long valPos = skipAsciiWhitespace(pdf, encryptKeyPos + ENCRYPT_KEY.length, limit);
-    return parseObjectRef(pdf, valPos, limit);
-  }
-
-  private static MemorySegment tryExtractIdSegAt(MemorySegment pdf, long idKeyPos, long limit) {
+    private static MemorySegment tryExtractIdSegAt(MemorySegment pdf, long idKeyPos, long limit) {
     // ID is usually followed by [ <hex> <hex> ]
     long valPos = skipAsciiWhitespace(pdf, idKeyPos + ID_KEY.length, limit);
     if (valPos >= limit || pdf.get(JAVA_BYTE, valPos) != '[') return null;
@@ -2277,15 +2119,7 @@ final class PdfSaver {
     return pdf.asSlice(valPos, endPos + 1 - valPos);
   }
 
-  private static ObjectRef findTopLevelObjectRef(
-          MemorySegment seg, long dictStart, long dictEndExclusive) {
-    long keyPos = findTopLevelKey(seg, dictStart, dictEndExclusive, PdfSaver.PAGES_KEY);
-    if (keyPos < 0) return null;
-    long valPos = skipAsciiWhitespace(seg, keyPos + PdfSaver.PAGES_KEY.length, dictEndExclusive);
-    return parseObjectRef(seg, valPos, dictEndExclusive);
-  }
-
-  private static long findTopLevelKey(
+    private static long findTopLevelKey(
       MemorySegment seg, long dictStart, long dictEndExclusive, byte[] key) {
     long pos = dictStart + DICT_START.length;
     int depth = 1;

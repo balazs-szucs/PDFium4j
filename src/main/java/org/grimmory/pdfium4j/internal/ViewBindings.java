@@ -145,6 +145,22 @@ public final class ViewBindings {
           FunctionDescriptor.ofVoid(
               ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
 
+  /**
+   * Set the renderer type. 0 for AGG, 1 for Skia. (Experimental API)
+   */
+  public static final MethodHandle FPDF_SetRendererType =
+      downcall("FPDF_SetRendererType", FunctionDescriptor.ofVoid(JAVA_INT));
+
+  /**
+   * Load a document from memory with 64-bit size support.
+   */
+  public static final MethodHandle FPDF_LoadMemDocument64 =
+      downcall(
+          "FPDF_LoadMemDocument64", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_LONG, ADDRESS));
+
+  public static final int FPDF_RENDERER_TYPE_AGG = 0;
+  public static final int FPDF_RENDERER_TYPE_SKIA = 1;
+
   public static final int FPDF_ERR_FORMAT = 3;
   public static final int FPDF_ERR_PASSWORD = 4;
   public static final int FPDF_ERR_SECURITY = 5;

@@ -360,8 +360,14 @@ public final class PdfDocument implements AutoCloseable {
     try {
       MemorySegment seg = arena.allocateFrom(JAVA_BYTE, data);
       MemorySegment pwdSeg = (password != null) ? arena.allocateFrom(password) : MemorySegment.NULL;
-      MemorySegment doc =
-          (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(seg, data.length, pwdSeg);
+      
+      MemorySegment doc;
+      if (ViewBindings.FPDF_LoadMemDocument64 != null) {
+          doc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument64.invokeExact(seg, (long) data.length, pwdSeg);
+      } else {
+          doc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(seg, data.length, pwdSeg);
+      }
+      
       if (FfmHelper.isNull(doc)) {
         int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
         if (err == ViewBindings.FPDF_ERR_FORMAT && resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER) {
@@ -1387,6 +1393,76 @@ public final class PdfDocument implements AutoCloseable {
     ByteArrayOutputStream bos = new ByteArrayOutputStream();
     save(bos, true);
     return bos.toByteArray();
+  }
+
+  public List<org.grimmory.pdfium4j.model.PdfAttachment> attachments() {
+    ensureOpen();
+    if (org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFDoc_GetAttachmentCount == null) {
+        return List.of();
+    }
+    try {
+        int count = (int) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFDoc_GetAttachmentCount.invokeExact(handle);
+        if (count <= 0) return List.of();
+        
+        List<org.grimmory.pdfium4j.model.PdfAttachment> result = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            MemorySegment attachment = (MemorySegment) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFDoc_GetAttachment.invokeExact(handle, i);
+            if (FfmHelper.isNull(attachment)) continue;
+            
+            String name = readAttachmentString(attachment, org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFAttachment_GetName).orElse("unnamed");
+            long size = getAttachmentSize(attachment);
+            
+            result.add(new org.grimmory.pdfium4j.model.PdfAttachment(
+                i, name, size, 
+                getAttachmentMetadata(attachment, "Desc"),
+                getAttachmentMetadata(attachment, "CreationDate"),
+                getAttachmentMetadata(attachment, "ModDate")
+            ));
+        }
+        return List.copyOf(result);
+    } catch (Throwable t) {
+        PdfiumLibrary.ignore(t);
+        return List.of();
+    }
+  }
+
+  private Optional<String> getAttachmentMetadata(MemorySegment attachment, String key) {
+      return readAttachmentStringValue(attachment, key);
+  }
+
+  private long getAttachmentSize(MemorySegment attachment) {
+      try {
+          return (long) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFAttachment_GetFile.invokeExact(attachment, MemorySegment.NULL, 0L, MemorySegment.NULL);
+      } catch (Throwable t) {
+          return 0;
+      }
+  }
+
+  private Optional<String> readAttachmentString(MemorySegment handle, java.lang.invoke.MethodHandle getter) {
+      try (var _ = ScratchBuffer.acquireScope()) {
+          long needed = (long) getter.invokeExact(handle, MemorySegment.NULL, 0L);
+          if (needed <= 2) return Optional.empty();
+          MemorySegment buf = ScratchBuffer.get(needed);
+          long copied = (long) getter.invokeExact(handle, buf, needed);
+          long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
+          return byteLen == 0 ? Optional.empty() : Optional.of(FfmHelper.fromWideString(buf, byteLen));
+      } catch (Throwable t) {
+          return Optional.empty();
+      }
+  }
+
+  private Optional<String> readAttachmentStringValue(MemorySegment handle, String key) {
+      try (var _ = ScratchBuffer.acquireScope()) {
+          MemorySegment keySeg = FfmHelper.writeUtf8String(ScratchBuffer.get(key.length() + 1), key);
+          long needed = (long) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFAttachment_GetStringValue.invokeExact(handle, keySeg, MemorySegment.NULL, 0L);
+          if (needed <= 2) return Optional.empty();
+          MemorySegment buf = ScratchBuffer.get(needed);
+          long copied = (long) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFAttachment_GetStringValue.invokeExact(handle, keySeg, buf, needed);
+          long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
+          return byteLen == 0 ? Optional.empty() : Optional.of(FfmHelper.fromWideString(buf, byteLen));
+      } catch (Throwable t) {
+          return Optional.empty();
+      }
   }
 
   @Override

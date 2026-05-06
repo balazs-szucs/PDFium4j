@@ -24,8 +24,23 @@ public final class PdfiumLibrary {
   private static final Object LOCK = new Object();
   private static volatile boolean initialized = false;
   private static volatile Throwable initError = null;
+  private static volatile int rendererType = ViewBindings.FPDF_RENDERER_TYPE_AGG;
 
   private PdfiumLibrary() {}
+
+  /**
+   * Sets the global renderer type for PDFium. Must be called before {@link #initialize()}.
+   *
+   * @param type the renderer type (AGG or Skia)
+   */
+  public static void setRendererType(int type) {
+    synchronized (LOCK) {
+      if (initialized) {
+        throw new IllegalStateException("Cannot change renderer type after initialization");
+      }
+      rendererType = type;
+    }
+  }
 
   /**
    * Initializes the PDFium library if not already initialized. This method is thread-safe and can
@@ -52,6 +67,11 @@ public final class PdfiumLibrary {
         BitmapBindings.checkRequired();
         TextBindings.checkRequired();
         AnnotBindings.checkRequired();
+
+        // Set renderer type if supported
+        if (ViewBindings.FPDF_SetRendererType != null) {
+            ViewBindings.FPDF_SetRendererType.invokeExact(rendererType);
+        }
 
         Arena arena = Arena.global();
         MemorySegment config = arena.allocate(ViewBindings.LIBRARY_CONFIG_LAYOUT);
