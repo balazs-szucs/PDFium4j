@@ -169,9 +169,7 @@ public final class PdfDateUtils {
         digits++;
       }
       int pad = width - digits;
-      for (int i = 0; i < pad; i++) {
-        sb.append('0');
-      }
+        sb.repeat("0", Math.max(0, pad));
       while (div > 0) {
         sb.append((char) ('0' + ((v / div) % 10)));
         div /= 10;

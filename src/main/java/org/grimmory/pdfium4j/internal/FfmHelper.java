@@ -112,9 +112,33 @@ public final class FfmHelper {
     return seg == null || seg.equals(MemorySegment.NULL) || seg.address() == 0;
   }
 
+  /** Encode a Java String to a null-terminated UTF-16LE MemorySegment. */
+  public static MemorySegment writeWideString(Arena arena, String text) {
+    return arena.allocateFrom(text, StandardCharsets.UTF_16LE);
+  }
+
+  /** Encode a Java String to a null-terminated UTF-8 MemorySegment. */
+  public static MemorySegment writeUtf8String(Arena arena, String text) {
+    return arena.allocateFrom(text, StandardCharsets.UTF_8);
+  }
+
+  /** Decode a UTF-16LE buffer into a Java String. */
+  public static String readUtf16String(MemorySegment seg, long byteLen) {
+    return fromWideString(seg, byteLen);
+  }
+
+  /** Decode an ASCII/UTF-8 buffer into a Java String. */
+  public static String readAsciiString(MemorySegment seg, long byteLen) {
+    if (byteLen <= 1) return "";
+    long lenLong = byteLen - 1; // remove null terminator
+    int len = (int) Math.min(lenLong, Integer.MAX_VALUE);
+    byte[] arr = ScratchBuffer.getByteArray(len);
+    MemorySegment.copy(seg, JAVA_BYTE, 0, arr, 0, len);
+    return new String(arr, 0, len, StandardCharsets.UTF_8);
+  }
+
   /** Calculate the byte length of a string in UTF-8 including the null terminator. */
   public static long utf8ByteLengthWithNull(String s) {
-    // fast-path for ASCII
     int len = s.length();
     for (int i = 0; i < len; i++) {
       if (s.charAt(i) > 127) {
