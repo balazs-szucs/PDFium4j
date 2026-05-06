@@ -37,6 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.grimmory.pdfium4j.exception.PdfCorruptException;
@@ -274,7 +275,7 @@ public final class PdfDocument implements AutoCloseable {
             null);
       }
       try {
-        return openFromNativePath(path, password, resolvedPolicy);
+        return openFromNativePath(path, password, resolvedPolicy, null);
       } catch (PdfCorruptException e) {
         if (resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER) {
           return openWithRepair(path, password, resolvedPolicy);
@@ -286,8 +287,64 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
+  /**
+   * Opens a PDF document from an {@link InputStream}.
+   *
+   * <p>Since PDFium requires seekable access to the document, the entire stream is buffered to a
+   * temporary file. The temporary file is automatically deleted when the document is closed.
+   *
+   * @param in the input stream containing the PDF data
+   * @return a new PdfDocument instance
+   * @throws PdfiumException if the document is corrupt, password protected, or if buffering fails
+   */
+  public static PdfDocument open(InputStream in) {
+    return open(in, null, resolvePolicy(null));
+  }
+
+  /**
+   * Opens a PDF document from an {@link InputStream} with the given password and policy.
+   *
+   * @param in the input stream containing the PDF data
+   * @param password optional document password
+   * @param policy processing policy
+   * @return a new PdfDocument instance
+   */
+  public static PdfDocument open(InputStream in, String password, PdfProcessingPolicy policy) {
+    PdfProcessingPolicy resolvedPolicy = resolvePolicy(policy);
+    if (in == null) {
+      throw new IllegalArgumentException("InputStream must not be null");
+    }
+    PdfiumLibrary.ensureInitialized();
+    Path temp = null;
+    try {
+      temp = IoUtils.createTempFile("pdfium4j-stream-", ".pdf");
+      try (InputStream input = in) {
+        Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING);
+      }
+      return openFromNativePath(temp, password, resolvedPolicy, temp);
+    } catch (PdfiumException e) {
+      if (temp != null) {
+        try {
+          Files.deleteIfExists(temp);
+        } catch (IOException ex) {
+          PdfiumLibrary.ignore(ex);
+        }
+      }
+      throw e;
+    } catch (IOException e) {
+      if (temp != null) {
+        try {
+          Files.deleteIfExists(temp);
+        } catch (IOException ex) {
+          PdfiumLibrary.ignore(ex);
+        }
+      }
+      throw new PdfiumException("Failed to buffer InputStream to temporary file", e);
+    }
+  }
+
   private static PdfDocument openFromNativePath(
-      Path path, String password, PdfProcessingPolicy policy) {
+      Path path, String password, PdfProcessingPolicy policy, Path tempFile) {
     Arena docArena = Arena.ofShared();
     try {
       MemorySegment pathSeg = docArena.allocateFrom(path.toString());
@@ -304,7 +361,7 @@ public final class PdfDocument implements AutoCloseable {
           null,
           0L,
           path,
-          null,
+          tempFile,
           null,
           policy,
           readFileVersion(doc),
@@ -774,6 +831,69 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
+  /**
+   * Functional interface for consuming a memory segment with a specific length without allocating a
+   * slice object.
+   */
+  @FunctionalInterface
+  public interface MemorySegmentConsumer {
+    /**
+     * Consumes the given segment.
+     *
+     * @param segment the memory segment (may be larger than the actual data)
+     * @param length the actual length of the valid data in the segment
+     */
+    void accept(MemorySegment segment, long length);
+  }
+
+  /**
+   * Accesses metadata in a zero-allocation manner by yielding a memory segment and its actual
+   * length to the consumer. The segment is valid only during the callback execution.
+   *
+   * @param tag the metadata tag to read
+   * @param consumer a consumer that will receive the memory segment and the length of the UTF-16LE
+   *     data
+   */
+  public void withMetadataUtf16(MetadataTag tag, MemorySegmentConsumer consumer) {
+    ensureOpen();
+    if (consumer == null) {
+      throw new IllegalArgumentException("consumer must not be null");
+    }
+
+    // Check pending metadata first
+    if (pendingMetadata.containsKey(tag)) {
+      String pending = pendingMetadata.get(tag);
+      if (pending == null || pending.isEmpty()) return;
+      try (var _ = ScratchBuffer.acquireScope()) {
+        int needed = wideStringByteLength(pending);
+        MemorySegment buf = ScratchBuffer.get(needed);
+        writeWideString(buf, pending);
+        consumer.accept(buf, needed);
+      }
+      return;
+    }
+
+    try (var scope = ScratchBuffer.acquireScope()) {
+      long needed =
+          (long)
+              DocBindings.FPDF_GetMetaText.invokeExact(
+                  handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
+      if (needed <= 2) return;
+
+      MemorySegment buf = ScratchBuffer.get(needed);
+      long copied =
+          (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, metadataKeySegment(tag), buf, needed);
+      long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
+      if (byteLen > 0) {
+        consumer.accept(buf, byteLen);
+      }
+    } catch (PdfiumException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to read metadata for " + tag, t);
+    }
+  }
+
   int probeRawXmpByteLength() {
     ensureOpen();
     if (DocBindings.FPDF_GetXMPMetadata == null) {
@@ -800,7 +920,8 @@ public final class PdfDocument implements AutoCloseable {
     }
     try {
       long copied =
-          (long) DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, target, target.byteSize());
+          (long)
+              DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, target, target.byteSize());
       if (copied <= 0) {
         return 0;
       }
@@ -810,6 +931,36 @@ public final class PdfDocument implements AutoCloseable {
       throw e;
     } catch (Throwable t) {
       throw new PdfiumException("Failed to read XMP into caller buffer", t);
+    }
+  }
+
+  /**
+   * Accesses raw XMP metadata in a zero-allocation manner by yielding a memory segment and its
+   * actual length to the consumer. The segment is valid only during the callback execution.
+   *
+   * @param consumer a consumer that will receive the memory segment and the length of the raw XMP
+   *     data
+   */
+  public void withRawXmp(MemorySegmentConsumer consumer) {
+    ensureOpen();
+    if (consumer == null) {
+      throw new IllegalArgumentException("consumer must not be null");
+    }
+    if (DocBindings.FPDF_GetXMPMetadata == null) return;
+
+    try (var scope = ScratchBuffer.acquireScope()) {
+      long needed = (long) DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, MemorySegment.NULL, 0L);
+      if (needed <= 0) return;
+
+      MemorySegment buf = ScratchBuffer.get(needed);
+      long copied = (long) DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, buf, needed);
+      if (copied > 0) {
+        consumer.accept(buf, Math.min(copied, needed));
+      }
+    } catch (PdfiumException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to read XMP metadata", t);
     }
   }
 

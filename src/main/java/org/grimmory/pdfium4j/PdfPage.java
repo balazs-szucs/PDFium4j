@@ -163,6 +163,39 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
+  /**
+   * Accesses the page text content in a zero-allocation manner by yielding a memory segment and its
+   * actual length to the consumer. The segment contains UTF-16LE data and is valid only during the
+   * callback.
+   *
+   * @param consumer a consumer that will receive the memory segment and the length of the text
+   */
+  public void withText(PdfDocument.MemorySegmentConsumer consumer) {
+    if (consumer == null) {
+      throw new IllegalArgumentException("consumer must not be null");
+    }
+    try (var scope = ScratchBuffer.acquireScope()) {
+      withTextPage(
+          "Failed to extract text",
+          textPage -> {
+            int charCount = (int) TextBindings.FPDFText_CountChars.invokeExact(textPage);
+            if (charCount <= 0) {
+              return null;
+            }
+
+            long bufSize = ((long) charCount + 1) * 2;
+            MemorySegment buf = ScratchBuffer.get(bufSize);
+
+            int written =
+                (int) TextBindings.FPDFText_GetText.invokeExact(textPage, 0, charCount, buf);
+            if (written > 0) {
+              consumer.accept(buf, (long) written * 2);
+            }
+            return null;
+          });
+    }
+  }
+
   public int charCount() {
     return withTextPage(
         "Failed to count characters",
