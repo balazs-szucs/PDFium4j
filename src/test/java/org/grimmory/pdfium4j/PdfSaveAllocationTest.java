@@ -23,8 +23,7 @@ class PdfSaveAllocationTest {
   private final NoAllocationAsserter asserter = new NoAllocationAsserter();
 
   private PdfDocument doc;
-  private Path source;
-  private Path target;
+    private Path target;
   private FileOutputStream targetOut;
   private FileChannel targetChannel;
 
@@ -40,7 +39,7 @@ class PdfSaveAllocationTest {
   @BeforeAll
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
-    source = findCorpusPdf("mozilla-pdfjs/issue14847.pdf");
+      Path source = findCorpusPdf("mozilla-pdfjs/issue14847.pdf");
     target = Files.createTempFile("pdfium4j-alloc-target-", ".pdf");
     
     doc = PdfDocument.open(source);

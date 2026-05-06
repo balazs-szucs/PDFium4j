@@ -54,16 +54,31 @@ final class StructureTreeReader {
         Optional<String> actualText = readString(elementHandle, StructTreeBindings.FPDF_StructElement_GetActualText);
         Optional<String> lang = readString(elementHandle, StructTreeBindings.FPDF_StructElement_GetLang);
 
-        int childCount = (int) StructTreeBindings.FPDF_StructElement_CountChildren.invokeExact(elementHandle);
-        List<PdfStructureElement> children = new ArrayList<>(childCount);
-        for (int i = 0; i < childCount; i++) {
+        int attributeCount = 0;
+        if (StructTreeBindings.FPDF_StructElement_GetAttributeCount != null) {
+            attributeCount = (int) StructTreeBindings.FPDF_StructElement_GetAttributeCount.invokeExact(elementHandle);
+        }
+
+        int mcidCount = (int) StructTreeBindings.FPDF_StructElement_CountChildren.invokeExact(elementHandle);
+        List<Integer> mcids = new ArrayList<>();
+        List<PdfStructureElement> children = new ArrayList<>();
+        
+        for (int i = 0; i < mcidCount; i++) {
             MemorySegment childHandle = (MemorySegment) StructTreeBindings.FPDF_StructElement_GetChildAtIndex.invokeExact(elementHandle, i);
-            if (!FfmHelper.isNull(childHandle)) {
+            if (FfmHelper.isNull(childHandle)) {
+                // If it's NULL but index is valid, it might be a marked content ID
+                if (StructTreeBindings.FPDF_StructElement_GetMarkedContentIdAtIndex != null) {
+                    int mcid = (int) StructTreeBindings.FPDF_StructElement_GetMarkedContentIdAtIndex.invokeExact(elementHandle, i);
+                    if (mcid >= 0) {
+                        mcids.add(mcid);
+                    }
+                }
+            } else {
                 children.add(readElement(childHandle));
             }
         }
 
-        return new PdfStructureElement(type, title, altText, actualText, lang, children);
+        return new PdfStructureElement(type, title, altText, actualText, lang, children, mcids, attributeCount);
     }
 
     private static Optional<String> readString(MemorySegment handle, java.lang.invoke.MethodHandle getter) throws Throwable {

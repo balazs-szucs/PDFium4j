@@ -26,6 +26,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -52,10 +53,12 @@ import org.grimmory.pdfium4j.internal.XmpUpdate;
 import org.grimmory.pdfium4j.model.Bookmark;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.grimmory.pdfium4j.model.PageSize;
+import org.grimmory.pdfium4j.model.PdfAttachment;
 import org.grimmory.pdfium4j.model.PdfDiagnostic;
 import org.grimmory.pdfium4j.model.PdfErrorCode;
 import org.grimmory.pdfium4j.model.PdfProbeResult;
 import org.grimmory.pdfium4j.model.PdfProcessingPolicy;
+import org.grimmory.pdfium4j.model.PdfSignature;
 import org.grimmory.pdfium4j.model.RenderResult;
 import org.grimmory.pdfium4j.model.XmpMetadata;
 
@@ -1455,6 +1458,84 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
+  public List<org.grimmory.pdfium4j.model.PdfSignature> signatures() {
+    ensureOpen();
+    if (org.grimmory.pdfium4j.internal.SignatureBindings.FPDF_GetSignatureCount == null) {
+        return List.of();
+    }
+    try {
+        int count = (int) org.grimmory.pdfium4j.internal.SignatureBindings.FPDF_GetSignatureCount.invokeExact(handle);
+        if (count <= 0) return List.of();
+        
+        List<org.grimmory.pdfium4j.model.PdfSignature> result = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            MemorySegment sig = (MemorySegment) org.grimmory.pdfium4j.internal.SignatureBindings.FPDF_GetSignatureObject.invokeExact(handle, i);
+            if (FfmHelper.isNull(sig)) continue;
+            
+            result.add(new org.grimmory.pdfium4j.model.PdfSignature(
+                i,
+                getSignatureString(sig, org.grimmory.pdfium4j.internal.SignatureBindings.FPDFSignatureObj_GetReason),
+                getSignatureTime(sig),
+                getSignatureString(sig, org.grimmory.pdfium4j.internal.SignatureBindings.FPDFSignatureObj_GetSubFilter),
+                getSignaturePartSize(sig, org.grimmory.pdfium4j.internal.SignatureBindings.FPDFSignatureObj_GetContents),
+                getSignaturePartSize(sig, org.grimmory.pdfium4j.internal.SignatureBindings.FPDFSignatureObj_GetByteRange)
+            ));
+        }
+        return List.copyOf(result);
+    } catch (Throwable t) {
+        PdfiumLibrary.ignore(t);
+        return List.of();
+    }
+  }
+
+  public void addAttachment(String name, byte[] data, Map<String, String> metadata) {
+      ensureOpen();
+      if (org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFDoc_AddAttachment == null) {
+          throw new UnsupportedOperationException("Attachment editing not supported by this PDFium build");
+      }
+      try (Arena arena = Arena.ofConfined()) {
+          MemorySegment nameSeg = FfmHelper.writeWideString(arena, name);
+          MemorySegment attachment = (MemorySegment) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFDoc_AddAttachment.invokeExact(handle, nameSeg);
+          if (FfmHelper.isNull(attachment)) {
+              throw new PdfiumException("Failed to add attachment");
+          }
+          
+          MemorySegment dataSeg = arena.allocate(data.length);
+          dataSeg.copyFrom(MemorySegment.ofArray(data));
+          int ok = (int) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFAttachment_SetFile.invokeExact(attachment, handle, dataSeg, (long) data.length);
+          if (ok == 0) {
+              throw new PdfiumException("Failed to set attachment data");
+          }
+          
+          if (metadata != null) {
+              for (Map.Entry<String, String> entry : metadata.entrySet()) {
+                  MemorySegment keySeg = FfmHelper.writeUtf8String(arena, entry.getKey());
+                  MemorySegment valSeg = FfmHelper.writeWideString(arena, entry.getValue());
+                  org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFAttachment_SetStringValue.invokeExact(attachment, keySeg, valSeg);
+              }
+          }
+          structurallyModified = true;
+      } catch (Throwable t) {
+          throw new PdfiumException("Failed to add attachment", t);
+      }
+  }
+
+  public void deleteAttachment(int index) {
+      ensureOpen();
+      if (org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFDoc_DeleteAttachment == null) {
+          throw new UnsupportedOperationException("Attachment deletion not supported by this PDFium build");
+      }
+      try {
+          int ok = (int) org.grimmory.pdfium4j.internal.AttachmentBindings.FPDFDoc_DeleteAttachment.invokeExact(handle, index);
+          if (ok == 0) {
+              throw new PdfiumException("Failed to delete attachment at index " + index);
+          }
+          structurallyModified = true;
+      } catch (Throwable t) {
+          throw new PdfiumException("Failed to delete attachment", t);
+      }
+  }
+
   private Optional<String> getAttachmentMetadata(MemorySegment attachment, String key) {
       return readAttachmentStringValue(attachment, key);
   }
@@ -1477,6 +1558,32 @@ public final class PdfDocument implements AutoCloseable {
           return byteLen == 0 ? Optional.empty() : Optional.of(FfmHelper.fromWideString(buf, byteLen));
       } catch (Throwable t) {
           return Optional.empty();
+      }
+  }
+
+  private Optional<String> getSignatureString(MemorySegment sig, java.lang.invoke.MethodHandle getter) throws Throwable {
+      try (var _ = ScratchBuffer.acquireScope()) {
+          long needed = (long) getter.invokeExact(sig, MemorySegment.NULL, 0L);
+          if (needed <= 2) return Optional.empty();
+          MemorySegment buf = ScratchBuffer.get(needed);
+          long copied = (long) getter.invokeExact(sig, buf, needed);
+          long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
+          return byteLen == 0 ? Optional.empty() : Optional.of(FfmHelper.fromWideString(buf, byteLen));
+      }
+  }
+
+  private long getSignaturePartSize(MemorySegment sig, java.lang.invoke.MethodHandle getter) throws Throwable {
+      return (long) getter.invokeExact(sig, MemorySegment.NULL, 0L);
+  }
+
+  private Optional<Instant> getSignatureTime(MemorySegment sig) throws Throwable {
+      try (var _ = ScratchBuffer.acquireScope()) {
+          long needed = (long) org.grimmory.pdfium4j.internal.SignatureBindings.FPDFSignatureObj_GetTime.invokeExact(sig, MemorySegment.NULL, 0L);
+          if (needed <= 0) return Optional.empty();
+          MemorySegment buf = ScratchBuffer.get(needed);
+          org.grimmory.pdfium4j.internal.SignatureBindings.FPDFSignatureObj_GetTime.invokeExact(sig, buf, needed);
+          String timeStr = FfmHelper.readAsciiString(buf, needed);
+          return org.grimmory.pdfium4j.util.PdfDateUtils.parse(timeStr).map(java.time.OffsetDateTime::toInstant);
       }
   }
 

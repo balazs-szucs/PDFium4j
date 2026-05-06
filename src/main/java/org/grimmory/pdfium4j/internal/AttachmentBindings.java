@@ -47,4 +47,16 @@ public final class AttachmentBindings {
 
   public static final MethodHandle FPDFAttachment_GetFile =
       downcall("FPDFAttachment_GetFile", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS));
+
+  public static final MethodHandle FPDFDoc_AddAttachment =
+      downcall("FPDFDoc_AddAttachment", FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS));
+
+  public static final MethodHandle FPDFDoc_DeleteAttachment =
+      downcall("FPDFDoc_DeleteAttachment", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
+
+  public static final MethodHandle FPDFAttachment_SetFile =
+      downcall("FPDFAttachment_SetFile", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
+
+  public static final MethodHandle FPDFAttachment_SetStringValue =
+      downcall("FPDFAttachment_SetStringValue", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
 }

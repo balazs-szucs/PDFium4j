@@ -327,8 +327,8 @@ public final class PdfPage implements AutoCloseable {
   }
 
   /**
-   * Render a thumbnail of this page, fitting within a square of the given dimension. Uses fast
-   * rendering settings optimized for small output.
+   * Render a thumbnail of this page, fitting within a square of the given dimension. Uses the
+   * native PDFium thumbnail API if available, otherwise falls back to regular rendering.
    *
    * @param maxDimension maximum width or height in pixels
    * @return rendered thumbnail
@@ -338,8 +338,53 @@ public final class PdfPage implements AutoCloseable {
       throw new IllegalArgumentException("maxDimension must be positive");
     }
 
+    // Phase 1: Try native thumbnail fast path (often embedded in the PDF)
+    if (ThumbnailBindings.FPDFPage_GetThumbnailAsBitmap != null) {
+        try {
+            RenderResult nativeThumb = renderThumbnailNative(maxDimension);
+            if (nativeThumb != null) {
+                return nativeThumb;
+            }
+        } catch (Throwable t) {
+            PdfiumLibrary.ignore(t);
+        }
+    }
+
+    // Phase 2: Fallback to high-quality Skia rendering
     RenderFlags thumbnailFlags = RenderFlags.builder().annotations(false).antiAlias(true).build();
     return renderBounded(150, maxDimension, maxDimension, thumbnailFlags);
+  }
+
+  private RenderResult renderThumbnailNative(int maxDimension) throws Throwable {
+    MemorySegment bitmap = (MemorySegment) ThumbnailBindings.FPDFPage_GetThumbnailAsBitmap.invokeExact(handle);
+    if (FfmHelper.isNull(bitmap)) {
+        return null;
+    }
+
+    try {
+        int w = (int) BitmapBindings.FPDFBitmap_GetWidth.invokeExact(bitmap);
+        int h = (int) BitmapBindings.FPDFBitmap_GetHeight.invokeExact(bitmap);
+        
+        // If native thumbnail is much larger/smaller than requested, we might still prefer regular render
+        // but for thumbnails usually we just take what's there.
+        
+        MemorySegment buffer = (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
+        int stride = (int) BitmapBindings.FPDFBitmap_GetStride.invokeExact(bitmap);
+        byte[] rgba;
+        if (stride == w * 4) {
+            rgba = buffer.reinterpret(1L * stride * h).toArray(JAVA_BYTE);
+        } else {
+            rgba = new byte[w * h * 4];
+            MemorySegment dest = MemorySegment.ofArray(rgba);
+            for (int y = 0; y < h; y++) {
+                MemorySegment.copy(buffer, JAVA_BYTE, (long) y * stride, dest, JAVA_BYTE, (long) y * w * 4, (long) w * 4);
+            }
+        }
+        
+        return new RenderResult(w, h, rgba);
+    } finally {
+        // IMPORTANT: We do NOT destroy the bitmap returned by FPDFPage_GetThumbnailAsBitmap
+    }
   }
 
   /** Render this page at an exact pixel size (bypassing DPI calculation). */

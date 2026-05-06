@@ -13,7 +13,9 @@ public record PdfStructureElement(
     Optional<String> altText,
     Optional<String> actualText,
     Optional<String> lang,
-    List<PdfStructureElement> children
+    List<PdfStructureElement> children,
+    List<Integer> markedContentIds,
+    int attributeCount
 ) {
     /**
      * Recursively find all elements of a specific type.

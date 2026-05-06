@@ -64,4 +64,16 @@ public final class StructTreeBindings {
 
   public static final MethodHandle FPDF_StructElement_GetTitle =
       downcall("FPDF_StructElement_GetTitle", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+
+  public static final MethodHandle FPDF_StructElement_GetParent =
+      downcallCritical("FPDF_StructElement_GetParent", FunctionDescriptor.of(ADDRESS, ADDRESS));
+
+  public static final MethodHandle FPDF_StructElement_GetAttributeCount =
+      downcallCritical("FPDF_StructElement_GetAttributeCount", FunctionDescriptor.of(JAVA_INT, ADDRESS));
+
+  public static final MethodHandle FPDF_StructElement_GetAttributeAtIndex =
+      downcallCritical("FPDF_StructElement_GetAttributeAtIndex", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT));
+
+  public static final MethodHandle FPDF_StructElement_GetMarkedContentIdAtIndex =
+      downcallCritical("FPDF_StructElement_GetMarkedContentIdAtIndex", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
 }

@@ -114,9 +114,9 @@ final class PdfSaver {
   private static final long SECONDARY_TAIL_SCAN_BYTES = 256L << 10;
   private static final long TAIL_SCAN_BYTES = 1024L << 10;
   private static final long[] TAIL_SCAN_STEPS =
-      new long[] {
-        INITIAL_TAIL_SCAN_BYTES, SECONDARY_TAIL_SCAN_BYTES, TAIL_SCAN_BYTES, Long.MAX_VALUE
-      };
+          {
+            INITIAL_TAIL_SCAN_BYTES, SECONDARY_TAIL_SCAN_BYTES, TAIL_SCAN_BYTES, Long.MAX_VALUE
+          };
   private static final long XREF_OFFSET_FUZZ_BYTES = 1024L;
   private static final long MAX_XREF_OFFSET = 9_999_999_999L;
 
@@ -1609,13 +1609,11 @@ final class PdfSaver {
   private static XrefStreamSection parseXrefStreamSection(MemorySegment pdf, long xrefOffset)
       throws IOException {
     long limit = pdf.byteSize();
-    long objStart = skipAsciiWhitespace(pdf, xrefOffset, limit);
-    long numStart = objStart;
-    long numEnd = scanDigits(pdf, numStart, limit);
+      long numEnd = scanDigits(pdf, skipAsciiWhitespace(pdf, xrefOffset, limit), limit);
     long genStart = skipAsciiWhitespace(pdf, numEnd, limit);
     long genEnd = scanDigits(pdf, genStart, limit);
     long objKeywordPos = skipAsciiWhitespace(pdf, genEnd, limit);
-    if (numEnd <= numStart || genEnd <= genStart) {
+    if (numEnd <= skipAsciiWhitespace(pdf, xrefOffset, limit) || genEnd <= genStart) {
       throw new IOException("startxref does not point to an indirect object");
     }
     if (!matchesNameTokenAt(pdf, objKeywordPos, OBJ_KEYWORD, limit)) {
@@ -1788,8 +1786,8 @@ final class PdfSaver {
         if (seg.get(JAVA_BYTE, scanPos) == '/') {
           decoded = inflateSingleFilter(seg, scanPos, arrayEnd, decoded);
           // advance past the name token
-          scanPos++;
-          while (scanPos < arrayEnd && !isPdfNameDelimiter(seg, scanPos)) scanPos++;
+            do scanPos++;
+            while (scanPos < arrayEnd && !isPdfNameDelimiter(seg, scanPos));
         } else {
           scanPos++;
         }
