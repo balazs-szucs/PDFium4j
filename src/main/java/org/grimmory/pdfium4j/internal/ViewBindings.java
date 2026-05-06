@@ -78,6 +78,9 @@ public final class ViewBindings {
   public static final MethodHandle FPDF_LoadDocument =
       downcall("FPDF_LoadDocument", FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS));
 
+  public static final MethodHandle FPDF_LoadDocument_Raw =
+      downcall("FPDF_LoadDocument", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS));
+
   public static final MethodHandle FPDF_LoadMemDocument =
       downcall("FPDF_LoadMemDocument", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT, ADDRESS));
 
@@ -87,11 +90,37 @@ public final class ViewBindings {
   public static final MethodHandle FPDF_CloseDocument =
       downcallCritical("FPDF_CloseDocument", FunctionDescriptor.ofVoid(ADDRESS));
 
+  public static final MethodHandle FPDF_CloseDocument_Raw =
+      downcallCritical("FPDF_CloseDocument", FunctionDescriptor.ofVoid(JAVA_LONG));
+
   public static final MethodHandle FPDF_GetLastError =
       downcallCritical("FPDF_GetLastError", FunctionDescriptor.of(JAVA_LONG));
 
+  public static final MethodHandle FPDF_DocumentHasValidCrossReferenceTable =
+      downcall(
+          "FPDF_DocumentHasValidCrossReferenceTable",
+          FunctionDescriptor.of(JAVA_INT, ADDRESS));
+
+  public static final MethodHandle FPDF_DocumentHasValidCrossReferenceTable_Raw =
+      downcall(
+          "FPDF_DocumentHasValidCrossReferenceTable",
+          FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+
+  public static final MethodHandle FPDF_GetTrailerEnds =
+      downcall(
+          "FPDF_GetTrailerEnds",
+          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, NATIVE_LONG));
+
+  public static final MethodHandle FPDF_GetTrailerEnds_Raw =
+      downcall(
+          "FPDF_GetTrailerEnds",
+          FunctionDescriptor.of(JAVA_LONG, JAVA_LONG, ADDRESS, NATIVE_LONG));
+
   public static final MethodHandle FPDF_GetPageCount =
       downcallCritical("FPDF_GetPageCount", FunctionDescriptor.of(JAVA_INT, ADDRESS));
+
+  public static final MethodHandle FPDF_GetPageCount_Raw =
+      downcallCritical("FPDF_GetPageCount", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
   public static final MethodHandle FPDF_GetPageSizeByIndex =
       downcall(

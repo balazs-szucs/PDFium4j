@@ -6,14 +6,19 @@ import static java.lang.foreign.ValueLayout.JAVA_INT;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import java.io.ByteArrayOutputStream;
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -41,6 +46,7 @@ import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.IoUtils;
 import org.grimmory.pdfium4j.model.MetadataTag;
+import sun.misc.Unsafe;
 
 /**
  * Handles saving PDF documents. Uses PDFium's native FPDF_SaveAsCopy for the base save, then
@@ -48,8 +54,16 @@ import org.grimmory.pdfium4j.model.MetadataTag;
  *
  * <p>Uses byte-level scanning to avoid OOM issues with large files.
  */
+@SuppressWarnings("removal")
 final class PdfSaver {
   private static final Logger LOGGER = Logger.getLogger(PdfSaver.class.getName());
+  private static final Unsafe UNSAFE = lookupUnsafe();
+  private static final long BYTE_ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(byte[].class);
+  private static final long FILE_DESCRIPTOR_FD_OFFSET = lookupFileDescriptorFdOffset();
+  private static final Arena NATIVE_SAVE_ARENA = Arena.ofShared();
+  private static final MethodHandle WRITE_BLOCK_CALLBACK = lookupWriteBlockCallback();
+  private static final MemorySegment WRITE_BLOCK_STUB =
+      Linker.nativeLinker().upcallStub(WRITE_BLOCK_CALLBACK, EditBindings.WRITE_BLOCK_DESC, NATIVE_SAVE_ARENA);
 
   /**
    * Per-thread callback sink for native FPDF_SaveAsCopy bytes. Set for one save call and removed in
@@ -76,6 +90,24 @@ final class PdfSaver {
   private static final ThreadLocal<byte[]> STREAM_DECODE_BUF =
       ThreadLocal.withInitial(() -> new byte[8192]);
 
+    private static final ThreadLocal<NativeSaveContext> NATIVE_SAVE_CONTEXT =
+      ThreadLocal.withInitial(NativeSaveContext::new);
+
+  private static final ThreadLocal<long[]> REPAIR_OFFSETS = ThreadLocal.withInitial(() -> new long[1024]);
+  private static final ThreadLocal<byte[]> REPAIR_INT_BUF = ThreadLocal.withInitial(() -> new byte[11]);
+  private static final ThreadLocal<byte[]> REPAIR_ENTRY_BUF = ThreadLocal.withInitial(() -> new byte[20]);
+  private static final ThreadLocal<byte[]> IO_BUFFER = ThreadLocal.withInitial(() -> new byte[65536]);
+  private static final ThreadLocal<RepairResult> REPAIR_RESULT = ThreadLocal.withInitial(RepairResult::new);
+
+  private static final class RepairResult {
+      int rootNum = -1;
+      int infoNum = -1;
+      int encryptNum = -1;
+      int pagesNum = -1;
+      @CheckForNull MemorySegment idSeg = null;
+  }
+
+
   private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
   private static final long INITIAL_TAIL_SCAN_BYTES = 64L << 10;
   private static final long SECONDARY_TAIL_SCAN_BYTES = 256L << 10;
@@ -98,7 +130,10 @@ final class PdfSaver {
       byte[] originalBytes,
       boolean structurallyModified,
       OutputStream out,
-      boolean allowIncrementalOutput) {}
+      boolean allowIncrementalOutput,
+      boolean forceNativeRewrite,
+      int nativeSaveFlags,
+      int sourceFileVersion) {}
 
   private record ObjectRef(int num, int gen) {
     @Override
@@ -150,6 +185,18 @@ final class PdfSaver {
       "0000000000 00000 n \n".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] XREF_FREE_ENTRY_0 =
       "0000000000 65535 f \r\n".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] OBJ_MARKER = " 0 obj\n<< /Type /Catalog /Pages ".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] R_MARKER = " R >>\nendobj\n".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] TRAILER_START = "trailer\n<< /Size ".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] ROOT_KEY_BYTES = " /Root ".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] INFO_KEY_BYTES = " /Info ".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] ID_KEY_BYTES = " /ID ".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] ENCRYPT_KEY_BYTES = " /Encrypt ".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] PREV_KEY_BYTES = " /Prev ".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] STARTXREF_MARKER = " >>\nstartxref\n".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] EOF_MARKER = "\n%%EOF\n".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] R_REF_SUFFIX = " R".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] ZERO_R = " 0 R".getBytes(StandardCharsets.ISO_8859_1);
 
 
   private record BasePdf(MemorySegment segment, @CheckForNull Path tempPath) {}
@@ -158,26 +205,77 @@ final class PdfSaver {
     super();
   }
 
+  static void saveNativeFullRewrite(MemorySegment docHandle, OutputStream out, int sourceFileVersion)
+      throws IOException {
+    if (tryNativeFdSave(docHandle, out, sourceFileVersion)) {
+      return;
+    }
+    NativeSaveContext context = NATIVE_SAVE_CONTEXT.get();
+    context.prepare(out);
+    try {
+      int ok;
+      if (sourceFileVersion > 0 && EditBindings.FPDF_SaveWithVersion != null) {
+        ok =
+            (int)
+                EditBindings.FPDF_SaveWithVersion.invokeExact(
+                    docHandle,
+                    context.fileWrite(),
+                    EditBindings.FPDF_NO_INCREMENTAL,
+                    sourceFileVersion);
+      } else {
+        ok =
+            (int)
+                EditBindings.FPDF_SaveAsCopy.invokeExact(
+                    docHandle, context.fileWrite(), EditBindings.FPDF_NO_INCREMENTAL);
+      }
+      if (ok == 0) {
+        if (context.failure() != null) {
+          throw context.failure();
+        }
+        throw new IOException("Native PDFium full rewrite failed");
+      }
+      if (context.failure() != null) {
+        throw context.failure();
+      }
+    } catch (IOException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to save document", t);
+    } finally {
+      context.finish();
+    }
+  }
+
   static void save(SaveParams params) throws IOException {
     boolean hasXmpUpdate = hasXmpUpdate(params.pendingXmp());
     boolean hasUpdate = params.hasInfoUpdate() || hasXmpUpdate;
 
-    if (hasUpdate && !params.allowIncrementalOutput()) {
+    if (hasUpdate && !params.allowIncrementalOutput() && !params.forceNativeRewrite()) {
       throw new IOException(
           "Incremental save to a generic OutputStream is disabled; use save(Path) or saveToBytes() instead");
     }
 
     try (Arena arena = Arena.ofConfined()) {
-      if (hasUpdate) {
+      if (hasUpdate && !params.forceNativeRewrite()) {
         try {
           writeIncrementalUpdate(params, arena);
         } catch (PdfiumException e) {
           if (!hasXmpUpdate && e.getCause() instanceof IOException) {
-            writeSegment(MemorySegment.ofArray(nativeSaveBytes(params.docHandle())), params.out());
+            writeSegment(
+                MemorySegment.ofArray(
+                    nativeSaveBytes(
+                        params.docHandle(), params.nativeSaveFlags(), params.sourceFileVersion())),
+                params.out());
           } else {
             throw e;
           }
         }
+      } else if (hasUpdate) {
+        writeSegment(
+            MemorySegment.ofArray(
+                nativeSaveBytes(
+                    params.docHandle(), params.nativeSaveFlags(), params.sourceFileVersion())),
+            params.out());
       } else {
         BasePdf base = getBaseSegment(params, arena);
         try {
@@ -203,7 +301,7 @@ final class PdfSaver {
     return out.toByteArray();
   }
 
-  private static void repair(MemorySegment pdf, OutputStream out) throws IOException {
+  static void repair(MemorySegment pdf, OutputStream out) throws IOException {
     long currentXrefOffset = findLastStartxrefValue(pdf);
     if (LOGGER.isLoggable(Level.INFO)) {
         LOGGER.log(Level.INFO, "Starting zero-allocation PDF repair. Original xref offset: {0}", currentXrefOffset);
@@ -217,40 +315,62 @@ final class PdfSaver {
 
     // Pass 2: Reconstruct offsets into a single primitive array (one allocation per repair)
     // Add space for one possible synthesized catalog object
-    long[] offsets = new long[maxObj + 2];
-    java.util.Arrays.fill(offsets, -1L);
+    long[] offsets = getRepairOffsets(maxObj + 2);
+    java.util.Arrays.fill(offsets, 0, maxObj + 2, -1L);
     
-    TrailerInfo repairedTrailer = reconstructAndFindRoots(pdf, offsets);
+    // Scan and find roots - zero allocation
+    RepairResult result = scanForRoots(pdf, offsets);
 
-    if (LOGGER.isLoggable(Level.INFO)) {
-        LOGGER.log(Level.INFO, "Repair scan complete. Found roots. Root: {1}, Info: {2}, Encrypt: {3}",
-            new Object[]{0, repairedTrailer.rootRef(), repairedTrailer.infoRef(), repairedTrailer.encryptRef()});
-    }
-
+    // Synthesis and Output - zero allocation
     writeSegment(pdf, out);
     out.write('\n');
     long currentOffset = pdf.byteSize() + 1;
     
-    // Check if we need to write a synthesized catalog
-    ObjectRef rootRef = repairedTrailer.rootRef();
-    if (rootRef.num() > maxObj) {
+    int finalMaxObj = maxObj;
+    if (result.rootNum > maxObj) {
         // It's a synthesized catalog
-        offsets[rootRef.num()] = currentOffset;
-        byte[] synthesized = (rootRef.num() + " 0 obj\n<< /Type /Catalog /Pages " + repairedTrailer.pagesRef() + " >>\nendobj\n").getBytes(StandardCharsets.ISO_8859_1);
-        out.write(synthesized);
-        currentOffset += synthesized.length;
+        offsets[result.rootNum] = currentOffset;
+        currentOffset += writeSynthesizedCatalog(out, result.rootNum, result.pagesNum);
+        finalMaxObj = result.rootNum;
     }
 
     long xrefOffset = currentOffset;
-    writeFullReconstructedXrefTable(out, offsets, Math.max(maxObj, rootRef.num()));
-    writeTrailer(out, repairedTrailer, 0, Math.max(maxObj, rootRef.num()) + 1, 0, xrefOffset);
+    writeFullReconstructedXrefTable(out, offsets, finalMaxObj);
+    writeTrailerPrimitives(out, result, 0, finalMaxObj + 1, 0, xrefOffset);
+  }
+
+  private static int writeSynthesizedCatalog(OutputStream out, int num, int pagesNum) throws IOException {
+      byte[] intBuf = REPAIR_INT_BUF.get();
+      int written = 0;
+      
+      int len = formatInt(intBuf, num);
+      out.write(intBuf, intBuf.length - len, len);
+      out.write(OBJ_MARKER);
+      written += len + OBJ_MARKER.length;
+      
+      len = formatInt(intBuf, pagesNum);
+      out.write(intBuf, intBuf.length - len, len);
+      out.write(' ');
+      out.write('0');
+      out.write(R_MARKER);
+      written += len + 1 + 1 + R_MARKER.length;
+      return written;
+  }
+
+  private static long[] getRepairOffsets(int needed) {
+    long[] offsets = REPAIR_OFFSETS.get();
+    if (offsets.length < needed) {
+      offsets = new long[needed + 1024];
+      REPAIR_OFFSETS.set(offsets);
+    }
+    return offsets;
   }
 
   private static void writeFullReconstructedXrefTable(OutputStream update, long[] objOffsets, int maxObj)
       throws IOException {
     update.write(XREF_HEADER);
     // Write a single subsection from 0 to maxObj
-    byte[] intBuf = new byte[11];
+    byte[] intBuf = REPAIR_INT_BUF.get();
     int len = formatInt(intBuf, 0);
     update.write(intBuf, intBuf.length - len, len);
     update.write(' ');
@@ -258,7 +378,7 @@ final class PdfSaver {
     update.write(intBuf, intBuf.length - len, len);
     update.write('\n');
 
-    byte[] entryBuf = new byte[20];
+    byte[] entryBuf = REPAIR_ENTRY_BUF.get();
     for (int i = 0; i <= maxObj; i++) {
         if (i == 0) {
             update.write(XREF_FREE_ENTRY_0);
@@ -293,12 +413,12 @@ final class PdfSaver {
     buf[17] = (byte) (inUse ? 'n' : 'f');
   }
 
-  private static TrailerInfo reconstructAndFindRoots(MemorySegment pdf, long[] offsets) throws IOException {
+  private static RepairResult scanForRoots(MemorySegment pdf, long[] offsets) throws IOException {
     int maxObj = offsets.length - 1;
-    ObjectRef bestCatalog = null;
-    ObjectRef bestInfo = null;
-    ObjectRef bestEncrypt = null;
-    ObjectRef bestPages = null;
+    int bestCatalogNum = -1;
+    int bestInfoNum = -1;
+    int bestEncryptNum = -1;
+    int bestPagesNum = -1;
     MemorySegment bestIdSeg = null;
 
     long searchPos = 0;
@@ -319,19 +439,19 @@ final class PdfSaver {
             long pos = searchPos;
             searchPos += OBJ_KEYWORD.length;
 
-            ObjectRef ref = parseObjectHeaderRef(pdf, pos);
-            if (ref == null) continue;
+            int num = parseObjectHeaderNum(pdf, pos);
+            if (num <= 0) continue;
 
-            if (ref.num >= 0 && ref.num <= maxObj) {
-                offsets[ref.num] = pos;
+            if (num <= maxObj) {
+                offsets[num] = pos;
             }
 
-            if (isCatalogAt(pdf, ref, pos)) {
-                bestCatalog = ref;
-            } else if (isInfoAt(pdf, ref, pos)) {
-                bestInfo = ref;
-            } else if (isPagesAt(pdf, ref, pos)) {
-                bestPages = ref;
+            if (isCatalogAt(pdf, pos)) {
+                bestCatalogNum = num;
+            } else if (isInfoAt(pdf, pos)) {
+                bestInfoNum = num;
+            } else if (isPagesAt(pdf, pos)) {
+                bestPagesNum = num;
             }
             continue;
         }
@@ -350,14 +470,14 @@ final class PdfSaver {
             if (dictStart >= 0) {
                 long dictEnd = findDictionaryEnd(pdf, dictStart);
                 if (dictEnd > dictStart) {
-                    ObjectRef root = findTopLevelObjectRefForKey(pdf, dictStart, dictEnd, ROOT_KEY);
-                    if (root != null) bestCatalog = root;
+                    int rootNum = findTopLevelObjectRefNumForKey(pdf, dictStart, dictEnd, ROOT_KEY);
+                    if (rootNum > 0) bestCatalogNum = rootNum;
                     
-                    ObjectRef info = findTopLevelObjectRefForKey(pdf, dictStart, dictEnd, INFO_KEY);
-                    if (info != null) bestInfo = info;
+                    int infoNum = findTopLevelObjectRefNumForKey(pdf, dictStart, dictEnd, INFO_KEY);
+                    if (infoNum > 0) bestInfoNum = infoNum;
                     
-                    ObjectRef encrypt = findTopLevelObjectRefForKey(pdf, dictStart, dictEnd, ENCRYPT_KEY);
-                    if (encrypt != null) bestEncrypt = encrypt;
+                    int encryptNum = findTopLevelObjectRefNumForKey(pdf, dictStart, dictEnd, ENCRYPT_KEY);
+                    if (encryptNum > 0) bestEncryptNum = encryptNum;
                     
                     MemorySegment id = tryExtractIdSegAtRange(pdf, dictStart, dictEnd);
                     if (id != null) bestIdSeg = id;
@@ -369,35 +489,40 @@ final class PdfSaver {
         searchPos++;
     }
 
-    if (bestCatalog == null) {
+    if (bestCatalogNum == -1) {
       if (LOGGER.isLoggable(Level.WARNING)) {
           LOGGER.log(Level.WARNING, "No Catalog root found via fast markers. Attempting exhaustive verification of objects...");
       }
       for (int i = 1; i <= maxObj; i++) {
           if (offsets[i] != -1) {
-              ObjectRef ref = new ObjectRef(i, 0);
-              if (isCatalogAt(pdf, ref, offsets[i])) {
-                  bestCatalog = ref;
+              if (isCatalogAt(pdf, offsets[i])) {
+                  bestCatalogNum = i;
                   break;
-              } else if (bestPages == null && isPagesAt(pdf, ref, offsets[i])) {
-                  bestPages = ref;
+              } else if (bestPagesNum == -1 && isPagesAt(pdf, offsets[i])) {
+                  bestPagesNum = i;
               }
           }
       }
     }
 
-    if (bestCatalog == null) {
-      if (bestPages != null) {
+    if (bestCatalogNum == -1) {
+      if (bestPagesNum != -1) {
           if (LOGGER.isLoggable(Level.INFO)) {
-              LOGGER.log(Level.INFO, "Catalog missing but found Pages root at {0}. Synthesizing replacement Catalog...", bestPages);
+              LOGGER.log(Level.INFO, "Catalog missing but found Pages root at {0}. Synthesizing replacement Catalog...", bestPagesNum);
           }
-          bestCatalog = new ObjectRef(maxObj + 1, 0);
+          bestCatalogNum = maxObj + 1;
       } else {
           throw new IOException("Failed to locate Catalog root or Page tree via exhaustive brute-force scan");
       }
     }
 
-    return new TrailerInfo(bestCatalog, bestInfo, maxObj + 1, bestIdSeg, bestEncrypt, bestPages);
+    RepairResult result = REPAIR_RESULT.get();
+    result.rootNum = bestCatalogNum;
+    result.infoNum = bestInfoNum;
+    result.encryptNum = bestEncryptNum;
+    result.pagesNum = bestPagesNum;
+    result.idSeg = bestIdSeg;
+    return result;
   }
 
 
@@ -411,13 +536,22 @@ final class PdfSaver {
              findTopLevelKey(pdf, ds, de, MOD_DATE_KEY) >= 0;
   }
 
-  private static ObjectRef findTopLevelObjectRefForKey(MemorySegment pdf, long ds, long de, byte[] key) {
+  private static int findTopLevelObjectRefNumForKey(MemorySegment pdf, long ds, long de, byte[] key) {
       long keyPos = findTopLevelKey(pdf, ds, de, key);
-      if (keyPos < 0) return null;
+      if (keyPos < 0) return -1;
       long valPos = skipAsciiWhitespace(pdf, keyPos + key.length, de);
-      return parseObjectRef(pdf, valPos, de);
+      return parseObjectRefNum(pdf, valPos, de);
   }
 
+  private static MemorySegment tryExtractIdSegAtRange(MemorySegment pdf, long ds, long de) {
+      long keyPos = findTopLevelKey(pdf, ds, de, ID_KEY);
+      if (keyPos < 0) return null;
+      long valPos = skipAsciiWhitespace(pdf, keyPos + ID_KEY.length, de);
+      if (valPos >= de || pdf.get(JAVA_BYTE, valPos) != '[') return null;
+      long endPos = indexOf(pdf, new byte[]{']'}, valPos);
+      if (endPos < 0 || endPos > de) return null;
+      return pdf.asSlice(valPos, endPos - valPos + 1);
+  }
 
   private static long findHexEnd(MemorySegment pdf, long start, long limit) {
       for (long i = start + 1; i < limit; i++) {
@@ -431,41 +565,37 @@ final class PdfSaver {
       return limit;
   }
 
-  private static boolean isPagesAt(MemorySegment pdf, ObjectRef ref, long headerPos) {
+  private static boolean isCatalogAt(MemorySegment pdf, long headerPos) {
       try {
-          DictionaryRange range = findObjectDictionaryRangeFromHeader(pdf, headerPos);
-          if (range == null) return false;
-          return isPagesDictionary(pdf, range.start(), range.endExclusive());
+          long dictStart = indexOf(pdf, DICT_START, headerPos);
+          if (dictStart < 0) return false;
+          long dictEnd = findDictionaryEnd(pdf, dictStart);
+          if (dictEnd <= dictStart) return false;
+          return isCatalogDictionary(pdf, dictStart, dictEnd);
       } catch (Exception _) {
           return false;
       }
   }
 
-  private static MemorySegment tryExtractIdSegAtRange(MemorySegment pdf, long ds, long de) {
-      long keyPos = findTopLevelKey(pdf, ds, de, ID_KEY);
-      if (keyPos < 0) return null;
-      long valPos = skipAsciiWhitespace(pdf, keyPos + ID_KEY.length, de);
-      if (valPos >= de || pdf.get(JAVA_BYTE, valPos) != '[') return null;
-      long endPos = indexOf(pdf, new byte[]{']'}, valPos);
-      if (endPos < 0 || endPos > de) return null;
-      return pdf.asSlice(valPos, endPos - valPos + 1);
-  }
-
-  private static boolean isCatalogAt(MemorySegment pdf, ObjectRef ref, long headerPos) {
+  private static boolean isInfoAt(MemorySegment pdf, long headerPos) {
       try {
-          DictionaryRange range = findObjectDictionaryRangeFromHeader(pdf, headerPos);
-          if (range == null) return false;
-          return isCatalogDictionary(pdf, range.start(), range.endExclusive());
+          long dictStart = indexOf(pdf, DICT_START, headerPos);
+          if (dictStart < 0) return false;
+          long dictEnd = findDictionaryEnd(pdf, dictStart);
+          if (dictEnd <= dictStart) return false;
+          return isInfoDictionary(pdf, dictStart, dictEnd);
       } catch (Exception _) {
           return false;
       }
   }
 
-  private static boolean isInfoAt(MemorySegment pdf, ObjectRef ref, long headerPos) {
+  private static boolean isPagesAt(MemorySegment pdf, long headerPos) {
       try {
-          DictionaryRange range = findObjectDictionaryRangeFromHeader(pdf, headerPos);
-          if (range == null) return false;
-          return isInfoDictionary(pdf, range.start(), range.endExclusive());
+          long dictStart = indexOf(pdf, DICT_START, headerPos);
+          if (dictStart < 0) return false;
+          long dictEnd = findDictionaryEnd(pdf, dictStart);
+          if (dictEnd <= dictStart) return false;
+          return isPagesDictionary(pdf, dictStart, dictEnd);
       } catch (Exception _) {
           return false;
       }
@@ -494,8 +624,12 @@ final class PdfSaver {
   }
 
   private static BasePdf getBaseSegment(SaveParams params, Arena arena) throws IOException {
-    if (params.structurallyModified()) {
-      return new BasePdf(MemorySegment.ofArray(nativeSaveBytes(params.docHandle())), null);
+    if (params.forceNativeRewrite() || params.structurallyModified()) {
+      return new BasePdf(
+          MemorySegment.ofArray(
+              nativeSaveBytes(
+                  params.docHandle(), params.nativeSaveFlags(), params.sourceFileVersion())),
+          null);
     } else if (params.originalBytes() != null) {
       return new BasePdf(MemorySegment.ofArray(params.originalBytes()), null);
     } else if (params.sourcePath() != null) {
@@ -526,10 +660,18 @@ final class PdfSaver {
         throw e;
       }
     }
-    return new BasePdf(MemorySegment.ofArray(nativeSaveBytes(params.docHandle())), null);
+    return new BasePdf(
+        MemorySegment.ofArray(
+            nativeSaveBytes(
+                params.docHandle(), params.nativeSaveFlags(), params.sourceFileVersion())),
+        null);
   }
 
   private static byte[] nativeSaveBytes(MemorySegment docHandle) {
+    return nativeSaveBytes(docHandle, 0, 0);
+  }
+
+  private static byte[] nativeSaveBytes(MemorySegment docHandle, int saveFlags, int sourceFileVersion) {
     ReusableByteArrayOutputStream baos = SAVE_CALLBACK_TARGET.get();
     baos.resetForReuse(SAVE_CALLBACK_MAX_RETAINED_CAPACITY);
     // Shared arena is required for native upcall stubs to ensure they remain valid during the
@@ -551,8 +693,16 @@ final class PdfSaver {
       fileWrite.set(JAVA_INT, 0, 1);
       fileWrite.set(ADDRESS, 8, writeBlockStub);
 
-      int ok = (int) EditBindings.FPDF_SaveAsCopy.invokeExact(docHandle, fileWrite, 0);
-      if (ok == 0) throw new PdfiumException("FPDF_SaveAsCopy failed");
+      int ok;
+      if (sourceFileVersion > 0 && EditBindings.FPDF_SaveWithVersion != null) {
+        ok =
+            (int)
+                EditBindings.FPDF_SaveWithVersion.invokeExact(
+                    docHandle, fileWrite, saveFlags, sourceFileVersion);
+      } else {
+        ok = (int) EditBindings.FPDF_SaveAsCopy.invokeExact(docHandle, fileWrite, saveFlags);
+      }
+      if (ok == 0) throw new PdfiumException("Native PDFium save failed");
       return baos.toByteArray();
     } catch (PdfiumException e) {
       throw e;
@@ -565,23 +715,168 @@ final class PdfSaver {
 
   @SuppressWarnings({"PMD.UnusedFormalParameter", "unused"})
   private static int writeBlockCallback(MemorySegment pThis, MemorySegment pData, long size) {
+    NativeSaveContext streamContext = NATIVE_SAVE_CONTEXT.get();
+    if (streamContext.isActive()) {
+      return streamContext.write(pData, size);
+    }
     if (FfmHelper.isNull(pThis) || FfmHelper.isNull(pData)) return 0;
     ReusableByteArrayOutputStream baos = SAVE_CALLBACK_TARGET.get();
     if (baos == null) return 0;
     if (size <= 0) return 0;
-    // Reinterpret pData to expose its full size before copying.
-    MemorySegment data = pData.reinterpret(size);
+    long sourceAddress = pData.address();
     byte[] buf = SAVE_CALLBACK_BUF.get();
     long offset = 0;
     long remaining = size;
     while (remaining > 0) {
       int chunk = (int) Math.min(buf.length, remaining);
-      MemorySegment.copy(data, JAVA_BYTE, offset, buf, 0, chunk);
+      copyNativeBytes(sourceAddress + offset, buf, chunk);
       baos.write(buf, 0, chunk);
       offset += chunk;
       remaining -= chunk;
     }
     return 1;
+  }
+
+  private static MethodHandle lookupWriteBlockCallback() {
+    try {
+      return MethodHandles.lookup()
+          .findStatic(
+              PdfSaver.class,
+              "writeBlockCallback",
+              MethodType.methodType(
+                  int.class, MemorySegment.class, MemorySegment.class, long.class));
+    } catch (NoSuchMethodException | IllegalAccessException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  private static Unsafe lookupUnsafe() {
+    try {
+      Field field = Unsafe.class.getDeclaredField("theUnsafe");
+      field.setAccessible(true);
+      return (Unsafe) field.get(null);
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  private static long lookupFileDescriptorFdOffset() {
+    try {
+      return UNSAFE.objectFieldOffset(FileDescriptor.class.getDeclaredField("fd"));
+    } catch (NoSuchFieldException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  private static boolean tryNativeFdSave(MemorySegment docHandle, OutputStream out, int sourceFileVersion)
+      throws IOException {
+    if (!(out instanceof FileOutputStream fileOut)) {
+      return false;
+    }
+    MethodHandle saveToFd = NativeFdSave.SAVE_TO_FD;
+    if (saveToFd == null) {
+      return false;
+    }
+    int fd = UNSAFE.getInt(fileOut.getFD(), FILE_DESCRIPTOR_FD_OFFSET);
+    if (fd < 0) {
+      return false;
+    }
+    int useSaveWithVersion = sourceFileVersion > 0 ? 1 : 0;
+    try {
+      int status =
+          (int)
+              saveToFd.invokeExact(
+                  docHandle, fd, EditBindings.FPDF_NO_INCREMENTAL, sourceFileVersion, useSaveWithVersion);
+      if (status == 1) {
+        return true;
+      }
+      if (status < 0) {
+        throw new IOException("Native fd save failed with OS error " + (-status));
+      }
+      throw new IOException("Native fd save failed");
+    } catch (IOException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to save document", t);
+    }
+  }
+
+  private static void copyNativeBytes(long sourceAddress, byte[] target, int byteCount) {
+    UNSAFE.copyMemory(null, sourceAddress, target, BYTE_ARRAY_BASE_OFFSET, byteCount);
+  }
+
+  private static final class NativeFdSave {
+    private static final MethodHandle SAVE_TO_FD = lookupSaveToFd();
+
+    private static MethodHandle lookupSaveToFd() {
+      SymbolLookup lookup = SymbolLookup.loaderLookup();
+      return lookup
+          .find("pdfium4j_save_to_fd")
+          .map(
+              address ->
+                  Linker.nativeLinker()
+                      .downcallHandle(
+                          address,
+                          FunctionDescriptor.of(
+                              JAVA_INT, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)))
+          .orElse(null);
+    }
+  }
+
+  private static final class NativeSaveContext {
+    private final MemorySegment fileWrite = NATIVE_SAVE_ARENA.allocate(EditBindings.FPDF_FILEWRITE_LAYOUT);
+    private final byte[] transferBuffer = new byte[8192];
+    private OutputStream out;
+    private IOException failure;
+
+    private NativeSaveContext() {
+      fileWrite.set(JAVA_INT, 0, 1);
+      fileWrite.set(ADDRESS, 8, WRITE_BLOCK_STUB);
+    }
+
+    private MemorySegment fileWrite() {
+      return fileWrite;
+    }
+
+    private void prepare(OutputStream out) {
+      this.out = out;
+      this.failure = null;
+    }
+
+    private void finish() {
+      this.out = null;
+      this.failure = null;
+    }
+
+    private boolean isActive() {
+      return out != null;
+    }
+
+    private IOException failure() {
+      return failure;
+    }
+
+    private int write(MemorySegment pData, long size) {
+      if (failure != null || FfmHelper.isNull(pData) || size <= 0) {
+        return failure == null ? 1 : 0;
+      }
+      long sourceAddress = pData.address();
+      long offset = 0;
+      long remaining = size;
+      try {
+        while (remaining > 0) {
+          int chunk = (int) Math.min(transferBuffer.length, remaining);
+          copyNativeBytes(sourceAddress + offset, transferBuffer, chunk);
+          out.write(transferBuffer, 0, chunk);
+          offset += chunk;
+          remaining -= chunk;
+        }
+        return 1;
+      } catch (IOException e) {
+        failure = e;
+        return 0;
+      }
+    }
   }
 
   private record TrailerInfo(ObjectRef rootRef, ObjectRef infoRef, int size, MemorySegment idSeg, ObjectRef encryptRef, ObjectRef pagesRef) {}
@@ -795,29 +1090,101 @@ final class PdfSaver {
       long prevXrefOffset,
       long xrefOffset)
       throws IOException {
-    StringBuilder trailerSb = new StringBuilder(256);
-    trailerSb.append("trailer\n<< /Size ").append(nextObj);
-    trailerSb.append(" /Root ").append(trailer.rootRef());
+      RepairResult result = REPAIR_RESULT.get();
+      result.rootNum = trailer.rootRef().num();
+      result.infoNum = trailer.infoRef() != null ? trailer.infoRef().num() : -1;
+      result.encryptNum = trailer.encryptRef() != null ? trailer.encryptRef().num() : -1;
+      result.pagesNum = trailer.pagesRef() != null ? trailer.pagesRef().num() : -1;
+      result.idSeg = trailer.idSeg();
+      writeTrailerPrimitives(update, result, infoObjNum, nextObj, prevXrefOffset, xrefOffset);
+  }
+
+  private static void writeTrailerPrimitives(
+      OutputStream update,
+      RepairResult result,
+      int infoObjNum,
+      int nextObj,
+      long prevXrefOffset,
+      long xrefOffset)
+      throws IOException {
+    update.write(TRAILER_START);
+    
+    byte[] intBuf = REPAIR_INT_BUF.get();
+    int len = formatInt(intBuf, nextObj);
+    update.write(intBuf, intBuf.length - len, len);
+    
+    update.write(ROOT_KEY_BYTES);
+    writeRefNum(update, result.rootNum, 0);
+    
     if (infoObjNum > 0) {
-      trailerSb.append(" /Info ").append(infoObjNum).append(" 0 R");
-    } else if (trailer.infoRef() != null) {
-      trailerSb.append(" /Info ").append(trailer.infoRef());
+      update.write(INFO_KEY_BYTES);
+      len = formatInt(intBuf, infoObjNum);
+      update.write(intBuf, intBuf.length - len, len);
+      update.write(ZERO_R);
+    } else if (result.infoNum > 0) {
+      update.write(INFO_KEY_BYTES);
+      writeRefNum(update, result.infoNum, 0);
     }
-    if (trailer.idSeg() != null) {
-      trailerSb.append(" /ID ");
-      long idLen = trailer.idSeg().byteSize();
+    
+    if (result.idSeg != null) {
+      update.write(ID_KEY_BYTES);
+      long idLen = result.idSeg.byteSize();
       for (long i = 0; i < idLen; i++) {
-          trailerSb.append((char) trailer.idSeg().get(JAVA_BYTE, i));
+          update.write(result.idSeg.get(JAVA_BYTE, i));
       }
     }
-    if (trailer.encryptRef() != null) {
-        trailerSb.append(" /Encrypt ").append(trailer.encryptRef());
+    
+    if (result.encryptNum > 0) {
+        update.write(ENCRYPT_KEY_BYTES);
+        writeRefNum(update, result.encryptNum, 0);
     }
+    
     if (prevXrefOffset > 0) {
-      trailerSb.append(" /Prev ").append(prevXrefOffset);
+      update.write(PREV_KEY_BYTES);
+      writeLong(update, prevXrefOffset);
     }
-    trailerSb.append(" >>\nstartxref\n").append(xrefOffset).append("\n%%EOF\n");
-    update.write(trailerSb.toString().getBytes(StandardCharsets.ISO_8859_1));
+    
+    update.write(STARTXREF_MARKER);
+    writeLong(update, xrefOffset);
+    update.write(EOF_MARKER);
+  }
+
+  private static void writeRefNum(OutputStream out, int num, int gen) throws IOException {
+      byte[] intBuf = REPAIR_INT_BUF.get();
+      int len = formatInt(intBuf, num);
+      out.write(intBuf, intBuf.length - len, len);
+      out.write(' ');
+      len = formatInt(intBuf, gen);
+      out.write(intBuf, intBuf.length - len, len);
+      out.write(R_REF_SUFFIX);
+  }
+
+  private static void writeLong(OutputStream out, long value) throws IOException {
+      byte[] buf = REPAIR_INT_BUF.get(); // REPAIR_INT_BUF is 11 bytes, but long needs up to 20.
+      // Wait, let's use a bigger buffer or a dedicated long buffer.
+      // Actually, I'll use IO_BUFFER for temporary formatting if needed, or just a 20 byte buffer.
+      byte[] longBuf = REPAIR_ENTRY_BUF.get(); // 20 bytes
+      int pos = longBuf.length;
+      if (value == 0) {
+          out.write('0');
+          return;
+      }
+      long temp = value;
+      while (temp > 0) {
+          longBuf[--pos] = (byte) ('0' + (temp % 10));
+          temp /= 10;
+      }
+      out.write(longBuf, pos, longBuf.length - pos);
+  }
+
+  private static void writeRef(OutputStream out, ObjectRef ref) throws IOException {
+      byte[] intBuf = REPAIR_INT_BUF.get();
+      int len = formatInt(intBuf, ref.num());
+      out.write(intBuf, intBuf.length - len, len);
+      out.write(' ');
+      len = formatInt(intBuf, ref.gen());
+      out.write(intBuf, intBuf.length - len, len);
+      out.write(R_REF_SUFFIX);
   }
 
 
@@ -1769,6 +2136,39 @@ final class PdfSaver {
   }
 
   @CheckForNull
+  private static int parseObjectHeaderNum(MemorySegment seg, long objKeywordPos) {
+    long genEnd = objKeywordPos;
+    while (genEnd > 0 && isAsciiWhitespace(seg, genEnd - 1)) {
+      genEnd--;
+    }
+    long genStart = genEnd;
+    while (genStart > 0 && isAsciiDigit(seg, genStart - 1)) {
+      genStart--;
+    }
+    if (genStart == genEnd) {
+      return -1;
+    }
+
+    long separatorEnd = genStart;
+    while (separatorEnd > 0 && isAsciiWhitespace(seg, separatorEnd - 1)) {
+      separatorEnd--;
+    }
+    if (separatorEnd == genStart) {
+      return -1;
+    }
+
+    long objEnd = separatorEnd;
+    long objStart = objEnd;
+    while (objStart > 0 && isAsciiDigit(seg, objStart - 1)) {
+      objStart--;
+    }
+    if (objStart == objEnd || !isAtLineBoundary(seg, objStart)) {
+      return -1;
+    }
+
+    return parsePositiveInt(seg, objStart, objEnd);
+  }
+
   private static ObjectRef parseObjectHeaderRef(MemorySegment seg, long objKeywordPos) {
     long keywordEnd = objKeywordPos + OBJ_KEYWORD.length;
     if (!matchesBytesAt(seg, objKeywordPos, OBJ_KEYWORD)
@@ -1948,6 +2348,29 @@ final class PdfSaver {
   }
 
   @CheckForNull
+  private static int parseObjectRefNum(MemorySegment seg, long pos, long limit) {
+    long numStart = skipAsciiWhitespace(seg, pos, limit);
+    if (numStart >= limit) return -1;
+    long numEnd = numStart;
+    while (numEnd < limit && isAsciiDigit(seg, numEnd)) {
+      numEnd++;
+    }
+    if (numStart == numEnd) return -1;
+
+    long genStart = skipAsciiWhitespace(seg, numEnd, limit);
+    if (genStart >= limit) return -1;
+    long genEnd = genStart;
+    while (genEnd < limit && isAsciiDigit(seg, genEnd)) {
+      genEnd++;
+    }
+    if (genStart == genEnd) return -1;
+
+    long rStart = skipAsciiWhitespace(seg, genEnd, limit);
+    if (rStart >= limit || seg.get(JAVA_BYTE, rStart) != 'R') return -1;
+
+    return parsePositiveInt(seg, numStart, numEnd);
+  }
+
   private static ObjectRef parseObjectRef(MemorySegment seg, long from, long endExclusive) {
     long n1Start = skipAsciiWhitespace(seg, from, endExclusive);
     long n1End = scanDigits(seg, n1Start, endExclusive);
@@ -2348,8 +2771,7 @@ final class PdfSaver {
   private static void writeSegment(MemorySegment seg, OutputStream out) throws IOException {
     long size = seg.byteSize();
     long pos = 0;
-    // Short-lived local allocation; generational GC reclaims it after this method returns.
-    byte[] buf = new byte[65536];
+    byte[] buf = IO_BUFFER.get();
     while (pos < size) {
       int len = (int) Math.min(buf.length, size - pos);
       MemorySegment.copy(seg, JAVA_BYTE, pos, buf, 0, len);

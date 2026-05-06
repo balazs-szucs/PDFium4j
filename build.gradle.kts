@@ -130,6 +130,10 @@ tasks.withType<Test> {
     }
 }
 
+tasks.named<Test>("test") {
+    exclude("**/*AllocationTest.class")
+}
+
 tasks.withType<Javadoc> {
     (options as StandardJavadocDocletOptions).apply {
         addBooleanOption("-enable-preview", true)
@@ -261,7 +265,7 @@ tasks.named("check") {
 // Exclude stale empty natives dirs from src/main/resources (if present)
 tasks.processResources { exclude("natives/**") }
 
-val pdfiumVersion = findProperty("pdfiumVersion")?.toString() ?: "7749"
+val pdfiumVersion = findProperty("pdfiumVersion")?.toString() ?: "7825"
 
 val pdfiumPlatforms = mapOf(
     "linux-x64"        to "linux-x64",
@@ -284,6 +288,23 @@ val activePlatforms = if (platformFilter != null) {
 
 val pdfiumArchiveDir = layout.buildDirectory.dir("pdfium-archives")
 val pdfiumNativesDir = layout.buildDirectory.dir("generated-natives")
+
+val hostOs = System.getProperty("os.name").lowercase()
+val hostArch = System.getProperty("os.arch").lowercase()
+val hostPlatform = when {
+    hostOs.contains("mac") && (hostArch == "aarch64" || hostArch == "arm64") -> "darwin-arm64"
+    hostOs.contains("mac") && (hostArch == "x86_64" || hostArch == "amd64") -> "darwin-x64"
+    hostOs.contains("linux") && (hostArch == "aarch64" || hostArch == "arm64") -> "linux-arm64"
+    hostOs.contains("linux") && (hostArch == "x86_64" || hostArch == "amd64") -> "linux-x64"
+    else -> null
+}
+
+fun nativeSaveHelperFileName(platform: String): String = when {
+    platform.startsWith("darwin") -> "libpdfium4j_save_helper.dylib"
+    platform.startsWith("linux") -> "libpdfium4j_save_helper.so"
+    platform.startsWith("windows") -> "pdfium4j_save_helper.dll"
+    else -> error("Unknown platform: $platform")
+}
 
 val downloadPdfiumBinaries by tasks.registering {
     description = "Downloads prebuilt PDFium binaries for all supported platforms"
@@ -343,6 +364,50 @@ val extractPdfiumBinaries by tasks.registering {
     }
 }
 
+val compileNativeSaveHelper by tasks.registering {
+    description = "Builds the optional native save helper for the current host platform"
+    dependsOn(extractPdfiumBinaries)
+    val helperSource = layout.projectDirectory.file("src/main/c/pdfium4j_save_helper.c")
+    onlyIf { hostPlatform != null && helperSource.asFile.exists() }
+    outputs.file(
+        pdfiumNativesDir.map { dir ->
+            dir.file("natives/${hostPlatform}/${nativeSaveHelperFileName(hostPlatform!!)}")
+        }
+    )
+    doLast {
+        val platform = hostPlatform ?: return@doLast
+        val platformDir = pdfiumNativesDir.get().asFile.resolve("natives/$platform")
+        platformDir.mkdirs()
+        val output = platformDir.resolve(nativeSaveHelperFileName(platform))
+        val source = helperSource.asFile.absolutePath
+        val command = when {
+            platform.startsWith("darwin") -> listOf(
+                "cc", "-O3", "-std=c11", "-dynamiclib", "-o", output.absolutePath, source
+            )
+            platform.startsWith("linux") -> listOf(
+                "cc", "-O3", "-std=c11", "-shared", "-fPIC", "-o", output.absolutePath, source, "-ldl"
+            )
+            else -> emptyList()
+        }
+        if (command.isEmpty()) {
+            return@doLast
+        }
+        val process = ProcessBuilder(command)
+            .directory(project.projectDir)
+            .inheritIO()
+            .start()
+        val exitCode = process.waitFor()
+        check(exitCode == 0) {
+            "Failed to build native save helper (exit code $exitCode)"
+        }
+        val indexFile = platformDir.resolve("native-libs.txt")
+        val libs = if (indexFile.exists()) indexFile.readLines().filter { it.isNotBlank() } else emptyList()
+        if (!libs.contains(output.name)) {
+            indexFile.writeText((libs + output.name).joinToString(separator = "\n", postfix = "\n"))
+        }
+    }
+}
+
 // Per-platform native JAR tasks, one classified JAR per supported OS/arch
 val nativeJarTasks = pdfiumPlatforms.keys.map { localName ->
     val sanitized = localName.split("-").joinToString("") { it.replaceFirstChar(Char::uppercase) }
@@ -366,6 +431,24 @@ dependencies {
     testImplementation("org.apache.pdfbox:xmpbox:3.0.7")
     testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.register<Test>("allocationTests") {
+    group = "verification"
+    description = "Runs allocation assertions for native save hot paths"
+    useJUnitPlatform()
+    dependsOn("compileNativeSaveHelper")
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath + files(layout.buildDirectory.dir("generated-natives"))
+    include("**/*AllocationTest.class")
+    jvmArgs(
+        "--enable-preview",
+        "--enable-native-access=ALL-UNNAMED"
+    )
+}
+
+tasks.withType<Test>().configureEach {
+    dependsOn(compileNativeSaveHelper)
 }
 
 // -- Maven Central publishing --
