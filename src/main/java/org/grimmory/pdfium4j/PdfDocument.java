@@ -64,13 +64,6 @@ import org.grimmory.pdfium4j.model.XmpMetadata;
 
 /**
  * Represents an open PDF document backed by native PDFium.
- *
- * <p><strong>Streaming:</strong> This implementation uses a true streaming approach. Documents can
- * be opened from {@link Path}, {@link SeekableByteChannel}, or {@link InputStream}. Memory usage is
- * minimized by using native callbacks ({@code FPDF_FILEACCESS}) for data retrieval.
- *
- * <p><strong>Thread Safety:</strong> Instances must be accessed only from the thread that opened
- * them.
  */
 public final class PdfDocument implements AutoCloseable {
   private static final Logger LOGGER = Logger.getLogger(PdfDocument.class.getName());
@@ -147,27 +140,27 @@ public final class PdfDocument implements AutoCloseable {
         throw new IllegalArgumentException("output must have length >= 3");
       }
       PdfiumLibrary.ensureInitialized();
-      long doc = 0L;
+      MemorySegment doc = MemorySegment.NULL;
       try {
-        doc = (long) ViewBindings.FPDF_LoadDocument_Raw.invokeExact(pathSeg, passwordSeg);
-        if (doc == 0L) {
+        doc = (MemorySegment) ViewBindings.FPDF_LoadDocument.invokeExact(pathSeg, passwordSeg);
+        if (FfmHelper.isNull(doc)) {
           int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
           throw mapOpenError("Failed to probe document: " + pathLabel, err);
         }
-        output[0] = (int) ViewBindings.FPDF_GetPageCount_Raw.invokeExact(doc);
+        output[0] = (int) ViewBindings.FPDF_GetPageCount.invokeExact(doc);
         output[1] =
-            ViewBindings.FPDF_DocumentHasValidCrossReferenceTable_Raw == null
+            ViewBindings.FPDF_DocumentHasValidCrossReferenceTable == null
                 ? 1
-                : (int) ViewBindings.FPDF_DocumentHasValidCrossReferenceTable_Raw.invokeExact(doc);
+                : (int) ViewBindings.FPDF_DocumentHasValidCrossReferenceTable.invokeExact(doc);
         output[2] = readTrailerEndsInto(doc, trailerBuffer);
       } catch (PdfiumException e) {
         throw e;
       } catch (Throwable t) {
         throw new PdfiumException("Failed to inspect document without allocations", t);
       } finally {
-        if (doc != 0L) {
+        if (!FfmHelper.isNull(doc)) {
           try {
-            ViewBindings.FPDF_CloseDocument_Raw.invokeExact(doc);
+            ViewBindings.FPDF_CloseDocument.invokeExact(doc);
           } catch (Throwable closeError) {
             PdfiumLibrary.ignore(closeError);
           }
@@ -374,7 +367,7 @@ public final class PdfDocument implements AutoCloseable {
       MemorySegment memSeg = arena.allocate(data.length);
       memSeg.copyFrom(MemorySegment.ofArray(data));
       
-      PdfDocument pdfDoc = open(memSeg, password, resolvedPolicy, arena);
+      PdfDocument pdfDoc = open(memSeg, password, resolvedPolicy, arena, data);
       
       if (resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER && !pdfDoc.hasValidCrossReferenceTable()) {
           pdfDoc.close();
@@ -392,10 +385,10 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   static PdfDocument open(MemorySegment segment, String password, PdfProcessingPolicy policy) {
-      return open(segment, password, policy, Arena.ofShared());
+      return open(segment, password, policy, Arena.ofShared(), null);
   }
 
-  private static PdfDocument open(MemorySegment segment, String password, PdfProcessingPolicy policy, Arena arena) {
+  private static PdfDocument open(MemorySegment segment, String password, PdfProcessingPolicy policy, Arena arena, byte[] sourceBytes) {
     PdfProcessingPolicy resolvedPolicy = policy != null ? policy : PdfProcessingPolicy.defaultPolicy();
     try {
       MemorySegment pwdSeg = password == null ? MemorySegment.NULL : arena.allocateFrom(password);
@@ -417,7 +410,7 @@ public final class PdfDocument implements AutoCloseable {
           0L,
           null,
           null,
-          null,
+          sourceBytes,
           resolvedPolicy,
           readFileVersion(docHandle),
           Thread.currentThread());
@@ -1390,13 +1383,13 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   public void save(OutputStream out) {
-    save(out, false);
+    save(out, true);
   }
 
   private void save(OutputStream out, boolean allowIncrementalOutput) {
     ensureOpen();
     try {
-      if (pendingXmp == null) {
+      if (pendingXmp == null && pendingMetadata.isEmpty() && !structurallyModified) {
         PdfSaver.saveNativeFullRewrite(handle, out, sourceFileVersion);
       } else {
         PdfSaver.SaveParams params =
@@ -1848,8 +1841,8 @@ public final class PdfDocument implements AutoCloseable {
     return needed;
   }
 
-  private static int readTrailerEndsInto(long doc, MemorySegment trailerBuffer) throws Throwable {
-    if (ViewBindings.FPDF_GetTrailerEnds_Raw == null
+  private static int readTrailerEndsInto(MemorySegment doc, MemorySegment trailerBuffer) throws Throwable {
+    if (ViewBindings.FPDF_GetTrailerEnds == null
         || trailerBuffer == null
         || FfmHelper.isNull(trailerBuffer)) {
       return 0;
@@ -1859,7 +1852,7 @@ public final class PdfDocument implements AutoCloseable {
       return 0;
     }
     long written =
-        (long) ViewBindings.FPDF_GetTrailerEnds_Raw.invokeExact(doc, trailerBuffer, capacity);
+        (long) ViewBindings.FPDF_GetTrailerEnds.invokeExact(doc, trailerBuffer, capacity);
     if (written <= 0) {
       return 0;
     }

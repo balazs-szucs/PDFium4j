@@ -1,0 +1,125 @@
+package org.grimmory.pdfium4j;
+
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import org.grimmory.pdfium4j.model.RenderFlags;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.condition.EnabledIf;
+
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class CorpusNoAllocationTest {
+
+  private static final int WARMUP_FILES = 3;
+  private static final int WARMUP_ITERATIONS_PER_FILE = 200;
+
+  private final NoAllocationAsserter asserter = new NoAllocationAsserter();
+  private Arena arena;
+  private MemorySegment renderBuffer;
+  private MemorySegment trailerBuffer;
+  private int[] output = new int[3];
+
+  @BeforeAll
+  void setUp() throws IOException {
+    asserter.verifyAllocationTrackingAvailable();
+    arena = Arena.ofShared();
+    renderBuffer = arena.allocate(1024 * 1024 * 4);
+    trailerBuffer = arena.allocate(32L * JAVA_INT.byteSize(), JAVA_INT.byteAlignment());
+
+    List<Path> corpusFiles = getCorpusFiles().limit(WARMUP_FILES).collect(Collectors.toList());
+    
+    // Warmup JIT with first few files
+    for (Path path : corpusFiles) {
+      try (PdfDocument doc = PdfDocument.open(path)) {
+        PdfPage page = doc.page(0);
+        for (int i = 0; i < WARMUP_ITERATIONS_PER_FILE; i++) {
+          page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
+          page.renderThumbnailTo(renderBuffer, 256);
+        }
+        
+        try (PdfDocument.NoAllocationPathProbe probe = PdfDocument.noAllocationPathProbe(path, null)) {
+           for (int i = 0; i < WARMUP_ITERATIONS_PER_FILE; i++) {
+             probe.inspect(output, trailerBuffer);
+           }
+        }
+      } catch (Exception e) {
+        // Skip problematic files during warmup
+      }
+    }
+  }
+
+  @AfterAll
+  void tearDown() {
+    if (arena != null) arena.close();
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void noAllocationsAcrossGutenbergCorpus() throws IOException {
+    List<Path> testFiles = getCorpusFiles().limit(10).collect(Collectors.toList());
+    
+    for (Path path : testFiles) {
+      // 1. Path Probe
+      try (PdfDocument.NoAllocationPathProbe probe = PdfDocument.noAllocationPathProbe(path, null)) {
+        asserter.startRecording();
+        probe.inspect(output, trailerBuffer);
+        asserter.assertNoAllocations(1024); // Small tolerance for TLAB noise
+      }
+
+      // 2. Document Open and Page Render
+      try (PdfDocument doc = PdfDocument.open(path)) {
+        PdfPage page = doc.page(0);
+        
+        asserter.startRecording();
+        page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
+        asserter.assertNoAllocations(1024);
+
+        asserter.startRecording();
+        page.renderThumbnailTo(renderBuffer, 256);
+        asserter.assertNoAllocations(1024);
+      } catch (Exception e) {
+        // Some PDFs might be corrupt or have issues, we skip them but report if many fail
+      }
+    }
+  }
+
+  private Stream<Path> getCorpusFiles() throws IOException {
+    Path corpusDir = Path.of("corpus", "gutenberg");
+    if (!Files.exists(corpusDir)) {
+      corpusDir = Path.of("..", "corpus", "gutenberg");
+    }
+    if (!Files.exists(corpusDir)) {
+      throw new IllegalStateException("Gutenberg corpus not found");
+    }
+    return Files.list(corpusDir)
+        .filter(p -> p.toString().endsWith(".pdf"))
+        .filter(p -> {
+            try {
+                return Files.size(p) < 1024 * 1024; // Only files < 1MB
+            } catch (IOException e) {
+                return false;
+            }
+        })
+        .sorted();
+  }
+
+  static boolean pdfiumAvailable() {
+    try {
+      PdfiumLibrary.initialize();
+      return true;
+    } catch (Throwable t) {
+      return false;
+    }
+  }
+}

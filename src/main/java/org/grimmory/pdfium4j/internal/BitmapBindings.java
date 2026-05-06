@@ -52,13 +52,13 @@ public final class BitmapBindings {
   public static final MethodHandle FPDFBitmap_CreateEx =
       downcall(
           "FPDFBitmap_CreateEx",
-          FunctionDescriptor.of(JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_INT));
+          FunctionDescriptor.of(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT));
 
   /** Fill a rectangle in the bitmap. color is 0xAARRGGBB. */
   public static final MethodHandle FPDFBitmap_FillRect =
       downcall(
           "FPDFBitmap_FillRect",
-          FunctionDescriptor.ofVoid(JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+          FunctionDescriptor.ofVoid(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
 
   /** Get pointer to first scanline of pixel data. */
   public static final MethodHandle FPDFBitmap_GetBuffer =
@@ -78,5 +78,5 @@ public final class BitmapBindings {
 
   /** Destroy a bitmap and free its buffer (unless externally allocated). */
   public static final MethodHandle FPDFBitmap_Destroy =
-      downcallCritical("FPDFBitmap_Destroy", FunctionDescriptor.ofVoid(JAVA_LONG));
+      downcallCritical("FPDFBitmap_Destroy", FunctionDescriptor.ofVoid(ADDRESS));
 }

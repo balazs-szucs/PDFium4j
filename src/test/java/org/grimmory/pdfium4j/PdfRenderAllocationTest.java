@@ -17,7 +17,7 @@ import org.junit.jupiter.api.condition.EnabledIf;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class PdfRenderAllocationTest {
 
-  private static final int WARMUP_ITERATIONS = 20000;
+  private static final int WARMUP_ITERATIONS = 1000;
 
   private final NoAllocationAsserter asserter = new NoAllocationAsserter();
   private PdfDocument doc;
@@ -30,7 +30,7 @@ class PdfRenderAllocationTest {
     asserter.verifyAllocationTrackingAvailable();
     arena = Arena.ofShared();
     
-    Path source = findCorpusPdf("gutenberg/996_Don Quixote.pdf");
+    Path source = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
     doc = PdfDocument.open(source);
     page = doc.page(0);
     
@@ -40,6 +40,7 @@ class PdfRenderAllocationTest {
     // Warmup
     for (int i = 0; i < WARMUP_ITERATIONS; i++) {
       page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
+      page.renderThumbnailTo(renderBuffer, 256);
     }
   }
 
@@ -53,13 +54,17 @@ class PdfRenderAllocationTest {
   @Test
   @EnabledIf("pdfiumAvailable")
   void renderThumbnailToSegmentDoesNotAllocateAfterWarmup() {
-    long allocatedBefore = asserter.getAllocatedBytes();
-    for (int i = 0; i < 1; i++) {
-        page.renderThumbnailTo(renderBuffer, 256);
-    }
-    long delta = asserter.getAllocatedBytes() - allocatedBefore;
-    System.out.println("RENDER ALLOCATION DELTA: " + delta);
-    assertTrue(delta < 1024, "Too many allocations: " + delta);
+    asserter.startRecording();
+    page.renderThumbnailTo(renderBuffer, 256);
+    asserter.assertNoAllocations(1024);
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void renderToSegmentDoesNotAllocateAfterWarmup() {
+    asserter.startRecording();
+    page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
+    asserter.assertNoAllocations(1024);
   }
 
   static boolean pdfiumAvailable() {

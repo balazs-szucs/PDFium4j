@@ -35,23 +35,9 @@ import org.grimmory.pdfium4j.model.TextCharInfo;
 
 /**
  * Represents an open page within a {@link PdfDocument}.
- *
- * <p><strong>Thread safety:</strong> Confined to the thread that opened it. Must be closed after
- * use to release native resources.
- *
- * <pre>{@code
- * try (var page = doc.page(0)) {
- *     PageSize size = page.size();
- *     RenderResult result = page.render(300);
- *     BufferedImage image = result.toBufferedImage();
- *     String text = page.extractText();
- *     int rotation = page.rotation();
- * }
- * }</pre>
  */
 public final class PdfPage implements AutoCloseable {
 
-  private static final int THUMBNAIL_FLAGS = 0x10; // RenderFlags.THUMBNAIL.value()
   private static final int OPAQUE_WHITE = 0xFFFFFFFF;
   private static final int BYTES_PER_PIXEL = 4; // RGBA
   private static final int UNICODE_BOM = 0xFFFE;
@@ -96,62 +82,25 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Render this page at the given DPI with default flags (annotations, anti-aliasing).
-   *
-   * @param dpi render resolution (e.g. 150 for thumbnails, 300 for high quality)
-   * @return rendered pixel data
-   */
   public RenderResult render(int dpi) {
     return render(dpi, RenderFlags.DEFAULT);
   }
 
-  /**
-   * Render this page at the given DPI with custom flags.
-   *
-   * @param dpi render resolution
-   * @param flags rendering flags controlling quality and features
-   * @return rendered pixel data
-   */
   public RenderResult render(int dpi, RenderFlags flags) {
     return render(dpi, flags, OPAQUE_WHITE);
   }
 
-  /**
-   * Render this page at the given DPI with custom flags and background color.
-   *
-   * @param dpi render resolution
-   * @param flags rendering flags
-   * @param background background color as 0xAARRGGBB
-   * @return rendered pixel data
-   */
   public RenderResult render(int dpi, RenderFlags flags, int background) {
     ensureOpen();
-
     PageSize size = size();
     int w = size.widthPixels(dpi);
     int h = size.heightPixels(dpi);
-
     if (w <= 0 || h <= 0) {
       return new RenderResult(1, 1, new byte[4]);
     }
-
     return renderAtSize(w, h, flags, background);
   }
   
-  /**
-   * Render this page directly into a pre-allocated native memory segment.
-   * This is the most performant way to render, as it avoids all Java heap allocations
-   * for pixel data.
-   *
-   * @param dest destination memory segment. Must be at least {@code stride * h} bytes.
-   * @param w width in pixels
-   * @param h height in pixels
-   * @param stride number of bytes per scanline (typically {@code w * 4})
-   * @param flags rendering flags
-   * @param background background color as 0xAARRGGBB
-   * @throws IllegalArgumentException if the destination segment is too small
-   */
   public void renderTo(MemorySegment dest, int w, int h, int stride, int flags, int background) {
     ensureOpen();
     if (w <= 0 || h <= 0) return;
@@ -163,10 +112,10 @@ public final class PdfPage implements AutoCloseable {
               .formatted(requiredSize, dest.byteSize()));
     }
 
-    long bitmap = 0;
+    MemorySegment bitmap = MemorySegment.NULL;
     try {
       // BGRA format = 4
-      bitmap = (long) BitmapBindings.FPDFBitmap_CreateEx.invokeExact(w, h, 4, dest.address(), stride);
+      bitmap = (MemorySegment) BitmapBindings.FPDFBitmap_CreateEx.invokeExact(w, h, 4, dest, stride);
       if (FfmHelper.isNull(bitmap)) {
         throw new PdfiumRenderException("FPDFBitmap_CreateEx failed");
       }
@@ -174,7 +123,7 @@ public final class PdfPage implements AutoCloseable {
       BitmapBindings.FPDFBitmap_FillRect.invokeExact(
           bitmap, 0, 0, w, h, (long) (background & 0xFFFFFFFFL));
 
-      ViewBindings.FPDF_RenderPageBitmap.invokeExact(bitmap, handle.address(), 0, 0, w, h, 0, flags);
+      ViewBindings.FPDF_RenderPageBitmap.invokeExact(bitmap, handle, 0, 0, w, h, 0, flags);
     } catch (Throwable t) {
       throw new PdfiumRenderException("Failed to render page to segment", t);
     } finally {
@@ -188,11 +137,6 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Extract all text content from this page.
-   *
-   * @return the page text, or empty string if no text content
-   */
   public String extractText() {
     try (var _ = ScratchBuffer.acquireScope()) {
       return withTextPage(
@@ -219,11 +163,6 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Get the number of characters on this page.
-   *
-   * @return character count, or 0 if no text
-   */
   public int charCount() {
     return withTextPage(
         "Failed to count characters",
@@ -233,11 +172,6 @@ public final class PdfPage implements AutoCloseable {
         });
   }
 
-  /**
-   * Get the page rotation in degrees.
-   *
-   * @return rotation in degrees: 0, 90, 180, or 270
-   */
   public int rotation() {
     ensureOpen();
     try {
@@ -253,12 +187,6 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Set the page rotation. The document must be saved for the change to persist.
-   *
-   * @param degrees rotation in degrees: 0, 90, 180, or 270
-   * @throws IllegalArgumentException if degrees is not 0, 90, 180, or 270
-   */
   public void setRotation(int degrees) {
     ensureOpen();
     int rot =
@@ -279,33 +207,10 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Render this page at the given DPI, but constrained so the output fits within the specified
-   * pixel bounds. Useful for thumbnails and previews where you want to limit memory usage
-   * regardless of the page's physical dimensions.
-   *
-   * <p>The page aspect ratio is always preserved. The actual output dimensions will be at most
-   * {@code maxWidth \u00d7 maxHeight}, but may be smaller.
-   *
-   * @param dpi base render resolution
-   * @param maxWidth maximum output width in pixels
-   * @param maxHeight maximum output height in pixels
-   * @return rendered pixel data fitting within the bounds
-   */
   public RenderResult renderBounded(int dpi, int maxWidth, int maxHeight) {
     return renderBounded(dpi, maxWidth, maxHeight, RenderFlags.DEFAULT);
   }
 
-  /**
-   * Render this page at the given DPI, constrained to fit within the specified pixel bounds, with
-   * custom render flags.
-   *
-   * @param dpi base render resolution
-   * @param maxWidth maximum output width in pixels
-   * @param maxHeight maximum output height in pixels
-   * @param flags rendering flags
-   * @return rendered pixel data fitting within the bounds
-   */
   public RenderResult renderBounded(int dpi, int maxWidth, int maxHeight, RenderFlags flags) {
     ensureOpen();
     if (maxWidth <= 0 || maxHeight <= 0) {
@@ -333,29 +238,10 @@ public final class PdfPage implements AutoCloseable {
     return renderAtSize(w, h, flags, OPAQUE_WHITE);
   }
 
-  /**
-   * Render this page at the given DPI, but only if the resulting memory buffer does not exceed the
-   * specified byte limit.
-   *
-   * @param dpi render resolution
-   * @param maxMemoryBytes maximum memory in bytes for the pixel buffer (w * h * 4)
-   * @return rendered pixel data
-   * @throws PdfiumRenderException if the required memory exceeds the limit
-   */
   public RenderResult renderSafe(int dpi, long maxMemoryBytes) {
     return renderSafe(dpi, maxMemoryBytes, RenderFlags.DEFAULT);
   }
 
-  /**
-   * Render this page at the given DPI with custom flags, but only if the resulting memory buffer
-   * does not exceed the specified byte limit.
-   *
-   * @param dpi render resolution
-   * @param maxMemoryBytes maximum memory in bytes
-   * @param flags rendering flags
-   * @return rendered pixel data
-   * @throws PdfiumRenderException if the required memory exceeds the limit
-   */
   public RenderResult renderSafe(int dpi, long maxMemoryBytes, RenderFlags flags) {
     ensureOpen();
     PageSize size = size();
@@ -376,19 +262,11 @@ public final class PdfPage implements AutoCloseable {
     return renderAtSize(w, h, flags, OPAQUE_WHITE);
   }
 
-  /**
-   * Render a thumbnail of this page, fitting within a square of the given dimension. Uses the
-   * native PDFium thumbnail API if available, otherwise falls back to regular rendering.
-   *
-   * @param maxDimension maximum width or height in pixels
-   * @return rendered thumbnail
-   */
   public RenderResult renderThumbnail(int maxDimension) {
     if (maxDimension <= 0) {
       throw new IllegalArgumentException("maxDimension must be positive");
     }
 
-    // Phase 1: Try native thumbnail fast path (often embedded in the PDF)
     if (ThumbnailBindings.FPDFPage_GetThumbnailAsBitmap != null) {
         try {
             RenderResult nativeThumb = renderThumbnailNative(maxDimension);
@@ -400,30 +278,26 @@ public final class PdfPage implements AutoCloseable {
         }
     }
 
-    // Phase 2: Fallback to high-quality Skia rendering
     RenderFlags thumbnailFlags = RenderFlags.builder().annotations(false).antiAlias(true).build();
     return renderBounded(150, maxDimension, maxDimension, thumbnailFlags);
   }
 
-  /**
-   * Render a thumbnail or cover of this page into a pre-allocated segment.
-   * This is specifically optimized for high-performance batch processing (e.g. in grimmory).
-   *
-   * @param dest destination memory segment
-   * @param maxDimension maximum width or height in pixels
-   * @return actual dimensions rendered (width in lower 32 bits, height in upper 32 bits)
-   */
   public long renderThumbnailTo(MemorySegment dest, int maxDimension) {
       ensureOpen();
-      float naturalPtW, naturalPtH;
-      try {
-          long addr = handle.address();
-          // naturalPtW = (float) ViewBindings.FPDF_GetPageWidthF.invokeExact(addr);
-          // naturalPtH = (float) ViewBindings.FPDF_GetPageHeightF.invokeExact(addr);
-      } catch (Throwable t) {
-          throw new RuntimeException(t);
+      PageSize size = size();
+      int naturalW = (int) Math.ceil(size.width());
+      int naturalH = (int) Math.ceil(size.height());
+      
+      int w = naturalW;
+      int h = naturalH;
+      if (w > maxDimension || h > maxDimension) {
+          double scale = Math.min((double) maxDimension / w, (double) maxDimension / h);
+          w = Math.max(1, (int) Math.round(w * scale));
+          h = Math.max(1, (int) Math.round(h * scale));
       }
-      return 0;
+
+      renderTo(dest, w, h, w * 4, RenderFlags.DEFAULT.value(), OPAQUE_WHITE);
+      return ((long) h << 32) | (w & 0xFFFFFFFFL);
   }
 
   private RenderResult renderThumbnailNative(int maxDimension) throws Throwable {
@@ -435,9 +309,6 @@ public final class PdfPage implements AutoCloseable {
     try {
         int w = (int) BitmapBindings.FPDFBitmap_GetWidth.invokeExact(bitmap);
         int h = (int) BitmapBindings.FPDFBitmap_GetHeight.invokeExact(bitmap);
-        
-        // If native thumbnail is much larger/smaller than requested, we might still prefer regular render
-        // but for thumbnails usually we just take what's there.
         
         MemorySegment buffer = (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer.invokeExact(bitmap);
         int stride = (int) BitmapBindings.FPDFBitmap_GetStride.invokeExact(bitmap);
@@ -454,11 +325,10 @@ public final class PdfPage implements AutoCloseable {
         
         return new RenderResult(w, h, rgba);
     } finally {
-        // IMPORTANT: We do NOT destroy the bitmap returned by FPDFPage_GetThumbnailAsBitmap
+        // Bitmap returned by FPDFPage_GetThumbnailAsBitmap is owned by PDFium
     }
   }
 
-  /** Render this page at an exact pixel size (bypassing DPI calculation). */
   private RenderResult renderAtSize(int w, int h, RenderFlags flags, int background) {
     ensureOpen();
     ensureRenderBudget(w, h);
@@ -506,16 +376,6 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Extract text content with character-level bounding boxes and font sizes. Each character is
-   * returned as a {@link TextCharInfo} record containing its Unicode code point, bounding box in
-   * page coordinates, and font size.
-   *
-   * <p>This is useful for search hit highlighting, text reflow, and determining whether a page
-   * contains extractable text.
-   *
-   * @return list of character info records, or empty list if no text
-   */
   public List<TextCharInfo> extractTextWithBounds() {
     return withTextPage(
         "Failed to extract text with bounds",
@@ -559,31 +419,14 @@ public final class PdfPage implements AutoCloseable {
         });
   }
 
-  /**
-   * Check if this page has any extractable text content. This is a lightweight check that avoids
-   * loading all character data.
-   *
-   * @return true if the page has at least one extractable character
-   */
   public boolean hasText() {
     return charCount() > 0;
   }
 
-  /**
-   * Check if this page appears to be blank \u2014 no text and no embedded images. This is a
-   * lightweight heuristic useful for detecting filler pages in scanned books.
-   *
-   * @return true if the page has no extractable text and no embedded images
-   */
   public boolean isBlank() {
     return charCount() == 0 && imageCount() == 0;
   }
 
-  /**
-   * Get all annotations on this page.
-   *
-   * @return list of annotations, or empty list if none
-   */
   public List<PdfAnnotation> annotations() {
     ensureOpen();
     try (var _ = ScratchBuffer.acquireScope()) {
@@ -662,12 +505,6 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Detect and extract web links (URLs) found in the page text. This uses PDFium's text analysis to
-   * find URL patterns in the text content.
-   *
-   * @return list of detected web links, or empty list if none
-   */
   public List<PdfLink> webLinks() {
     try (var _ = ScratchBuffer.acquireScope()) {
       return withTextPage(
@@ -702,12 +539,6 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Get the number of image objects embedded on this page. This counts inline images and image
-   * XObjects, not rendered visuals.
-   *
-   * @return number of embedded images, or 0 if none
-   */
   public int imageCount() {
     ensureOpen();
     try {
@@ -730,12 +561,6 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
-  /**
-   * Get metadata about all embedded images on this page. This is a lightweight method that returns
-   * image dimensions and DPI without extracting pixel data.
-   *
-   * @return list of embedded image metadata, or empty list if none
-   */
   public List<EmbeddedImage> embeddedImages() {
     ensureOpen();
     try {
@@ -876,11 +701,6 @@ public final class PdfPage implements AutoCloseable {
     return StructureTreeReader.read(handle);
   }
 
-  /**
-   * Get the embedded thumbnail of this page, if available.
-   *
-   * @return optional rendered thumbnail
-   */
   public Optional<RenderResult> getThumbnail() {
     ensureOpen();
     if (ThumbnailBindings.FPDFPage_GetThumbnailAsBitmap == null) {

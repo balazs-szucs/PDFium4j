@@ -36,6 +36,7 @@ public final class PdfiumLibrary {
   public static void setRendererType(int type) {
     synchronized (LOCK) {
       if (initialized) {
+        if (rendererType == type) return;
         throw new IllegalStateException("Cannot change renderer type after initialization");
       }
       rendererType = type;
