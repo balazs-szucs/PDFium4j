@@ -35,8 +35,6 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.grimmory.pdfium4j.exception.PdfCorruptException;
 import org.grimmory.pdfium4j.exception.PdfPasswordException;
 import org.grimmory.pdfium4j.exception.PdfUnsupportedSecurityException;
@@ -77,24 +75,18 @@ public final class PdfDocument implements AutoCloseable {
 
   private static final MetadataTag[] METADATA_TAGS = MetadataTag.values();
 
-  private static final Pattern STATIC_INFO_PATTERN =
-      Pattern.compile("/Info\\s+(\\d+)\\s+(\\d+)\\s+R");
-
-  /**
-   * Matches /Key (literal value) – does not handle escaped parens in value, adequate for standard
-   * Info dict.
-   */
-  private static final Pattern INFO_DICT_LITERAL_PATTERN =
-      Pattern.compile("/(\\w+)\\s+\\(([^)\\\\]*)\\)");
-
-  /** Matches /Key <hexvalue>. */
-  private static final Pattern INFO_DICT_HEX_PATTERN =
-      Pattern.compile("/(\\w+)\\s+<([A-Fa-f0-9]*)>");
-
   private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
 
   // Tail window for fallback file scanning (Info/XMP are typically near trailer/xref).
-  private static final long FALLBACK_TAIL_SCAN_BYTES = 256L * 1024L;
+  private static final long FALLBACK_TAIL_SCAN_BYTES = 256L << 10;
+
+  private static final byte[] INFO_KEY = "/Info".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] OBJ_MARKER = " obj".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] DICT_START = "<<".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] DICT_END = ">>".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] XMP_START = "<?xpacket begin".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] XMP_END = "<?xpacket end".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] XMP_TERM = "?>".getBytes(StandardCharsets.ISO_8859_1);
 
   private final MemorySegment handle;
   private final Arena docArena;
@@ -219,10 +211,42 @@ public final class PdfDocument implements AutoCloseable {
                 + ")",
             null);
       }
-      SeekableByteChannel channel = Files.newByteChannel(path, StandardOpenOption.READ);
-      return openFromChannel(channel, path, null, password, path.toString(), resolvedPolicy);
+      try {
+        SeekableByteChannel channel = Files.newByteChannel(path, StandardOpenOption.READ);
+        return openFromChannel(channel, path, null, password, path.toString(), resolvedPolicy);
+      } catch (PdfCorruptException e) {
+        if (resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER) {
+          return openWithRepair(path, password, resolvedPolicy);
+        }
+        throw e;
+      }
     } catch (IOException e) {
       throw new PdfiumException("Failed to open file: " + path, e);
+    }
+  }
+
+  private static PdfDocument openWithRepair(Path path, String password, PdfProcessingPolicy policy) {
+    Path temp = null;
+    try {
+      temp = IoUtils.createTempFile("pdfium4j-autorepair-", ".pdf");
+      try (OutputStream out = Files.newOutputStream(temp)) {
+        PdfSaver.repair(path, out);
+      }
+      // Re-open repaired file in STRICT mode to avoid infinite loops
+      PdfProcessingPolicy strictPolicy = new PdfProcessingPolicy(
+          PdfProcessingPolicy.Mode.STRICT,
+          policy.maxDocumentBytes(),
+          policy.maxRenderPixels(),
+          policy.maxParallelRenderThreads(),
+          policy.fileBackedThreshold()
+      );
+      return open(temp, password, strictPolicy);
+    } catch (Exception e) {
+      throw new PdfCorruptException("Automatic repair failed for " + path, PdfErrorCode.FORMAT, "open", path.toString(), e);
+    } finally {
+      // Note: we can't delete 'temp' yet if it's being used by openFromChannel as sourcePath
+      // unless openFromChannel makes a copy or we manage lifecycle carefully.
+      // In PdfDocument, CleanupState handles tempFile deletion if passed to constructor.
     }
   }
 
@@ -252,6 +276,10 @@ public final class PdfDocument implements AutoCloseable {
           (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(seg, data.length, pwdSeg);
       if (FfmHelper.isNull(doc)) {
         int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
+        if (err == ViewBindings.FPDF_ERR_FORMAT && resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER) {
+            byte[] repaired = PdfSaver.repair(data);
+            return open(repaired, password, resolvedPolicy.withMode(PdfProcessingPolicy.Mode.STRICT));
+        }
         arena.close();
         throw mapOpenError("Failed to open document from bytes", err);
       }
@@ -581,52 +609,117 @@ public final class PdfDocument implements AutoCloseable {
     long size = pdf.byteSize();
     long tailLen = Math.min(size, 4096);
     if (tailLen == 0) return Map.of();
-    byte[] tailBytes = pdf.asSlice(size - tailLen, tailLen).toArray(JAVA_BYTE);
-    String tail = new String(tailBytes, StandardCharsets.ISO_8859_1);
 
-    Matcher m = STATIC_INFO_PATTERN.matcher(tail);
-    int objNum = -1;
-    int genNum = 0;
-    while (m.find()) {
-      objNum = Integer.parseInt(m.group(1));
-      genNum = Integer.parseInt(m.group(2));
-    }
-    if (objNum < 0) return Map.of();
+    long infoPos = findLastInfoKey(pdf);
+    if (infoPos < 0) return Map.of();
 
-    String dict = extractDictFromSegment(pdf, objNum, genNum);
-    if (dict == null) return Map.of();
-    return parseInfoDictAllFields(dict);
+    long valStart = skipAsciiWhitespace(pdf, infoPos + INFO_KEY.length, size);
+    long n1End = scanDigits(pdf, valStart, size);
+    if (n1End <= valStart) return Map.of();
+    long n2Start = skipAsciiWhitespace(pdf, n1End, size);
+    long n2End = scanDigits(pdf, n2Start, size);
+    if (n2End <= n2Start) return Map.of();
+
+    int objNum = parsePositiveInt(pdf, valStart, n1End);
+    int genNum = parsePositiveInt(pdf, n2Start, n2End);
+
+    return extractDictAndParseInfo(pdf, objNum, genNum);
   }
 
-  /** Parses all /Key (value) and /Key &lt;hex&gt; entries from an Info dictionary string. */
-  private static Map<String, String> parseInfoDictAllFields(String dict) {
-    Map<String, String> result = LinkedHashMap.newLinkedHashMap(16);
-    Matcher m = INFO_DICT_LITERAL_PATTERN.matcher(dict);
-    while (m.find()) {
-      result.put(m.group(1), m.group(2));
+  private static long findLastInfoKey(MemorySegment pdf) {
+    // Search in the last 1KB for the /Info key in a dictionary.
+    // The pattern is usually /Info \d+ \d+ R
+    long size = pdf.byteSize();
+    long start = Math.max(0, size - 4096);
+    byte[] infoMarker = "/Info".getBytes(StandardCharsets.ISO_8859_1);
+    long pos = size;
+    while (pos > start) {
+      pos = lastIndexOf(pdf, infoMarker, pos);
+      if (pos < 0 || pos < start) break;
+      
+      // Verify it's followed by a reference
+      long valStart = skipAsciiWhitespace(pdf, pos + infoMarker.length, size);
+      long n1End = scanDigits(pdf, valStart, size);
+      if (n1End > valStart) {
+          long n2Start = skipAsciiWhitespace(pdf, n1End, size);
+          long n2End = scanDigits(pdf, n2Start, size);
+          if (n2End > n2Start) {
+              long rPos = skipAsciiWhitespace(pdf, n2End, size);
+              if (rPos < size && pdf.get(JAVA_BYTE, rPos) == 'R') {
+                  return pos;
+              }
+          }
+      }
+      pos--;
     }
-    Matcher hexM = INFO_DICT_HEX_PATTERN.matcher(dict);
-    while (hexM.find()) {
-      String key = hexM.group(1);
-      if (!result.containsKey(key)) {
-        result.put(key, decodeHexPdfString(hexM.group(2)));
+    return -1;
+  }
+
+  private static Map<String, String> extractDictAndParseInfo(MemorySegment pdf, int objNum, int genNum) {
+    long pos = findObjectHeader(pdf, objNum, genNum);
+    if (pos < 0) return Map.of();
+
+    long dictStart = indexOf(pdf, DICT_START, pos);
+    if (dictStart < 0) return Map.of();
+
+    long dictEnd = findDictionaryEnd(pdf, dictStart);
+    if (dictEnd < 0) return Map.of();
+
+    Map<String, String> result = LinkedHashMap.newLinkedHashMap(16);
+    long scanPos = dictStart + DICT_START.length;
+    while (scanPos < dictEnd - 1) {
+      scanPos = skipAsciiWhitespace(pdf, scanPos, dictEnd);
+      if (scanPos >= dictEnd - 1) break;
+      if (pdf.get(JAVA_BYTE, scanPos) != '/') {
+        scanPos++;
+        continue;
+      }
+      long keyStart = scanPos + 1;
+      long keyEnd = keyStart;
+      while (keyEnd < dictEnd && !isPdfDelimiter(pdf.get(JAVA_BYTE, keyEnd))) keyEnd++;
+      if (keyEnd == keyStart) {
+          scanPos++;
+          continue;
+      }
+      String key = new String(pdf.asSlice(keyStart, keyEnd - keyStart).toArray(JAVA_BYTE), StandardCharsets.ISO_8859_1);
+      scanPos = skipAsciiWhitespace(pdf, keyEnd, dictEnd);
+      if (scanPos >= dictEnd) break;
+
+      byte valType = pdf.get(JAVA_BYTE, scanPos);
+      if (valType == '(') {
+        long valStart = scanPos + 1;
+        long valEnd = findClosingParen(pdf, valStart, dictEnd);
+        if (valEnd >= 0) {
+            result.put(key, new String(pdf.asSlice(valStart, valEnd - valStart).toArray(JAVA_BYTE), StandardCharsets.ISO_8859_1));
+            scanPos = valEnd + 1;
+        } else {
+            scanPos++;
+        }
+      } else if (valType == '<') {
+        long valStart = scanPos + 1;
+        long valEnd = indexOf(pdf, new byte[]{'>'}, valStart);
+        if (valEnd >= 0) {
+            String hex = new String(pdf.asSlice(valStart, valEnd - valStart).toArray(JAVA_BYTE), StandardCharsets.ISO_8859_1);
+            result.put(key, decodeHexPdfString(hex));
+            scanPos = valEnd + 1;
+        } else {
+            scanPos++;
+        }
+      } else {
+        scanPos++;
       }
     }
     return Collections.unmodifiableMap(result);
   }
 
-  @CheckForNull
-  private static String extractDictFromSegment(MemorySegment pdf, int objNum, int genNum) {
+  private static long findObjectHeader(MemorySegment pdf, int objNum, int genNum) {
     byte[] marker = (objNum + " " + genNum + " obj").getBytes(StandardCharsets.ISO_8859_1);
-    long pos = lastIndexOf(pdf, marker);
-    if (pos < 0) return null;
+    return lastIndexOf(pdf, marker);
+  }
 
-    byte[] dictStartMarker = "<<".getBytes(StandardCharsets.ISO_8859_1);
-    long dictStart = indexOf(pdf, dictStartMarker, pos);
-    if (dictStart < 0) return null;
-
+  private static long findDictionaryEnd(MemorySegment pdf, long start) {
     int depth = 0;
-    long curr = dictStart;
+    long curr = start;
     long size = pdf.byteSize();
     while (curr < size - 1) {
       byte b1 = pdf.get(JAVA_BYTE, curr);
@@ -636,22 +729,71 @@ public final class PdfDocument implements AutoCloseable {
         curr += 2;
       } else if (b1 == '>' && b2 == '>') {
         depth--;
-        if (depth == 0) {
-          byte[] dictBytes = pdf.asSlice(dictStart, curr + 2 - dictStart).toArray(JAVA_BYTE);
-          return new String(dictBytes, StandardCharsets.ISO_8859_1);
-        }
+        if (depth == 0) return curr + 2;
         curr += 2;
       } else {
         curr++;
       }
     }
-    return null;
+    return -1;
   }
 
+  private static long findClosingParen(MemorySegment pdf, long start, long limit) {
+    int depth = 1;
+    for (long i = start; i < limit; i++) {
+        byte b = pdf.get(JAVA_BYTE, i);
+        if (b == '(') depth++;
+        else if (b == ')') {
+            depth--;
+            if (depth == 0) return i;
+        } else if (b == '\\') {
+            i++; // skip escaped char
+        }
+    }
+    return -1;
+  }
+
+  private static boolean isPdfDelimiter(byte b) {
+    return b == '(' || b == ')' || b == '<' || b == '>' || b == '[' || b == ']' || b == '{' || b == '}' || b == '/' || b == '%' || isWs(b);
+  }
+
+  private static boolean isWs(byte b) {
+    return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == 0;
+  }
+
+  private static long skipAsciiWhitespace(MemorySegment seg, long offset, long limit) {
+    while (offset < limit && isWs(seg.get(JAVA_BYTE, offset))) offset++;
+    return offset;
+  }
+
+  private static long scanDigits(MemorySegment seg, long offset, long limit) {
+    while (offset < limit) {
+      byte b = seg.get(JAVA_BYTE, offset);
+      if (b < '0' || b > '9') break;
+      offset++;
+    }
+    return offset;
+  }
+
+  private static int parsePositiveInt(MemorySegment seg, long start, long end) {
+    int res = 0;
+    for (long i = start; i < end; i++) {
+      res = res * 10 + (seg.get(JAVA_BYTE, i) - '0');
+    }
+    return res;
+  }
+
+
+
   private static long lastIndexOf(MemorySegment segment, byte[] needle) {
+    return lastIndexOf(segment, needle, segment.byteSize());
+  }
+
+  private static long lastIndexOf(MemorySegment segment, byte[] needle, long from) {
     long size = segment.byteSize();
+    long start = Math.min(from, size - needle.length);
     outer:
-    for (long i = size - needle.length; i >= 0; i--) {
+    for (long i = start; i >= 0; i--) {
       for (int j = 0; j < needle.length; j++) {
         if (segment.get(JAVA_BYTE, i + j) != needle[j]) continue outer;
       }
@@ -814,16 +956,13 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   private static byte[] extractXmpFromSegment(MemorySegment pdf) {
-    byte[] startMarker = "<?xpacket begin".getBytes(StandardCharsets.ISO_8859_1);
-    long start = lastIndexOf(pdf, startMarker);
+    long start = lastIndexOf(pdf, XMP_START);
     if (start < 0) return EMPTY_BYTE_ARRAY;
 
-    byte[] endMarker = "<?xpacket end".getBytes(StandardCharsets.ISO_8859_1);
-    long end = indexOf(pdf, endMarker, start);
+    long end = indexOf(pdf, XMP_END, start);
     if (end < 0) return EMPTY_BYTE_ARRAY;
 
-    byte[] termMarker = "?>".getBytes(StandardCharsets.ISO_8859_1);
-    long term = indexOf(pdf, termMarker, end);
+    long term = indexOf(pdf, XMP_TERM, end);
     if (term < 0) return EMPTY_BYTE_ARRAY;
 
     return pdf.asSlice(start, term + 2 - start).toArray(JAVA_BYTE);
