@@ -3,6 +3,7 @@ package org.grimmory.pdfium4j;
 import static java.lang.foreign.ValueLayout.ADDRESS;
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import java.io.ByteArrayOutputStream;
@@ -47,7 +48,6 @@ import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.IoUtils;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.grimmory.pdfium4j.model.PdfProcessingPolicy;
-import sun.misc.Unsafe;
 
 /**
  * Handles saving PDF documents. Uses PDFium's native FPDF_SaveAsCopy for the base save, then
@@ -55,12 +55,8 @@ import sun.misc.Unsafe;
  *
  * <p>Uses byte-level scanning to avoid OOM issues with large files.
  */
-@SuppressWarnings("removal")
 final class PdfSaver {
   private static final Logger LOGGER = Logger.getLogger(PdfSaver.class.getName());
-  private static final Unsafe UNSAFE = lookupUnsafe();
-  private static final long BYTE_ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(byte[].class);
-  private static final long FILE_DESCRIPTOR_FD_OFFSET = lookupFileDescriptorFdOffset();
   private static final Arena NATIVE_SAVE_ARENA = Arena.ofShared();
   private static final MethodHandle WRITE_BLOCK_CALLBACK = lookupWriteBlockCallback();
   private static final MemorySegment WRITE_BLOCK_STUB =
@@ -759,16 +755,16 @@ final class PdfSaver {
       return streamContext.write(pData, size);
     }
     if (FfmHelper.isNull(pThis) || FfmHelper.isNull(pData)) return 0;
+    MemorySegment pDataSized = pData.reinterpret(size);
     ReusableByteArrayOutputStream baos = SAVE_CALLBACK_TARGET.get();
     if (baos == null) return 0;
     if (size <= 0) return 0;
-    long sourceAddress = pData.address();
     byte[] buf = SAVE_CALLBACK_BUF.get();
     long offset = 0;
     long remaining = size;
     while (remaining > 0) {
       int chunk = (int) Math.min(buf.length, remaining);
-      copyNativeBytes(sourceAddress + offset, buf, chunk);
+      MemorySegment.copy(pDataSized, JAVA_BYTE, offset, MemorySegment.ofArray(buf), JAVA_BYTE, 0, chunk);
       baos.write(buf, 0, chunk);
       offset += chunk;
       remaining -= chunk;
@@ -789,23 +785,6 @@ final class PdfSaver {
     }
   }
 
-  private static Unsafe lookupUnsafe() {
-    try {
-      Field field = Unsafe.class.getDeclaredField("theUnsafe");
-      field.setAccessible(true);
-      return (Unsafe) field.get(null);
-    } catch (ReflectiveOperationException e) {
-      throw new ExceptionInInitializerError(e);
-    }
-  }
-
-  private static long lookupFileDescriptorFdOffset() {
-    try {
-      return UNSAFE.objectFieldOffset(FileDescriptor.class.getDeclaredField("fd"));
-    } catch (NoSuchFieldException e) {
-      throw new ExceptionInInitializerError(e);
-    }
-  }
 
   private static boolean tryNativeFdSave(MemorySegment docHandle, OutputStream out, int sourceFileVersion)
       throws IOException {
@@ -816,33 +795,9 @@ final class PdfSaver {
     if (saveToFd == null) {
       return false;
     }
-    int fd = UNSAFE.getInt(fileOut.getFD(), FILE_DESCRIPTOR_FD_OFFSET);
-    if (fd < 0) {
-      return false;
-    }
-    int useSaveWithVersion = sourceFileVersion > 0 ? 1 : 0;
-    try {
-      int status =
-          (int)
-              saveToFd.invokeExact(
-                  docHandle, fd, EditBindings.FPDF_NO_INCREMENTAL, sourceFileVersion, useSaveWithVersion);
-      if (status == 1) {
-        return true;
-      }
-      if (status < 0) {
-        throw new IOException("Native fd save failed with OS error " + (-status));
-      }
-      throw new IOException("Native fd save failed");
-    } catch (IOException e) {
-      throw e;
-    } catch (Throwable t) {
-      throw new PdfiumException("Failed to save document", t);
-    }
+    return false; // Fallback: FD access restricted in modern JDKs
   }
 
-  private static void copyNativeBytes(long sourceAddress, byte[] target, int byteCount) {
-    UNSAFE.copyMemory(null, sourceAddress, target, BYTE_ARRAY_BASE_OFFSET, byteCount);
-  }
 
   private static final class NativeFdSave {
     private static final MethodHandle SAVE_TO_FD = lookupSaveToFd();
@@ -899,13 +854,14 @@ final class PdfSaver {
       if (failure != null || FfmHelper.isNull(pData) || size <= 0) {
         return failure == null ? 1 : 0;
       }
-      long sourceAddress = pData.address();
+      MemorySegment pDataSized = pData.reinterpret(size);
       long offset = 0;
       long remaining = size;
       try {
         while (remaining > 0) {
           int chunk = (int) Math.min(transferBuffer.length, remaining);
-          copyNativeBytes(sourceAddress + offset, transferBuffer, chunk);
+          MemorySegment.copy(
+              pDataSized, JAVA_BYTE, offset, MemorySegment.ofArray(transferBuffer), JAVA_BYTE, 0, chunk);
           out.write(transferBuffer, 0, chunk);
           offset += chunk;
           remaining -= chunk;

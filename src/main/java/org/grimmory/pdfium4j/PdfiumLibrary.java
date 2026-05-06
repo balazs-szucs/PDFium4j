@@ -75,7 +75,7 @@ public final class PdfiumLibrary {
 
         Arena arena = Arena.global();
         MemorySegment config = arena.allocate(ViewBindings.LIBRARY_CONFIG_LAYOUT);
-        config.set(ValueLayout.JAVA_INT, 0, 2);
+        config.set(ValueLayout.JAVA_INT, 0, 2); // Version 2
         ViewBindings.FPDF_InitLibraryWithConfig.invokeExact(config);
         initialized = true;
       } catch (Throwable t) {
