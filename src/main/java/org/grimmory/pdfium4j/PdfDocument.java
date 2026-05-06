@@ -33,8 +33,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.grimmory.pdfium4j.exception.PdfCorruptException;
 import org.grimmory.pdfium4j.exception.PdfPasswordException;
 import org.grimmory.pdfium4j.exception.PdfUnsupportedSecurityException;
@@ -67,6 +70,7 @@ import org.grimmory.pdfium4j.model.XmpMetadata;
  * them.
  */
 public final class PdfDocument implements AutoCloseable {
+  private static final Logger LOGGER = Logger.getLogger(PdfDocument.class.getName());
 
   private static final Map<Long, SeekableByteChannel> CHANNELS = new ConcurrentHashMap<>(16);
   private static final AtomicLong CHANNEL_ID_SEQ = new AtomicLong();
@@ -225,28 +229,23 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
-  private static PdfDocument openWithRepair(Path path, String password, PdfProcessingPolicy policy) {
+  private static PdfDocument openWithRepair(Path path, String password, PdfProcessingPolicy resolvedPolicy) {
+    if (LOGGER.isLoggable(Level.WARNING)) {
+        LOGGER.log(Level.WARNING, "Document corruption detected for {0}. Attempting automatic repair...", path);
+    }
     Path temp = null;
     try {
       temp = IoUtils.createTempFile("pdfium4j-autorepair-", ".pdf");
       try (OutputStream out = Files.newOutputStream(temp)) {
         PdfSaver.repair(path, out);
       }
-      // Re-open repaired file in STRICT mode to avoid infinite loops
-      PdfProcessingPolicy strictPolicy = new PdfProcessingPolicy(
-          PdfProcessingPolicy.Mode.STRICT,
-          policy.maxDocumentBytes(),
-          policy.maxRenderPixels(),
-          policy.maxParallelRenderThreads(),
-          policy.fileBackedThreshold()
-      );
-      return open(temp, password, strictPolicy);
+      // Reopen the repaired file. We use STRICT mode to avoid infinite loops if repair still fails.
+      return open(temp, password, resolvedPolicy.withMode(PdfProcessingPolicy.Mode.STRICT));
     } catch (Exception e) {
+      if (LOGGER.isLoggable(Level.SEVERE)) {
+          LOGGER.log(Level.SEVERE, "Automatic repair failed for {0}", path);
+      }
       throw new PdfCorruptException("Automatic repair failed for " + path, PdfErrorCode.FORMAT, "open", path.toString(), e);
-    } finally {
-      // Note: we can't delete 'temp' yet if it's being used by openFromChannel as sourcePath
-      // unless openFromChannel makes a copy or we manage lifecycle carefully.
-      // In PdfDocument, CleanupState handles tempFile deletion if passed to constructor.
     }
   }
 

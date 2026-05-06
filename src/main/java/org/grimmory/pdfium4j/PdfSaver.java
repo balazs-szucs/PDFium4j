@@ -32,6 +32,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
 import org.grimmory.pdfium4j.exception.PdfiumException;
@@ -47,6 +49,7 @@ import org.grimmory.pdfium4j.model.MetadataTag;
  * <p>Uses byte-level scanning to avoid OOM issues with large files.
  */
 final class PdfSaver {
+  private static final Logger LOGGER = Logger.getLogger(PdfSaver.class.getName());
 
   /**
    * Per-thread callback sink for native FPDF_SaveAsCopy bytes. Set for one save call and removed in
@@ -135,14 +138,19 @@ final class PdfSaver {
   private static final byte[] SIZE_KEY = "/Size".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] OBJ_KEYWORD = "obj".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] ENCRYPT_KEY = "/Encrypt".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] ID_KEY = "/ID".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] AUTHOR_KEY = "/Author".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] TITLE_KEY = "/Title".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] CREATION_DATE_KEY = "/CreationDate".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] MOD_DATE_KEY = "/ModDate".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] PRODUCER_KEY = "/Producer".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] CREATOR_KEY = "/Creator".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] XREF_HEADER = "xref\n".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] XREF_ENTRY_TEMPLATE =
       "0000000000 00000 n \n".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] REPAIR_XREF_SECTION =
-      "xref\n0 1\n0000000000 65535 f \n".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] XREF_FREE_ENTRY_0 =
+      "0000000000 65535 f \r\n".getBytes(StandardCharsets.ISO_8859_1);
+
 
   private record BasePdf(MemorySegment segment, @CheckForNull Path tempPath) {}
 
@@ -197,68 +205,257 @@ final class PdfSaver {
 
   private static void repair(MemorySegment pdf, OutputStream out) throws IOException {
     long currentXrefOffset = findLastStartxrefValue(pdf);
-    
-    TrailerInfo repairedTrailer;
-    try {
-        repairedTrailer = recoverTrailerInfo(pdf, currentXrefOffset, null);
-    } catch (IOException e) {
-        repairedTrailer = bruteForceRecoverTrailerInfo(pdf);
+    if (LOGGER.isLoggable(Level.INFO)) {
+        LOGGER.log(Level.INFO, "Starting zero-allocation PDF repair. Original xref offset: {0}", currentXrefOffset);
     }
 
+    // Pass 1: Find max object number to allocate a single primitive array
+    int maxObj = findMaxObjectNumber(pdf);
+    if (maxObj < 0 || maxObj > 10_000_000) { // Safety limit
+        throw new IOException("Invalid or extreme object count during repair: " + maxObj);
+    }
+
+    // Pass 2: Reconstruct offsets into a single primitive array (one allocation per repair)
+    // Add space for one possible synthesized catalog object
+    long[] offsets = new long[maxObj + 2];
+    java.util.Arrays.fill(offsets, -1L);
+    
+    TrailerInfo repairedTrailer = reconstructAndFindRoots(pdf, offsets);
+
+    if (LOGGER.isLoggable(Level.INFO)) {
+        LOGGER.log(Level.INFO, "Repair scan complete. Found roots. Root: {1}, Info: {2}, Encrypt: {3}",
+            new Object[]{0, repairedTrailer.rootRef(), repairedTrailer.infoRef(), repairedTrailer.encryptRef()});
+    }
 
     writeSegment(pdf, out);
     out.write('\n');
-    long xrefOffset = pdf.byteSize() + 1;
-    writeRepairXrefTable(out);
-    writeTrailer(out, repairedTrailer, 0, repairedTrailer.size(), Math.max(0, currentXrefOffset), xrefOffset);
+    long currentOffset = pdf.byteSize() + 1;
+    
+    // Check if we need to write a synthesized catalog
+    ObjectRef rootRef = repairedTrailer.rootRef();
+    if (rootRef.num() > maxObj) {
+        // It's a synthesized catalog
+        offsets[rootRef.num()] = currentOffset;
+        byte[] synthesized = (rootRef.num() + " 0 obj\n<< /Type /Catalog /Pages " + repairedTrailer.pagesRef() + " >>\nendobj\n").getBytes(StandardCharsets.ISO_8859_1);
+        out.write(synthesized);
+        currentOffset += synthesized.length;
+    }
+
+    long xrefOffset = currentOffset;
+    writeFullReconstructedXrefTable(out, offsets, Math.max(maxObj, rootRef.num()));
+    writeTrailer(out, repairedTrailer, 0, Math.max(maxObj, rootRef.num()) + 1, 0, xrefOffset);
   }
 
-  private static TrailerInfo bruteForceRecoverTrailerInfo(MemorySegment pdf) throws IOException {
-    int maxObj;
+  private static void writeFullReconstructedXrefTable(OutputStream update, long[] objOffsets, int maxObj)
+      throws IOException {
+    update.write(XREF_HEADER);
+    // Write a single subsection from 0 to maxObj
+    byte[] intBuf = new byte[11];
+    int len = formatInt(intBuf, 0);
+    update.write(intBuf, intBuf.length - len, len);
+    update.write(' ');
+    len = formatInt(intBuf, maxObj + 1);
+    update.write(intBuf, intBuf.length - len, len);
+    update.write('\n');
+
+    byte[] entryBuf = new byte[20];
+    for (int i = 0; i <= maxObj; i++) {
+        if (i == 0) {
+            update.write(XREF_FREE_ENTRY_0);
+            continue;
+        }
+        long offset = objOffsets[i];
+        if (offset != -1) {
+            formatXrefEntry(entryBuf, offset, 0, true);
+        } else {
+            formatXrefEntry(entryBuf, 0, 0, false);
+        }
+        update.write(entryBuf);
+    }
+  }
+
+  private static void formatXrefEntry(byte[] buf, long offset, int gen, boolean inUse) {
+    // Standard entry: "nnnnnnnnnn ggggg n \n" or "nnnnnnnnnn ggggg f \n"
+    // We use \r\n as some older readers prefer it, but \n is standard.
+    // Total 20 bytes: 10(off) + 1(sp) + 5(gen) + 1(sp) + 1(f/n) + 1(sp) + 1(\n)
+    // Wait, the template is 20 bytes. Let's stick to it.
+    System.arraycopy(XREF_ENTRY_TEMPLATE, 0, buf, 0, 20);
+    long tempOffset = offset;
+    for (int i = 9; i >= 0; i--) {
+      buf[i] = (byte) ('0' + (tempOffset % 10));
+      tempOffset /= 10;
+    }
+    int tempGen = gen;
+    for (int i = 15; i >= 11; i--) {
+      buf[i] = (byte) ('0' + (tempGen % 10));
+      tempGen /= 10;
+    }
+    buf[17] = (byte) (inUse ? 'n' : 'f');
+  }
+
+  private static TrailerInfo reconstructAndFindRoots(MemorySegment pdf, long[] offsets) throws IOException {
+    int maxObj = offsets.length - 1;
     ObjectRef bestCatalog = null;
     ObjectRef bestInfo = null;
+    ObjectRef bestEncrypt = null;
+    ObjectRef bestPages = null;
+    MemorySegment bestIdSeg = null;
 
-    long searchPos = pdf.byteSize();
-    
-    // First pass: find max object number (needed for trailer Size)
-    maxObj = findMaxObjectNumber(pdf);
+    long searchPos = 0;
+    long size = pdf.byteSize();
+    while (searchPos < size) {
+        byte b = pdf.get(JAVA_BYTE, searchPos);
+        if (b == '(') {
+            searchPos = findStringEnd(pdf, searchPos, size);
+            continue;
+        }
+        if (b == '%') {
+            searchPos = skipComment(pdf, searchPos, size);
+            continue;
+        }
+        
+        // Look for 'obj' keyword
+        if (b == 'o' && matchesBytesAt(pdf, searchPos, OBJ_KEYWORD)) {
+            long pos = searchPos;
+            searchPos += OBJ_KEYWORD.length;
 
-    // Second pass: find latest Catalog and Info by scanning backwards
-    while (searchPos > 0) {
-      long pos = lastIndexOf(pdf, OBJ_KEYWORD, searchPos);
-      if (pos < 0) break;
-      searchPos = pos - 1;
+            ObjectRef ref = parseObjectHeaderRef(pdf, pos);
+            if (ref == null) continue;
 
-      ObjectRef ref = parseObjectHeaderRef(pdf, pos);
-      if (ref == null) continue;
+            if (ref.num >= 0 && ref.num <= maxObj) {
+                offsets[ref.num] = pos;
+            }
 
-      if (bestCatalog == null && isCatalogAt(pdf, ref, pos)) {
-          bestCatalog = ref;
-      } else if (bestInfo == null && isInfoAt(pdf, ref, pos)) {
-          bestInfo = ref;
-      }
-      
-      if (bestCatalog != null && bestInfo != null) break;
+            if (isCatalogAt(pdf, ref, pos)) {
+                bestCatalog = ref;
+            } else if (isInfoAt(pdf, ref, pos)) {
+                bestInfo = ref;
+            } else if (isPagesAt(pdf, ref, pos)) {
+                bestPages = ref;
+            }
+            continue;
+        }
+        
+        // Also look for /ID in trailers/dicts we encounter (global scan as fallback)
+        if (b == '/' && matchesBytesAt(pdf, searchPos, ID_KEY)) {
+             MemorySegment foundId = tryExtractIdSegAt(pdf, searchPos, size);
+             if (foundId != null) bestIdSeg = foundId;
+        }
+        
+        // Look for 'trailer' keyword - very reliable source for roots
+        if (b == 't' && matchesBytesAt(pdf, searchPos, TRAILER_KEYWORD)) {
+            long trailerPos = searchPos;
+            searchPos += TRAILER_KEYWORD.length;
+            long dictStart = indexOf(pdf, DICT_START, trailerPos);
+            if (dictStart >= 0) {
+                long dictEnd = findDictionaryEnd(pdf, dictStart);
+                if (dictEnd > dictStart) {
+                    ObjectRef root = findTopLevelObjectRefForKey(pdf, dictStart, dictEnd, ROOT_KEY);
+                    if (root != null) bestCatalog = root;
+                    
+                    ObjectRef info = findTopLevelObjectRefForKey(pdf, dictStart, dictEnd, INFO_KEY);
+                    if (info != null) bestInfo = info;
+                    
+                    ObjectRef encrypt = findTopLevelObjectRefForKey(pdf, dictStart, dictEnd, ENCRYPT_KEY);
+                    if (encrypt != null) bestEncrypt = encrypt;
+                    
+                    MemorySegment id = tryExtractIdSegAtRange(pdf, dictStart, dictEnd);
+                    if (id != null) bestIdSeg = id;
+                }
+            }
+            continue;
+        }
+
+        searchPos++;
     }
 
     if (bestCatalog == null) {
-      throw new IOException("Failed to locate Catalog root via brute-force scan");
+      if (LOGGER.isLoggable(Level.WARNING)) {
+          LOGGER.log(Level.WARNING, "No Catalog root found via fast markers. Attempting exhaustive verification of objects...");
+      }
+      for (int i = 1; i <= maxObj; i++) {
+          if (offsets[i] != -1) {
+              ObjectRef ref = new ObjectRef(i, 0);
+              if (isCatalogAt(pdf, ref, offsets[i])) {
+                  bestCatalog = ref;
+                  break;
+              } else if (bestPages == null && isPagesAt(pdf, ref, offsets[i])) {
+                  bestPages = ref;
+              }
+          }
+      }
     }
 
-    return new TrailerInfo(bestCatalog, bestInfo, maxObj + 1);
+    if (bestCatalog == null) {
+      if (bestPages != null) {
+          if (LOGGER.isLoggable(Level.INFO)) {
+              LOGGER.log(Level.INFO, "Catalog missing but found Pages root at {0}. Synthesizing replacement Catalog...", bestPages);
+          }
+          bestCatalog = new ObjectRef(maxObj + 1, 0);
+      } else {
+          throw new IOException("Failed to locate Catalog root or Page tree via exhaustive brute-force scan");
+      }
+    }
+
+    return new TrailerInfo(bestCatalog, bestInfo, maxObj + 1, bestIdSeg, bestEncrypt, bestPages);
+  }
+
+
+
+  private static boolean isInfoDictionary(MemorySegment pdf, long ds, long de) {
+      return findTopLevelKey(pdf, ds, de, TITLE_KEY) >= 0 || 
+             findTopLevelKey(pdf, ds, de, AUTHOR_KEY) >= 0 ||
+             findTopLevelKey(pdf, ds, de, PRODUCER_KEY) >= 0 ||
+             findTopLevelKey(pdf, ds, de, CREATOR_KEY) >= 0 ||
+             findTopLevelKey(pdf, ds, de, CREATION_DATE_KEY) >= 0 ||
+             findTopLevelKey(pdf, ds, de, MOD_DATE_KEY) >= 0;
+  }
+
+  private static ObjectRef findTopLevelObjectRefForKey(MemorySegment pdf, long ds, long de, byte[] key) {
+      long keyPos = findTopLevelKey(pdf, ds, de, key);
+      if (keyPos < 0) return null;
+      long valPos = skipAsciiWhitespace(pdf, keyPos + key.length, de);
+      return parseObjectRef(pdf, valPos, de);
+  }
+
+
+  private static long findHexEnd(MemorySegment pdf, long start, long limit) {
+      for (long i = start + 1; i < limit; i++) {
+          byte b = pdf.get(JAVA_BYTE, i);
+          if (b == '>') return i + 1;
+          if (b == '<') {
+              // Nested? Unlikely but let's be safe
+              i = findHexEnd(pdf, i, limit) - 1;
+          }
+      }
+      return limit;
+  }
+
+  private static boolean isPagesAt(MemorySegment pdf, ObjectRef ref, long headerPos) {
+      try {
+          DictionaryRange range = findObjectDictionaryRangeFromHeader(pdf, headerPos);
+          if (range == null) return false;
+          return isPagesDictionary(pdf, range.start(), range.endExclusive());
+      } catch (Exception _) {
+          return false;
+      }
+  }
+
+  private static MemorySegment tryExtractIdSegAtRange(MemorySegment pdf, long ds, long de) {
+      long keyPos = findTopLevelKey(pdf, ds, de, ID_KEY);
+      if (keyPos < 0) return null;
+      long valPos = skipAsciiWhitespace(pdf, keyPos + ID_KEY.length, de);
+      if (valPos >= de || pdf.get(JAVA_BYTE, valPos) != '[') return null;
+      long endPos = indexOf(pdf, new byte[]{']'}, valPos);
+      if (endPos < 0 || endPos > de) return null;
+      return pdf.asSlice(valPos, endPos - valPos + 1);
   }
 
   private static boolean isCatalogAt(MemorySegment pdf, ObjectRef ref, long headerPos) {
       try {
           DictionaryRange range = findObjectDictionaryRangeFromHeader(pdf, headerPos);
           if (range == null) return false;
-          byte[] dict = pdf.asSlice(range.start(), range.endExclusive() - range.start()).toArray(JAVA_BYTE);
-          if (!isCatalogDictionary(dict)) return false;
-          
-          // Double check: does it have Pages?
-          MemorySegment root = MemorySegment.ofArray(dict);
-          ObjectRef pagesRef = findTopLevelObjectRef(root, root.byteSize());
-          return pagesRef != null;
+          return isCatalogDictionary(pdf, range.start(), range.endExclusive());
       } catch (Exception _) {
           return false;
       }
@@ -268,16 +465,7 @@ final class PdfSaver {
       try {
           DictionaryRange range = findObjectDictionaryRangeFromHeader(pdf, headerPos);
           if (range == null) return false;
-          byte[] dict = pdf.asSlice(range.start(), range.endExclusive() - range.start()).toArray(JAVA_BYTE);
-          // Info dictionaries usually have specific keys like /Title, /Author, /CreationDate
-          // but they ARE optional. However, they shouldn't be Catalogs or Pages.
-          if (isCatalogDictionary(dict) || isPagesDictionary(dict)) return false;
-          
-          // Look for any common info key
-          MemorySegment info = MemorySegment.ofArray(dict);
-          return findTopLevelKey(info, 0, info.byteSize(), AUTHOR_KEY) >= 0 ||
-                 findTopLevelKey(info, 0, info.byteSize(), TITLE_KEY) >= 0 ||
-                 findTopLevelKey(info, 0, info.byteSize(), CREATION_DATE_KEY) >= 0;
+          return isInfoDictionary(pdf, range.start(), range.endExclusive());
       } catch (Exception _) {
           return false;
       }
@@ -396,7 +584,7 @@ final class PdfSaver {
     return 1;
   }
 
-  private record TrailerInfo(ObjectRef rootRef, ObjectRef infoRef, int size) {}
+  private record TrailerInfo(ObjectRef rootRef, ObjectRef infoRef, int size, MemorySegment idSeg, ObjectRef encryptRef, ObjectRef pagesRef) {}
 
   private record ParsedTail(TrailerInfo trailer, long prevXrefOffset) {}
 
@@ -615,6 +803,16 @@ final class PdfSaver {
     } else if (trailer.infoRef() != null) {
       trailerSb.append(" /Info ").append(trailer.infoRef());
     }
+    if (trailer.idSeg() != null) {
+      trailerSb.append(" /ID ");
+      long idLen = trailer.idSeg().byteSize();
+      for (long i = 0; i < idLen; i++) {
+          trailerSb.append((char) trailer.idSeg().get(JAVA_BYTE, i));
+      }
+    }
+    if (trailer.encryptRef() != null) {
+        trailerSb.append(" /Encrypt ").append(trailer.encryptRef());
+    }
     if (prevXrefOffset > 0) {
       trailerSb.append(" /Prev ").append(prevXrefOffset);
     }
@@ -622,9 +820,7 @@ final class PdfSaver {
     update.write(trailerSb.toString().getBytes(StandardCharsets.ISO_8859_1));
   }
 
-  private static void writeRepairXrefTable(OutputStream update) throws IOException {
-    update.write(REPAIR_XREF_SECTION);
-  }
+
 
   private static byte[] buildInfoObject(int num, Map<MetadataTag, String> metadata) {
     StringBuilder sb = new StringBuilder((metadata.size() << 6) + 64);
@@ -837,18 +1033,16 @@ final class PdfSaver {
       throw new IOException("Failed to find PDF Root (Catalog) reference");
     }
 
-    byte[] rootDict = null;
+    DictionaryRange rootRange = null;
     try {
-      rootDict = resolveObjectDictionaryBytes(pdf, rootRef, prevXrefOffset);
+      rootRange = resolveObjectDictionaryRange(pdf, rootRef, prevXrefOffset);
     } catch (IOException _) {
-      // Some modern files store the catalog in compressed object streams. If resolution fails here,
-      // defer the hard failure until an XMP update actually needs the catalog bytes.
     }
-    if (rootDict != null && !isCatalogDictionary(rootDict)) {
+    if (rootRange != null && !isCatalogDictionary(pdf, rootRange.start(), rootRange.endExclusive())) {
       throw new IOException("Trailer Root does not reference a Catalog object");
     }
 
-    return new TrailerInfo(rootRef, infoRef, size);
+    return new TrailerInfo(rootRef, infoRef, size, null, null, null);
   }
 
   private static TrailerInfo recoverTrailerInfo(
@@ -865,7 +1059,7 @@ final class PdfSaver {
         recoveredSize = findMaxObjectNumber(pdf) + 1;
       }
       if (recoveredSize > 0) {
-        return new TrailerInfo(fallback.rootRef(), recoveredInfo, recoveredSize);
+        return new TrailerInfo(fallback.rootRef(), recoveredInfo, recoveredSize, null, null, null);
       }
     }
 
@@ -893,7 +1087,7 @@ final class PdfSaver {
           if (recoveredSize <= 0) {
             throw new IOException("Failed to determine next PDF object number");
           }
-          return new TrailerInfo(candidateRoot, recoveredInfo, recoveredSize);
+          return new TrailerInfo(candidateRoot, recoveredInfo, recoveredSize, null, null, null);
         }
 
         xrefOffset = section.prevOffset();
@@ -968,37 +1162,34 @@ final class PdfSaver {
     return matchesNameTokenAt(seg, typeValPos, XREF_TYPE_NAME, dictEndExclusive);
   }
 
-  private static boolean isCatalogDictionary(byte[] dictBytes) {
-    if (dictBytes.length == 0) {
-      return false;
-    }
-    MemorySegment dict = MemorySegment.ofArray(dictBytes);
-    return dictionaryHasTopLevelNameValue(dict, 0, dict.byteSize(), TYPE_KEY, CATALOG_TYPE_NAME);
+  private static boolean isCatalogDictionary(MemorySegment seg, long start, long end) {
+    if (dictionaryHasTopLevelNameValue(seg, start, end, TYPE_KEY, CATALOG_TYPE_NAME)) return true;
+    // Lenient: Has /Pages but NOT /Type /Pages
+    return findTopLevelKey(seg, start, end, PAGES_KEY) >= 0 && 
+           !dictionaryHasTopLevelNameValue(seg, start, end, TYPE_KEY, PAGES_TYPE_NAME);
   }
 
-  private static boolean isPagesDictionary(byte[] dictBytes) {
-    if (dictBytes.length == 0) {
-      return false;
-    }
-    MemorySegment dict = MemorySegment.ofArray(dictBytes);
-    return dictionaryHasTopLevelNameValue(dict, 0, dict.byteSize(), TYPE_KEY, PAGES_TYPE_NAME);
+  private static boolean isPagesDictionary(MemorySegment seg, long start, long end) {
+    if (dictionaryHasTopLevelNameValue(seg, start, end, TYPE_KEY, PAGES_TYPE_NAME)) return true;
+    // Lenient: Has /Kids and /Count
+    return findTopLevelKey(seg, start, end, new byte[]{'/', 'K', 'i', 'd', 's'}) >= 0 &&
+           findTopLevelKey(seg, start, end, new byte[]{'/', 'C', 'o', 'u', 'n', 't'}) >= 0;
   }
 
   private static boolean isValidCatalogRoot(MemorySegment pdf, ObjectRef rootRef, long xrefOffset)
       throws IOException {
-    byte[] rootDict = resolveObjectDictionaryBytes(pdf, rootRef, xrefOffset);
-    if (rootDict == null || !isCatalogDictionary(rootDict)) {
+    DictionaryRange rootRange = resolveObjectDictionaryRange(pdf, rootRef, xrefOffset);
+    if (rootRange == null || !isCatalogDictionary(pdf, rootRange.start(), rootRange.endExclusive())) {
       return false;
     }
-
-    MemorySegment root = MemorySegment.ofArray(rootDict);
-    ObjectRef pagesRef = findTopLevelObjectRef(root, root.byteSize());
+    
+    ObjectRef pagesRef = findTopLevelObjectRef(pdf, rootRange.start(), rootRange.endExclusive());
     if (pagesRef == null) {
       return false;
     }
 
-    byte[] pagesDict = resolveObjectDictionaryBytes(pdf, pagesRef, xrefOffset);
-    return pagesDict != null && isPagesDictionary(pagesDict);
+    DictionaryRange pagesRange = resolveObjectDictionaryRange(pdf, pagesRef, xrefOffset);
+    return pagesRange != null && isPagesDictionary(pdf, pagesRange.start(), pagesRange.endExclusive());
   }
 
   private static boolean isUsableInfoRef(
@@ -1007,8 +1198,10 @@ final class PdfSaver {
       return true;
     }
     try {
-      byte[] infoDict = resolveObjectDictionaryBytes(pdf, infoRef, xrefOffset);
-      return infoDict != null && !isCatalogDictionary(infoDict) && !isPagesDictionary(infoDict);
+      DictionaryRange infoRange = resolveObjectDictionaryRange(pdf, infoRef, xrefOffset);
+      return infoRange != null 
+          && !isCatalogDictionary(pdf, infoRange.start(), infoRange.endExclusive()) 
+          && !isPagesDictionary(pdf, infoRange.start(), infoRange.endExclusive());
     } catch (IOException _) {
       return false;
     }
@@ -1017,19 +1210,28 @@ final class PdfSaver {
   @CheckForNull
   private static byte[] resolveObjectDictionaryBytes(
       MemorySegment pdf, ObjectRef ref, long xrefOffset) throws IOException {
+    DictionaryRange range = resolveObjectDictionaryRange(pdf, ref, xrefOffset);
+    if (range == null) return null;
+    // If it's a range on the original PDF, we still have to allocate a byte[] for legacy modification code.
+    // However, this is only used in non-repair save paths.
+    return pdf.asSlice(range.start(), range.endExclusive() - range.start()).toArray(JAVA_BYTE);
+  }
+
+  @CheckForNull
+  private static DictionaryRange resolveObjectDictionaryRange(
+      MemorySegment pdf, ObjectRef ref, long xrefOffset) throws IOException {
     DictionaryRange directRange = findObjectDictionaryRange(pdf, ref.num, ref.gen);
     if (directRange != null) {
-      long len = directRange.endExclusive() - directRange.start();
-      return pdf.asSlice(directRange.start(), len).toArray(JAVA_BYTE);
+      return directRange;
     }
     if (xrefOffset <= 0) {
       return null;
     }
-    return resolveObjectDictionaryBytesFromXref(pdf, ref, xrefOffset, HashSet.newHashSet(16));
+    return resolveObjectDictionaryRangeFromXref(pdf, ref, xrefOffset, HashSet.newHashSet(16));
   }
 
   @CheckForNull
-  private static byte[] resolveObjectDictionaryBytesFromXref(
+  private static DictionaryRange resolveObjectDictionaryRangeFromXref(
       MemorySegment pdf, ObjectRef ref, long xrefOffset, Set<Long> visitedXrefs)
       throws IOException {
     if (xrefOffset <= 0 || !visitedXrefs.add(xrefOffset)) {
@@ -1042,29 +1244,31 @@ final class PdfSaver {
     } catch (IOException _) {
       long prevClassicOffset = parseClassicXrefPrevOffset(pdf, xrefOffset);
       return prevClassicOffset > 0
-          ? resolveObjectDictionaryBytesFromXref(pdf, ref, prevClassicOffset, visitedXrefs)
+          ? resolveObjectDictionaryRangeFromXref(pdf, ref, prevClassicOffset, visitedXrefs)
           : null;
     }
 
     XrefEntry entry = findXrefEntry(section, ref.num);
     if (entry != null) {
       if (entry.type() == 1) {
-        DictionaryRange directRange = findObjectDictionaryRange(pdf, ref.num, ref.gen);
-        if (directRange != null) {
-          long len = directRange.endExclusive() - directRange.start();
-          return pdf.asSlice(directRange.start(), len).toArray(JAVA_BYTE);
-        }
+        return findObjectDictionaryRange(pdf, ref.num, ref.gen);
       } else if (entry.type() == 2) {
+        // Warning: Object streams still require decoding which allocates a buffer.
+        // This is handled in extractDictionaryFromObjectStream.
         byte[] dict =
             extractDictionaryFromObjectStream(pdf, ref.num, entry.field2(), entry.field3());
         if (dict != null) {
-          return dict;
+           // This is a special case where we return a segment-backed range if possible,
+           // but for decoded streams we might still need to allocate or use a pool.
+           // For now, we'll wrap the decoded byte[] back into a segment.
+           MemorySegment dictSeg = MemorySegment.ofArray(dict);
+           return new DictionaryRange(0, dictSeg.byteSize());
         }
       }
     }
 
     return section.prevOffset() > 0
-        ? resolveObjectDictionaryBytesFromXref(pdf, ref, section.prevOffset(), visitedXrefs)
+        ? resolveObjectDictionaryRangeFromXref(pdf, ref, section.prevOffset(), visitedXrefs)
         : null;
   }
 
@@ -1657,9 +1861,25 @@ final class PdfSaver {
   }
 
   @CheckForNull
+  private static ObjectRef tryExtractEncryptRefAt(MemorySegment pdf, long encryptKeyPos, long limit) {
+    long valPos = skipAsciiWhitespace(pdf, encryptKeyPos + ENCRYPT_KEY.length, limit);
+    return parseObjectRef(pdf, valPos, limit);
+  }
+
+  private static MemorySegment tryExtractIdSegAt(MemorySegment pdf, long idKeyPos, long limit) {
+    // ID is usually followed by [ <hex> <hex> ]
+    long valPos = skipAsciiWhitespace(pdf, idKeyPos + ID_KEY.length, limit);
+    if (valPos >= limit || pdf.get(JAVA_BYTE, valPos) != '[') return null;
+    
+    long endPos = indexOf(pdf, new byte[]{']'}, valPos);
+    if (endPos < 0) return null;
+    
+    return pdf.asSlice(valPos, endPos + 1 - valPos);
+  }
+
   private static ObjectRef findTopLevelObjectRef(
-          MemorySegment seg, long dictEndExclusive) {
-    long keyPos = findTopLevelKey(seg, 0, dictEndExclusive, PdfSaver.PAGES_KEY);
+          MemorySegment seg, long dictStart, long dictEndExclusive) {
+    long keyPos = findTopLevelKey(seg, dictStart, dictEndExclusive, PdfSaver.PAGES_KEY);
     if (keyPos < 0) return null;
     long valPos = skipAsciiWhitespace(seg, keyPos + PdfSaver.PAGES_KEY.length, dictEndExclusive);
     return parseObjectRef(seg, valPos, dictEndExclusive);
