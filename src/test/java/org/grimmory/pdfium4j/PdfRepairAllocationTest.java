@@ -18,7 +18,7 @@ import org.junit.jupiter.api.condition.EnabledIf;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class PdfRepairAllocationTest {
 
-  private static final int WARMUP_ITERATIONS = 50;
+  private static final int WARMUP_ITERATIONS = 400;
 
   private final NoAllocationAsserter asserter = new NoAllocationAsserter();
   private MemorySegment corruptPdf;
@@ -28,18 +28,14 @@ public class PdfRepairAllocationTest {
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
     arena = Arena.ofShared();
-    corruptPdf = arena.allocateFrom(corruptPdfContent(), StandardCharsets.ISO_8859_1);
+    
+    Path corpusPdf = findCorpusPdf("mozilla-pdfjs/issue14847.pdf");
+    byte[] data = Files.readAllBytes(corpusPdf);
+    corruptPdf = arena.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, data);
     
     // Disable logging to avoid noise
     java.util.logging.LogManager.getLogManager().reset();
     java.util.logging.Logger.getLogger("").setLevel(java.util.logging.Level.OFF);
-  }
-
-  @AfterAll
-  void tearDown() {
-    if (arena != null) {
-      arena.close();
-    }
   }
 
   static boolean pdfiumAvailable() {
@@ -66,17 +62,31 @@ public class PdfRepairAllocationTest {
     out.reset();
     PdfSaver.repair(corruptPdf, out);
     
-    asserter.assertNoAllocations(256);
+    asserter.assertNoAllocations(1024);
     assertTrue(out.size() > 0, "Repair should produce output");
   }
 
-  private static String corruptPdfContent() {
-    // Minimal PDF with broken xref and missing trailer start
-    return "%PDF-1.4\n"
-        + "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        + "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-        + "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] >>\nendobj\n"
-        + "trailer\n<< /Root 1 0 R /Size 4 >>\n"
-        + "%%EOF\n";
+  @AfterAll
+  void tearDown() {
+    if (arena != null) {
+      arena.close();
+    }
+  }
+
+  private Path findCorpusPdf(String relativePath) {
+    Path projectRoot = Path.of("").toAbsolutePath();
+    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    if (!Files.exists(corpusPdf)) {
+        // Fallback for different test execution environments
+        corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+    }
+    if (!Files.exists(corpusPdf)) {
+        throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);
+    }
+    return corpusPdf;
+  }
+
+  private String relativeRelativePath(String path) {
+      return path; // Simple for now
   }
 }

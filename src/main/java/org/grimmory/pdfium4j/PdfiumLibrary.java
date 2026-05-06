@@ -24,7 +24,7 @@ public final class PdfiumLibrary {
   private static final Object LOCK = new Object();
   private static volatile boolean initialized = false;
   private static volatile Throwable initError = null;
-  private static volatile int rendererType = ViewBindings.FPDF_RENDERER_TYPE_AGG;
+  private static volatile int rendererType = ViewBindings.FPDF_RENDERER_TYPE_SKIA;
 
   private PdfiumLibrary() {}
 

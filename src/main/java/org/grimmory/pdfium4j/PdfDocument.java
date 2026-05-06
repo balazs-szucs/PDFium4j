@@ -108,6 +108,10 @@ public final class PdfDocument implements AutoCloseable {
   private volatile boolean closed = false;
   private volatile boolean structurallyModified = false;
 
+  MemorySegment handle() {
+      return handle;
+  }
+
   /** Cached page count; -1 means not yet fetched or invalidated. */
   private volatile int cachedPageCount = -1;
 
@@ -298,7 +302,7 @@ public final class PdfDocument implements AutoCloseable {
         int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
         throw mapOpenError("Failed to open document: " + path, err);
       }
-      return new PdfDocument(
+      PdfDocument pdfDoc = new PdfDocument(
           doc,
           docArena,
           null,
@@ -309,6 +313,12 @@ public final class PdfDocument implements AutoCloseable {
           policy,
           readFileVersion(doc),
           Thread.currentThread());
+
+      if (policy.mode() == PdfProcessingPolicy.Mode.RECOVER && !pdfDoc.hasValidCrossReferenceTable()) {
+          pdfDoc.close();
+          return openWithRepair(path, password, policy);
+      }
+      return pdfDoc;
     } catch (PdfiumException e) {
       docArena.close();
       throw e;
@@ -358,41 +368,60 @@ public final class PdfDocument implements AutoCloseable {
     PdfiumLibrary.ensureInitialized();
     Arena arena = Arena.ofShared();
     try {
-      MemorySegment seg = arena.allocateFrom(JAVA_BYTE, data);
-      MemorySegment pwdSeg = (password != null) ? arena.allocateFrom(password) : MemorySegment.NULL;
+      MemorySegment memSeg = arena.allocate(data.length);
+      memSeg.copyFrom(MemorySegment.ofArray(data));
       
-      MemorySegment doc;
-      if (ViewBindings.FPDF_LoadMemDocument64 != null) {
-          doc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument64.invokeExact(seg, (long) data.length, pwdSeg);
-      } else {
-          doc = (MemorySegment) ViewBindings.FPDF_LoadMemDocument.invokeExact(seg, data.length, pwdSeg);
+      PdfDocument pdfDoc = open(memSeg, password, resolvedPolicy, arena);
+      
+      if (resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER && !pdfDoc.hasValidCrossReferenceTable()) {
+          pdfDoc.close();
+          byte[] repaired = PdfSaver.repair(data);
+          return open(repaired, password, resolvedPolicy.withMode(PdfProcessingPolicy.Mode.STRICT));
       }
+      return pdfDoc;
+    } catch (PdfiumException e) {
+      arena.close();
+      throw e;
+    } catch (Throwable t) {
+      arena.close();
+      throw new PdfiumException("Unexpected error opening document from bytes", t);
+    }
+  }
+
+  static PdfDocument open(MemorySegment segment, String password, PdfProcessingPolicy policy) {
+      return open(segment, password, policy, Arena.ofShared());
+  }
+
+  private static PdfDocument open(MemorySegment segment, String password, PdfProcessingPolicy policy, Arena arena) {
+    PdfProcessingPolicy resolvedPolicy = policy != null ? policy : PdfProcessingPolicy.defaultPolicy();
+    try {
+      MemorySegment pwdSeg = password == null ? MemorySegment.NULL : arena.allocateFrom(password);
       
-      if (FfmHelper.isNull(doc)) {
+      MemorySegment docHandle = (MemorySegment) ViewBindings.FPDF_LoadMemDocument64.invokeExact(
+          segment,
+          segment.byteSize(),
+          pwdSeg);
+
+      if (FfmHelper.isNull(docHandle)) {
         int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
-        if (err == ViewBindings.FPDF_ERR_FORMAT && resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER) {
-            byte[] repaired = PdfSaver.repair(data);
-            return open(repaired, password, resolvedPolicy.withMode(PdfProcessingPolicy.Mode.STRICT));
-        }
-        arena.close();
-        throw mapOpenError("Failed to open document from bytes", err);
+        throw mapOpenError("Failed to open document from segment", err);
       }
+
       return new PdfDocument(
-          doc,
+          docHandle,
           arena,
           null,
           0L,
           null,
           null,
-          data,
+          null,
           resolvedPolicy,
-          readFileVersion(doc),
+          readFileVersion(docHandle),
           Thread.currentThread());
     } catch (PdfiumException e) {
       throw e;
     } catch (Throwable t) {
-      arena.close();
-      throw new PdfiumException("Failed to open document from bytes", t);
+      throw new PdfiumException("Unexpected error opening document from segment", t);
     }
   }
 

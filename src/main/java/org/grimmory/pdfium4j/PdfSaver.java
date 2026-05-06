@@ -46,6 +46,7 @@ import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.IoUtils;
 import org.grimmory.pdfium4j.model.MetadataTag;
+import org.grimmory.pdfium4j.model.PdfProcessingPolicy;
 import sun.misc.Unsafe;
 
 /**
@@ -288,6 +289,12 @@ final class PdfSaver {
   }
 
   static void repair(Path source, OutputStream out) throws IOException {
+    // Phase 1: Try native repair (PDFium's internal recovery)
+    if (nativeRepair(source, out)) {
+        return;
+    }
+    
+    // Phase 2: Fallback to brute-force scanner for severely corrupted files
     try (Arena arena = Arena.ofConfined();
         FileChannel fc = FileChannel.open(source, StandardOpenOption.READ)) {
       MemorySegment pdf = fc.map(FileChannel.MapMode.READ_ONLY, 0, fc.size(), arena);
@@ -296,12 +303,68 @@ final class PdfSaver {
   }
 
   static byte[] repair(byte[] data) throws IOException {
+    // Phase 1: Try native repair
+    byte[] nativeRepaired = nativeRepair(data);
+    if (nativeRepaired != null) {
+        return nativeRepaired;
+    }
+
+    // Phase 2: Fallback to brute-force
     ByteArrayOutputStream out = new ByteArrayOutputStream(data.length + 256);
     repair(MemorySegment.ofArray(data), out);
     return out.toByteArray();
   }
 
+  private static boolean nativeRepair(Path source, OutputStream out) {
+    try {
+        // We open without repair policy to avoid recursion, but in STRICT mode to let PDFium handle recovery
+        // We use a low pixel budget since we don't plan to render
+        PdfProcessingPolicy policy = PdfProcessingPolicy.defaultPolicy().withMode(PdfProcessingPolicy.Mode.STRICT);
+        try (PdfDocument doc = PdfDocument.open(source, null, policy)) {
+            // If it opened, PDFium's recovery worked. Save it clean.
+            saveNativeFullRewrite(doc.handle(), out, doc.fileVersion());
+            return true;
+        }
+    } catch (Throwable t) {
+        PdfiumLibrary.ignore(t);
+        return false;
+    }
+  }
+
+  private static byte[] nativeRepair(byte[] data) {
+    try {
+        PdfProcessingPolicy policy = PdfProcessingPolicy.defaultPolicy().withMode(PdfProcessingPolicy.Mode.STRICT);
+        try (PdfDocument doc = PdfDocument.open(data, null, policy)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream(data.length);
+            saveNativeFullRewrite(doc.handle(), out, doc.fileVersion());
+            return out.toByteArray();
+        }
+    } catch (Throwable t) {
+        PdfiumLibrary.ignore(t);
+        return null;
+    }
+  }
+
+  private static boolean nativeRepair(MemorySegment pdf, OutputStream out) {
+    try {
+        PdfProcessingPolicy policy = PdfProcessingPolicy.defaultPolicy().withMode(PdfProcessingPolicy.Mode.STRICT);
+        try (PdfDocument doc = PdfDocument.open(pdf, null, policy)) {
+            saveNativeFullRewrite(doc.handle(), out, doc.fileVersion());
+            return true;
+        }
+    } catch (Throwable t) {
+        PdfiumLibrary.ignore(t);
+        return false;
+    }
+  }
+
   static void repair(MemorySegment pdf, OutputStream out) throws IOException {
+    // Phase 1: Try native repair
+    if (nativeRepair(pdf, out)) {
+        return;
+    }
+
+    // Phase 2: Brute-force fallback
     long currentXrefOffset = findLastStartxrefValue(pdf);
     if (LOGGER.isLoggable(Level.INFO)) {
         LOGGER.log(Level.INFO, "Starting zero-allocation PDF repair. Original xref offset: {0}", currentXrefOffset);

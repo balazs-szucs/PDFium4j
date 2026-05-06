@@ -40,9 +40,9 @@ class PdfSaveAllocationTest {
   @BeforeAll
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
-    source = Files.createTempFile("pdfium4j-alloc-save-", ".pdf");
+    source = findCorpusPdf("mozilla-pdfjs/issue14847.pdf");
     target = Files.createTempFile("pdfium4j-alloc-target-", ".pdf");
-    Files.writeString(source, minimalPdf(), StandardCharsets.ISO_8859_1);
+    
     doc = PdfDocument.open(source);
     doc.setMetadata(MetadataTag.TITLE, "Allocation Free Save");
     targetOut = new FileOutputStream(target.toFile(), false);
@@ -63,9 +63,6 @@ class PdfSaveAllocationTest {
     }
     if (targetOut != null) {
       targetOut.close();
-    }
-    if (source != null) {
-      Files.deleteIfExists(source);
     }
     if (target != null) {
       Files.deleteIfExists(target);
@@ -99,19 +96,17 @@ class PdfSaveAllocationTest {
     }
   }
 
-  private static String minimalPdf() {
-    return "%PDF-1.4\n"
-        + "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-        + "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-        + "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R >>\nendobj\n"
-        + "4 0 obj\n<< /Length 35 >>\nstream\nBT /F1 12 Tf 72 72 Td (Hello) Tj ET\nendstream\nendobj\n"
-        + "xref\n0 5\n"
-        + "0000000000 65535 f \n"
-        + "0000000009 00000 n \n"
-        + "0000000058 00000 n \n"
-        + "0000000115 00000 n \n"
-        + "0000000202 00000 n \n"
-        + "trailer\n<< /Root 1 0 R /Size 5 >>\nstartxref\n287\n%%EOF\n";
+  private Path findCorpusPdf(String relativePath) {
+    Path projectRoot = Path.of("").toAbsolutePath();
+    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    if (!Files.exists(corpusPdf)) {
+        // Fallback for different test execution environments
+        corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+    }
+    if (!Files.exists(corpusPdf)) {
+        throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);
+    }
+    return corpusPdf;
   }
 
 }

@@ -338,9 +338,7 @@ public final class PdfPage implements AutoCloseable {
       throw new IllegalArgumentException("maxDimension must be positive");
     }
 
-    // Use 150 DPI as base for thumbnails - enough quality for small sizes
     RenderFlags thumbnailFlags = RenderFlags.builder().annotations(false).antiAlias(true).build();
-
     return renderBounded(150, maxDimension, maxDimension, thumbnailFlags);
   }
 
