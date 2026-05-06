@@ -21,6 +21,10 @@ final class NoAllocationAsserter {
     }
   }
 
+  long getAllocatedBytes() {
+    return threadMxBean.getThreadAllocatedBytes(Thread.currentThread().threadId());
+  }
+
   void startRecording() {
     testThread = Thread.currentThread();
     allocatedBytesBefore = threadMxBean.getThreadAllocatedBytes(testThread.threadId());

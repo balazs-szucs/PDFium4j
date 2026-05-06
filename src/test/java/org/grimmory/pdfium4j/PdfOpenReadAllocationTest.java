@@ -43,7 +43,7 @@ class PdfOpenReadAllocationTest {
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
 
-    probeSource = findCorpusPdf("mozilla-pdfjs/issue14847.pdf");
+    probeSource = findCorpusPdf("gutenberg/996_Don Quixote.pdf");
     openProbe = PdfDocument.noAllocationPathProbe(probeSource, null);
 
     metadataDoc = PdfDocument.open(probeSource);
@@ -65,18 +65,18 @@ class PdfOpenReadAllocationTest {
   void pathOpenProbeDoesNotAllocateAfterWarmup() {
     try (Arena arena = Arena.ofConfined()) {
       MemorySegment trailerBuffer =
-          arena.allocate(16L * JAVA_INT.byteSize(), JAVA_INT.byteAlignment());
+          arena.allocate(32L * JAVA_INT.byteSize(), JAVA_INT.byteAlignment());
       int[] output = new int[3];
 
-      for (int i = 0; i < WARMUP_ITERATIONS; i++) {
+      for (int i = 0; i < 10000; i++) {
         openProbe.inspect(output, trailerBuffer);
       }
 
       asserter.startRecording();
       openProbe.inspect(output, trailerBuffer);
-      asserter.assertNoAllocations();
+      asserter.assertNoAllocations(0);
 
-      assertEquals(6, output[0]); // Page count
+      assertTrue(output[0] > 900, "Don Quixote should have many pages");
       assertEquals(1, output[1]); // Xref health
       assertTrue(output[2] > 0, "Expected at least one trailer end offset");
     }
@@ -90,13 +90,13 @@ class PdfOpenReadAllocationTest {
       assertTrue(needed > 2, "Expected UTF-16LE metadata bytes including terminator");
 
       MemorySegment metadataBuffer = arena.allocate(needed, 2);
-      for (int i = 0; i < WARMUP_ITERATIONS; i++) {
+      for (int i = 0; i < 10000; i++) {
         metadataDoc.readMetadataUtf16(MetadataTag.TITLE, metadataBuffer);
       }
 
       asserter.startRecording();
       int copied = metadataDoc.readMetadataUtf16(MetadataTag.TITLE, metadataBuffer);
-      asserter.assertNoAllocations();
+      asserter.assertNoAllocations(0);
 
       assertEquals(needed, copied);
       String title =

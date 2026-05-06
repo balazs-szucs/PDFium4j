@@ -39,14 +39,14 @@ class PdfSaveAllocationTest {
   @BeforeAll
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
-      Path source = findCorpusPdf("mozilla-pdfjs/issue14847.pdf");
+    Path source = findCorpusPdf("gutenberg/996_Don Quixote.pdf");
     target = Files.createTempFile("pdfium4j-alloc-target-", ".pdf");
     
     doc = PdfDocument.open(source);
     doc.setMetadata(MetadataTag.TITLE, "Allocation Free Save");
     targetOut = new FileOutputStream(target.toFile(), false);
     targetChannel = targetOut.getChannel();
-    for (int i = 0; i < WARMUP_ITERATIONS; i++) {
+    for (int i = 0; i < 5000; i++) {
       prepareTarget();
       doc.save(targetOut);
     }
@@ -74,7 +74,7 @@ class PdfSaveAllocationTest {
     prepareTarget();
     asserter.startRecording();
     doc.save(targetOut);
-    asserter.assertNoAllocations(512);
+    asserter.assertNoAllocations(0);
     assertTrue(fileSize(target) > 0, "Native save should stream bytes to the sink");
   }
 

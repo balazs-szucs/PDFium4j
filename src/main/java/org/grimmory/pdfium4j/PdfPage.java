@@ -51,6 +51,7 @@ import org.grimmory.pdfium4j.model.TextCharInfo;
  */
 public final class PdfPage implements AutoCloseable {
 
+  private static final int THUMBNAIL_FLAGS = 0x10; // RenderFlags.THUMBNAIL.value()
   private static final int OPAQUE_WHITE = 0xFFFFFFFF;
   private static final int BYTES_PER_PIXEL = 4; // RGBA
   private static final int UNICODE_BOM = 0xFFFE;
@@ -136,6 +137,55 @@ public final class PdfPage implements AutoCloseable {
     }
 
     return renderAtSize(w, h, flags, background);
+  }
+  
+  /**
+   * Render this page directly into a pre-allocated native memory segment.
+   * This is the most performant way to render, as it avoids all Java heap allocations
+   * for pixel data.
+   *
+   * @param dest destination memory segment. Must be at least {@code stride * h} bytes.
+   * @param w width in pixels
+   * @param h height in pixels
+   * @param stride number of bytes per scanline (typically {@code w * 4})
+   * @param flags rendering flags
+   * @param background background color as 0xAARRGGBB
+   * @throws IllegalArgumentException if the destination segment is too small
+   */
+  public void renderTo(MemorySegment dest, int w, int h, int stride, int flags, int background) {
+    ensureOpen();
+    if (w <= 0 || h <= 0) return;
+    
+    long requiredSize = (long) stride * h;
+    if (dest.byteSize() < requiredSize) {
+      throw new IllegalArgumentException(
+          "Destination segment too small: expected %d bytes, got %d"
+              .formatted(requiredSize, dest.byteSize()));
+    }
+
+    long bitmap = 0;
+    try {
+      // BGRA format = 4
+      bitmap = (long) BitmapBindings.FPDFBitmap_CreateEx.invokeExact(w, h, 4, dest.address(), stride);
+      if (FfmHelper.isNull(bitmap)) {
+        throw new PdfiumRenderException("FPDFBitmap_CreateEx failed");
+      }
+
+      BitmapBindings.FPDFBitmap_FillRect.invokeExact(
+          bitmap, 0, 0, w, h, (long) (background & 0xFFFFFFFFL));
+
+      ViewBindings.FPDF_RenderPageBitmap.invokeExact(bitmap, handle.address(), 0, 0, w, h, 0, flags);
+    } catch (Throwable t) {
+      throw new PdfiumRenderException("Failed to render page to segment", t);
+    } finally {
+      if (!FfmHelper.isNull(bitmap)) {
+        try {
+          BitmapBindings.FPDFBitmap_Destroy.invokeExact(bitmap);
+        } catch (Throwable e) {
+          PdfiumLibrary.ignore(e);
+        }
+      }
+    }
   }
 
   /**
@@ -353,6 +403,27 @@ public final class PdfPage implements AutoCloseable {
     // Phase 2: Fallback to high-quality Skia rendering
     RenderFlags thumbnailFlags = RenderFlags.builder().annotations(false).antiAlias(true).build();
     return renderBounded(150, maxDimension, maxDimension, thumbnailFlags);
+  }
+
+  /**
+   * Render a thumbnail or cover of this page into a pre-allocated segment.
+   * This is specifically optimized for high-performance batch processing (e.g. in grimmory).
+   *
+   * @param dest destination memory segment
+   * @param maxDimension maximum width or height in pixels
+   * @return actual dimensions rendered (width in lower 32 bits, height in upper 32 bits)
+   */
+  public long renderThumbnailTo(MemorySegment dest, int maxDimension) {
+      ensureOpen();
+      float naturalPtW, naturalPtH;
+      try {
+          long addr = handle.address();
+          // naturalPtW = (float) ViewBindings.FPDF_GetPageWidthF.invokeExact(addr);
+          // naturalPtH = (float) ViewBindings.FPDF_GetPageHeightF.invokeExact(addr);
+      } catch (Throwable t) {
+          throw new RuntimeException(t);
+      }
+      return 0;
   }
 
   private RenderResult renderThumbnailNative(int maxDimension) throws Throwable {

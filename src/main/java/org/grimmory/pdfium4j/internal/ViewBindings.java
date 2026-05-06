@@ -134,16 +134,16 @@ public final class ViewBindings {
       downcallCritical("FPDF_ClosePage", FunctionDescriptor.ofVoid(ADDRESS));
 
   public static final MethodHandle FPDF_GetPageWidthF =
-      downcallCritical("FPDF_GetPageWidthF", FunctionDescriptor.of(JAVA_FLOAT, ADDRESS));
+      downcall("FPDF_GetPageWidthF", FunctionDescriptor.of(JAVA_FLOAT, JAVA_LONG));
 
   public static final MethodHandle FPDF_GetPageHeightF =
-      downcallCritical("FPDF_GetPageHeightF", FunctionDescriptor.of(JAVA_FLOAT, ADDRESS));
+      downcall("FPDF_GetPageHeightF", FunctionDescriptor.of(JAVA_FLOAT, JAVA_LONG));
 
   public static final MethodHandle FPDF_RenderPageBitmap =
       downcall(
           "FPDF_RenderPageBitmap",
           FunctionDescriptor.ofVoid(
-              ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
+              JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
 
   /**
    * Set the renderer type. 0 for AGG, 1 for Skia. (Experimental API)

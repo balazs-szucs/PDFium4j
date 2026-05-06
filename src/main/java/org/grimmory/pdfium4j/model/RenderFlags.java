@@ -17,6 +17,9 @@ import org.grimmory.pdfium4j.internal.ViewBindings;
  */
 public record RenderFlags(int value) {
 
+  /** Thumbnail flags: no annotations, anti-aliasing on, RGBA byte order. */
+  public static final RenderFlags THUMBNAIL = builder().annotations(false).antiAlias(true).build();
+
   /** Default flags: annotations rendered, anti-aliasing on, RGBA byte order. */
   public static final RenderFlags DEFAULT = builder().build();
 

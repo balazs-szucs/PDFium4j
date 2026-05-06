@@ -29,7 +29,7 @@ public class PdfRepairAllocationTest {
     asserter.verifyAllocationTrackingAvailable();
     arena = Arena.ofShared();
     
-    Path corpusPdf = findCorpusPdf("mozilla-pdfjs/issue14847.pdf");
+    Path corpusPdf = findCorpusPdf("gutenberg/996_Don Quixote.pdf");
     byte[] data = Files.readAllBytes(corpusPdf);
     corruptPdf = arena.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, data);
     
@@ -53,7 +53,7 @@ public class PdfRepairAllocationTest {
     ByteArrayOutputStream out = new ByteArrayOutputStream(4096);
     
     // Warmup
-    for (int i = 0; i < WARMUP_ITERATIONS; i++) {
+    for (int i = 0; i < 5000; i++) {
       out.reset();
       PdfSaver.repair(corruptPdf, out);
     }
@@ -62,7 +62,7 @@ public class PdfRepairAllocationTest {
     out.reset();
     PdfSaver.repair(corruptPdf, out);
     
-    asserter.assertNoAllocations(1024);
+    asserter.assertNoAllocations(0);
     assertTrue(out.size() > 0, "Repair should produce output");
   }
 

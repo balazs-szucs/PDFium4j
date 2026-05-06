@@ -112,6 +112,11 @@ public final class FfmHelper {
     return seg == null || seg.equals(MemorySegment.NULL) || seg.address() == 0;
   }
 
+  /** Check for native null pointers. */
+  public static boolean isNull(long address) {
+    return address == 0;
+  }
+
   /** Encode a Java String to a null-terminated UTF-16LE MemorySegment. */
   public static MemorySegment writeWideString(Arena arena, String text) {
     return arena.allocateFrom(text, StandardCharsets.UTF_16LE);
