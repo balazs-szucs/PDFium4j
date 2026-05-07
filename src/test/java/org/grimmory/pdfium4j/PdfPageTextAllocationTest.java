@@ -22,12 +22,11 @@ class PdfPageTextAllocationTest {
 
   /**
    * Allocation tolerance for bulk text extraction.
-   * 
-   * <p>This API returns a List of TextCharInfo objects and internal Strings, 
-   * so allocations are expected. 1MB is a safe ceiling for a single page 
-   * of text elements.
+   *
+   * <p>This API returns a List of TextCharInfo objects and internal Strings, so allocations are
+   * expected. 256KB is a tight ceiling for a single page of text elements.
    */
-  private static final long EFFICIENCY_TOLERANCE = 1024 * 1024;
+  private static final long EFFICIENCY_TOLERANCE = 256 * 1024;
 
   static boolean pdfiumAvailable() {
     try {
@@ -41,20 +40,19 @@ class PdfPageTextAllocationTest {
   @BeforeAll
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
-    Path source = findCorpusPdf("gutenberg/103_Around the World in Eighty Days.pdf");
+    Path source = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
     doc = PdfDocument.open(source);
-    
+
     // Find a page with text
     for (int i = 0; i < doc.pageCount(); i++) {
-        try (PdfPage p = doc.page(i)) {
-            if (p.charCount() > 0) {
-                page = doc.page(i);
-                break;
-            }
-        }
+      PdfPage p = doc.page(i);
+      if (p.charCount() > 0) {
+        page = p;
+        break;
+      }
     }
     if (page == null) {
-        throw new IllegalStateException("No page with text found in corpus PDF");
+      throw new IllegalStateException("No page with text found in corpus PDF");
     }
 
     // Warmup JIT for bulk extraction
@@ -87,7 +85,7 @@ class PdfPageTextAllocationTest {
     asserter.assertNoAllocations(EFFICIENCY_TOLERANCE); // 1MB for all the objects
   }
 
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {

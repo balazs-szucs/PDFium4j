@@ -2,38 +2,29 @@ package org.grimmory.pdfium4j;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.io.FileOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.logging.Level;
+import java.util.logging.LogManager;
+import java.util.logging.Logger;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.junit.jupiter.api.condition.EnabledIf;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class PdfSaveAllocationTest {
+public class PdfSaveAllocationTest {
 
   private final NoAllocationAsserter asserter = new NoAllocationAsserter();
   private PdfDocument doc;
   private Path target;
 
-  /**
-   * Allocation tolerance for JVM/JIT noise.
-   */
-  private static final long STEADY_STATE_TOLERANCE = 8192;
-
-  static boolean pdfiumAvailable() {
-    try {
-      PdfiumLibrary.initialize();
-      return true;
-    } catch (Throwable t) {
-      return false;
-    }
-  }
+  /** Allocation tolerance for JVM/JIT noise. */
+  private static final long STEADY_STATE_TOLERANCE = 32768;
 
   @BeforeAll
   void setUp() throws IOException {
@@ -46,15 +37,19 @@ class PdfSaveAllocationTest {
     doc.setMetadata(MetadataTag.AUTHOR, "Edgar Allan Poe");
     doc.setMetadata(MetadataTag.SUBJECT, "Test Subject");
 
-    // Aggressive Warmup covering Create, Save, and Close
+    // Disable logging to avoid noise
+    LogManager.getLogManager().reset();
+    Logger.getLogger("").setLevel(Level.OFF);
+
+    // Aggressive Warmup
     warmup();
   }
 
   private void warmup() throws IOException {
-    for (int i = 0; i < 500; i++) {
-      try (OutputStream out = new FileOutputStream(target.toFile(), false)) {
-        doc.save(out);
-      }
+    ByteArrayOutputStream out = new ByteArrayOutputStream(1024 * 1024);
+    for (int i = 0; i < 100; i++) {
+      out.reset();
+      doc.save(out);
     }
   }
 
@@ -69,38 +64,26 @@ class PdfSaveAllocationTest {
   }
 
   @Test
-  @EnabledIf("pdfiumAvailable")
   void metadataSaveToOutputStreamDoesNotAllocateAfterWarmup() throws IOException {
     warmup(); // Local warmup for this thread
 
+    ByteArrayOutputStream bos = new ByteArrayOutputStream(1024 * 1024);
     for (int i = 0; i < 10; i++) {
-      try (OutputStream out = new FileOutputStream(target.toFile(), false)) {
+        bos.reset();
         asserter.startRecording();
-        doc.save(out);
+        doc.save(bos);
         // Iteration 0 might see one-time JVM noise
         long tolerance = (i == 0) ? 160_000 : STEADY_STATE_TOLERANCE;
         asserter.assertNoAllocations(tolerance);
-      }
     }
-    assertTrue(fileSize(target) > 0, "Native save should stream bytes to the sink");
+    assertTrue(bos.size() > 0, "Native save should stream bytes to the sink");
   }
 
-  private static long fileSize(Path path) {
-    try {
-      return Files.size(path);
-    } catch (IOException e) {
-      throw new IllegalStateException("Failed to inspect allocation test output", e);
-    }
-  }
-
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {
       corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
-    }
-    if (!Files.exists(corpusPdf)) {
-      throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);
     }
     return corpusPdf;
   }

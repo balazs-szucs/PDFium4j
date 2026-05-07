@@ -23,10 +23,8 @@ class PdfRenderAllocationTest {
   private Arena arena;
   private MemorySegment renderBuffer;
 
-  /**
-   * Allocation tolerance for JVM/JIT noise.
-   */
-  private static final long STEADY_STATE_TOLERANCE = 8192;
+  /** Allocation tolerance for JVM/JIT noise. Reduced for Java 25 FFM. */
+  private static final long STEADY_STATE_TOLERANCE = 128;
 
   @BeforeAll
   void setUp() throws IOException {
@@ -79,7 +77,7 @@ class PdfRenderAllocationTest {
     }
   }
 
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {

@@ -21,17 +21,9 @@ final class NoAllocationAsserter {
     }
   }
 
-  long getAllocatedBytes() {
-    return threadMxBean.getThreadAllocatedBytes(Thread.currentThread().threadId());
-  }
-
   void startRecording() {
     testThread = Thread.currentThread();
     allocatedBytesBefore = threadMxBean.getThreadAllocatedBytes(testThread.threadId());
-  }
-
-  void assertNoAllocations() {
-    assertNoAllocations(0L);
   }
 
   void assertNoAllocations(long tolerance) {
@@ -39,6 +31,7 @@ final class NoAllocationAsserter {
     long delta = allocatedBytesAfter - allocatedBytesBefore;
     testThread = null;
     if (delta > tolerance) {
+      System.out.println("ALLOCATION FAILURE: Observed " + delta + " bytes (tolerance " + tolerance + ")");
       fail(
           "Expected zero thread allocations (tolerance: "
               + tolerance
@@ -46,10 +39,5 @@ final class NoAllocationAsserter {
               + delta
               + " allocated bytes");
     }
-  }
-
-  long calculateDelta() {
-    if (testThread == null) return 0;
-    return threadMxBean.getThreadAllocatedBytes(testThread.threadId()) - allocatedBytesBefore;
   }
 }

@@ -9,7 +9,7 @@ plugins {
     checkstyle
     pmd
     id("com.diffplug.spotless") version "8.4.0"
-    id("com.github.spotbugs") version "6.5.1"
+    id("com.github.spotbugs") version "6.5.4"
 }
 
 allprojects {
@@ -22,13 +22,13 @@ allprojects {
 }
 
 configure<CheckstyleExtension> {
-    toolVersion = "13.3.0"
+    toolVersion = "13.4.2"
     configFile = rootProject.file("config/checkstyle/checkstyle.xml")
     isShowViolations = true
 }
 
 configure<PmdExtension> {
-    toolVersion = "7.22.0"
+    toolVersion = "7.23.0"
     isConsoleOutput = true
     rulesMinimumPriority.set(5)
     ruleSetFiles = files(rootProject.file("config/pmd/ruleset.xml"))
@@ -78,7 +78,7 @@ tasks.withType<com.github.spotbugs.snom.SpotBugsTask>().configureEach {
         required.set(true)
     }
     reports.create("xml") {
-        required.set(false)
+        required.set(true)
     }
 }
 
@@ -117,153 +117,11 @@ tasks.withType<JavaCompile> {
     ))
 }
 
-tasks.withType<Test> {
-    useJUnitPlatform()
-    dependsOn("buildShim")
-    classpath += files(layout.buildDirectory.dir("generated-natives"))
-    jvmArgs(
-        "--enable-preview",
-        "--enable-native-access=ALL-UNNAMED"
-    )
-    filter {
-        excludeTestsMatching("org.grimmory.pdfium4j.PathologicalPdfTest")
-    }
-}
-
-tasks.named<Test>("test") {
-    exclude("**/*AllocationTest.class")
-}
-
-tasks.withType<Javadoc> {
-    (options as StandardJavadocDocletOptions).apply {
-        addBooleanOption("-enable-preview", true)
-        source = "25"
-        addStringOption("Xdoclint:none", "-quiet")
-    }
-    isFailOnError = false
-}
-
-
-
-tasks.withType<JavaExec> {
-    jvmArgs(
-        "--enable-preview",
-        "--enable-native-access=ALL-UNNAMED"
-    )
-}
-
-fun requireCorpusToolsEnabled(taskName: String) {
-    if (!enableCorpusTools.get()) {
-        throw GradleException(
-            "$taskName is disabled by default. Re-run with -PenableCorpusTools=true and explicit absolute corpus paths."
-        )
-    }
-}
-
-fun requireRunnerSource(taskName: String, relativePath: String) {
-    if (!project.file(relativePath).exists()) {
-        throw GradleException("$taskName entrypoint source is missing from this checkout: $relativePath")
-    }
-}
-
-fun requireAbsolutePathProperty(taskName: String, key: String) {
-    val value = System.getProperty(key)?.takeIf { it.isNotBlank() }
-        ?: throw GradleException("$taskName requires -D$key=/absolute/path")
-    if (!Path.of(value).isAbsolute) {
-        throw GradleException("$taskName requires -D$key to be an absolute path, got: $value")
-    }
-}
-
-fun JavaExec.forwardSystemProperties(keys: List<String>) {
-    keys.forEach { key ->
-        System.getProperty(key)?.let { value -> systemProperty(key, value) }
-    }
-}
-
-tasks.register<JavaExec>("runCorpusProcessor") {
-    group = "application"
-    description = "Runs the CorpusProcessor to write metadata to PDFs"
-    if (enableCorpusTools.get()) {
-        dependsOn("buildShim")
-    }
-    mainClass.set("org.grimmory.pdfium4j.CorpusProcessor")
-    classpath = sourceSets["test"].runtimeClasspath
-    classpath += files(layout.buildDirectory.dir("generated-natives"))
-    forwardSystemProperties(
-        listOf(
-            "corpus.dir",
-            "corpus.outDir"
-        )
-    )
-    doFirst {
-        requireCorpusToolsEnabled(name)
-        requireRunnerSource(name, "src/test/java/org/grimmory/pdfium4j/CorpusProcessor.java")
-        requireAbsolutePathProperty(name, "corpus.dir")
-        requireAbsolutePathProperty(name, "corpus.outDir")
-    }
-}
-
-tasks.register<JavaExec>("runPdfBoxCorpusGenerator") {
-    group = "application"
-    description = "Generates a synthetic PDF corpus using PDFBox (test scope only)"
-    mainClass.set("org.grimmory.pdfium4j.PdfBoxCorpusGenerator")
-    classpath = sourceSets["test"].runtimeClasspath
-    forwardSystemProperties(
-        listOf(
-            "corpus.targetCount",
-            "corpus.maxPages",
-            "corpus.seed",
-            "corpus.startIndex",
-            "corpus.clean",
-            "corpus.outDir"
-        )
-    )
-    doFirst {
-        requireCorpusToolsEnabled(name)
-        requireRunnerSource(name, "src/test/java/org/grimmory/pdfium4j/PdfBoxCorpusGenerator.java")
-        requireAbsolutePathProperty(name, "corpus.outDir")
-    }
-}
-
-tasks.register<Exec>("runPdfJsIngestion") {
-    group = "application"
-    description = "Ingests Mozilla's pdf.js test corpus"
-    commandLine("python3", "scripts/ingest_pdfjs.py")
-}
-tasks.register<JavaExec>("runCorpusMetadataStress") {
-    group = "application"
-    description = "Runs metadata save stress validation against corpus PDFs"
-    if (enableCorpusTools.get()) {
-        dependsOn("buildShim")
-    }
-    mainClass.set("org.grimmory.pdfium4j.CorpusMetadataStressRunner")
-    classpath = sourceSets["test"].runtimeClasspath
-    classpath += files(layout.buildDirectory.dir("generated-natives"))
-    forwardSystemProperties(
-        listOf(
-            "corpus.dir",
-            "corpus.passes",
-            "corpus.limit",
-            "corpus.seed",
-            "corpus.includeRegex",
-            "corpus.failFast"
-        )
-    )
-    doFirst {
-        requireCorpusToolsEnabled(name)
-        requireRunnerSource(name, "src/test/java/org/grimmory/pdfium4j/CorpusMetadataStressRunner.java")
-        requireAbsolutePathProperty(name, "corpus.dir")
-    }
-}
-
 tasks.named("check") {
     dependsOn("spotlessCheck")
 }
 
 // -- PDFium native binary download & bundling --
-// Prebuilt binaries from https://github.com/bblanchon/pdfium-binaries
-// Exclude stale empty natives dirs from src/main/resources (if present)
-tasks.processResources { exclude("natives/**") }
 
 val pdfiumVersion = findProperty("pdfiumVersion")?.toString() ?: "7825"
 
@@ -277,8 +135,6 @@ val pdfiumPlatforms = mapOf(
     "windows-x64"      to "win-x64"
 )
 
-// When set (e.g. -PpdfiumPlatformFilter=linux-musl-x64), only that platform
-// is downloaded and extracted. Useful in composite-build / container scenarios.
 val platformFilter = findProperty("pdfiumPlatformFilter")?.toString()
 val activePlatforms = if (platformFilter != null) {
     pdfiumPlatforms.filterKeys { it == platformFilter }
@@ -298,7 +154,6 @@ val hostPlatform = when {
     hostOs.contains("linux") && (hostArch == "x86_64" || hostArch == "amd64") -> "linux-x64"
     else -> null
 }
-
 
 val downloadPdfiumBinaries by tasks.registering {
     description = "Downloads prebuilt PDFium binaries for all supported platforms"
@@ -447,11 +302,10 @@ val generateNativeIndex by tasks.registering {
 
     doLast {
         nativesRoot.get().asFile.listFiles()?.filter { it.isDirectory }?.forEach { platformDir ->
-            val libs = platformDir.listFiles()?.filter { 
+            val libs = platformDir.listFiles()?.filter {
                 val name = it.name
                 name.endsWith(".so") || name.endsWith(".dylib") || name.endsWith(".dll")
-            }?.map { it.name }?.sortedBy { 
-                // Ensure libpdfium is first
+            }?.map { it.name }?.sortedBy {
                 if (it.contains("pdfium") && !it.contains("shim")) 0 else 1
             }
             if (libs != null && libs.isNotEmpty()) {
@@ -461,8 +315,6 @@ val generateNativeIndex by tasks.registering {
     }
 }
 
-
-// Per-platform native JAR tasks, one classified JAR per supported OS/arch
 val nativeJarTasks = pdfiumPlatforms.keys.map { localName ->
     val sanitized = localName.split("-").joinToString("") { it.replaceFirstChar(Char::uppercase) }
     tasks.register<Jar>("nativesJar$sanitized") {
@@ -478,13 +330,21 @@ tasks.assemble {
     dependsOn(nativeJarTasks)
 }
 
-dependencies {
-    compileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
-    testCompileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
-    testImplementation("org.apache.pdfbox:pdfbox:3.0.7")
-    testImplementation("org.apache.pdfbox:xmpbox:3.0.7")
-    testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+tasks.withType<Test> {
+    useJUnitPlatform()
+    dependsOn(generateNativeIndex)
+    classpath += files(layout.buildDirectory.dir("generated-natives"))
+    jvmArgs(
+        "--enable-preview",
+        "--enable-native-access=ALL-UNNAMED"
+    )
+    filter {
+        excludeTestsMatching("org.grimmory.pdfium4j.PathologicalPdfTest")
+    }
+}
+
+tasks.named<Test>("test") {
+    exclude("**/*AllocationTest.class")
 }
 
 tasks.register<Test>("allocationTests") {
@@ -501,40 +361,137 @@ tasks.register<Test>("allocationTests") {
     )
 }
 
-tasks.withType<Test>().configureEach {
+tasks.withType<Javadoc> {
+    (options as StandardJavadocDocletOptions).apply {
+        addBooleanOption("-enable-preview", true)
+        source = "25"
+        addStringOption("Xdoclint:none", "-quiet")
+    }
+    isFailOnError = false
 }
 
-// -- Maven Central publishing --
+tasks.withType<JavaExec> {
+    jvmArgs(
+        "--enable-preview",
+        "--enable-native-access=ALL-UNNAMED"
+    )
+}
+
+fun requireCorpusToolsEnabled(taskName: String) {
+    if (!enableCorpusTools.get()) {
+        throw GradleException(
+            "$taskName is disabled by default. Re-run with -PenableCorpusTools=true and explicit absolute corpus paths."
+        )
+    }
+}
+
+fun requireRunnerSource(taskName: String, relativePath: String) {
+    if (!project.file(relativePath).exists()) {
+        throw GradleException("$taskName entrypoint source is missing from this checkout: $relativePath")
+    }
+}
+
+fun requireAbsolutePathProperty(taskName: String, key: String) {
+    val value = System.getProperty(key)?.takeIf { it.isNotBlank() }
+        ?: throw GradleException("$taskName requires -D$key=/absolute/path")
+    if (!Path.of(value).isAbsolute) {
+        throw GradleException("$taskName requires -D$key to be an absolute path, got: $value")
+    }
+}
+
+fun JavaExec.forwardSystemProperties(keys: List<String>) {
+    keys.forEach { key ->
+        System.getProperty(key)?.let { value -> systemProperty(key, value) }
+    }
+}
+
+tasks.register<JavaExec>("runCorpusProcessor") {
+    group = "application"
+    description = "Runs the CorpusProcessor to write metadata to PDFs"
+    if (enableCorpusTools.get()) {
+        dependsOn("buildShim")
+    }
+    mainClass.set("org.grimmory.pdfium4j.CorpusProcessor")
+    classpath = sourceSets["test"].runtimeClasspath
+    classpath += files(layout.buildDirectory.dir("generated-natives"))
+    forwardSystemProperties(listOf("corpus.dir", "corpus.outDir"))
+    doFirst {
+        requireCorpusToolsEnabled(name)
+        requireRunnerSource(name, "src/test/java/org/grimmory/pdfium4j/CorpusProcessor.java")
+        requireAbsolutePathProperty(name, "corpus.dir")
+        requireAbsolutePathProperty(name, "corpus.outDir")
+    }
+}
+
+tasks.register<JavaExec>("runPdfBoxCorpusGenerator") {
+    group = "application"
+    description = "Generates a synthetic PDF corpus using PDFBox (test scope only)"
+    mainClass.set("org.grimmory.pdfium4j.PdfBoxCorpusGenerator")
+    classpath = sourceSets["test"].runtimeClasspath
+    forwardSystemProperties(listOf("corpus.targetCount", "corpus.maxPages", "corpus.seed", "corpus.startIndex", "corpus.clean", "corpus.outDir"))
+    doFirst {
+        requireCorpusToolsEnabled(name)
+        requireRunnerSource(name, "src/test/java/org/grimmory/pdfium4j/PdfBoxCorpusGenerator.java")
+        requireAbsolutePathProperty(name, "corpus.outDir")
+    }
+}
+
+tasks.register<Exec>("runPdfJsIngestion") {
+    group = "application"
+    description = "Ingests Mozilla's pdf.js test corpus"
+    commandLine("python3", "scripts/ingest_pdfjs.py")
+}
+
+tasks.register<JavaExec>("runCorpusMetadataStress") {
+    group = "application"
+    description = "Runs metadata save stress validation against corpus PDFs"
+    if (enableCorpusTools.get()) {
+        dependsOn("buildShim")
+    }
+    mainClass.set("org.grimmory.pdfium4j.CorpusMetadataStressRunner")
+    classpath = sourceSets["test"].runtimeClasspath
+    classpath += files(layout.buildDirectory.dir("generated-natives"))
+    forwardSystemProperties(listOf("corpus.dir", "corpus.passes", "corpus.limit", "corpus.seed", "corpus.includeRegex", "corpus.failFast"))
+    doFirst {
+        requireCorpusToolsEnabled(name)
+        requireRunnerSource(name, "src/test/java/org/grimmory/pdfium4j/CorpusMetadataStressRunner.java")
+        requireAbsolutePathProperty(name, "corpus.dir")
+    }
+}
+
+dependencies {
+    compileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
+    testCompileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
+    testImplementation("org.apache.pdfbox:pdfbox:3.0.7")
+    testImplementation("org.apache.pdfbox:xmpbox:3.0.7")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.14.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
 
 publishing {
     publications {
         create<MavenPublication>("mavenJava") {
             from(components["java"])
-
             nativeJarTasks.forEach { jarTask ->
                 artifact(jarTask)
             }
-
             pom {
                 name = "PDFium4j"
                 description = "Lightweight Java FFM wrapper around Google's PDFium PDF engine"
                 url = "https://github.com/grimmory-tools/PDFium4j"
                 inceptionYear = "2025"
-
                 licenses {
                     license {
                         name = "Apache License, Version 2.0"
                         url = "https://www.apache.org/licenses/LICENSE-2.0"
                     }
                 }
-
                 developers {
                     developer {
                         id = "grimmory-tools"
                         name = "Grimmory Tools"
                     }
                 }
-
                 scm {
                     connection = "scm:git:git://github.com/grimmory-tools/PDFium4j.git"
                     developerConnection = "scm:git:ssh://github.com/grimmory-tools/PDFium4j.git"

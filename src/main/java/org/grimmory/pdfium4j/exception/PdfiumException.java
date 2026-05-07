@@ -11,10 +11,6 @@ public class PdfiumException extends RuntimeException {
 
   @Serial private static final long serialVersionUID = 1L;
 
-  private final PdfErrorCode errorCode;
-  private final String operation;
-  private final String filePath;
-
   public PdfiumException(String message) {
     this(message, PdfErrorCode.UNKNOWN, null, null);
   }
@@ -26,29 +22,11 @@ public class PdfiumException extends RuntimeException {
   public PdfiumException(
       String message, PdfErrorCode errorCode, String operation, String filePath) {
     super(formatMessage(message, errorCode, operation, filePath));
-    this.errorCode = errorCode;
-    this.operation = operation;
-    this.filePath = filePath;
   }
 
   public PdfiumException(
       String message, PdfErrorCode errorCode, String operation, String filePath, Throwable cause) {
     super(formatMessage(message, errorCode, operation, filePath), cause);
-    this.errorCode = errorCode;
-    this.operation = operation;
-    this.filePath = filePath;
-  }
-
-  public PdfErrorCode getErrorCode() {
-    return errorCode;
-  }
-
-  public String getOperation() {
-    return operation;
-  }
-
-  public String getFilePath() {
-    return filePath;
   }
 
   private static String formatMessage(

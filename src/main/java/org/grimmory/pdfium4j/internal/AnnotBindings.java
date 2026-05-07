@@ -1,81 +1,73 @@
 package org.grimmory.pdfium4j.internal;
-
-import static java.lang.foreign.ValueLayout.ADDRESS;
-import static java.lang.foreign.ValueLayout.JAVA_FLOAT;
-import static java.lang.foreign.ValueLayout.JAVA_INT;
-import static java.lang.foreign.ValueLayout.JAVA_LONG;
-
+import static org.grimmory.pdfium4j.internal.FfmHelper.C_INT;
+import static org.grimmory.pdfium4j.internal.FfmHelper.C_LONG;
+import static org.grimmory.pdfium4j.internal.FfmHelper.C_POINTER;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.StructLayout;
 import java.lang.foreign.SymbolLookup;
+import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.StableValue;
 import java.util.Objects;
-
 /** FFM bindings for PDFium annotation functions from {@code fpdf_annot.h}. */
 public final class AnnotBindings {
-
   private static final Linker LINKER = Linker.nativeLinker();
   private static final SymbolLookup LOOKUP = SymbolLookup.loaderLookup();
-
   private AnnotBindings() {}
-
-  private static MethodHandle downcall(String name, FunctionDescriptor desc) {
-    return LOOKUP.find(name).map(addr -> LINKER.downcallHandle(addr, desc)).orElse(null);
+  private static MethodHandle find(String name, FunctionDescriptor desc, boolean critical) {
+    java.lang.foreign.MemorySegment addr = LOOKUP.find(name).orElse(null);
+    if (addr == null) return null;
+    return LINKER.downcallHandle(addr, desc, critical ? FfmHelper.CRITICAL_OPTIONS : FfmHelper.NO_OPTIONS);
   }
-
-  private static MethodHandle downcallCritical(String name, FunctionDescriptor desc) {
-    return LOOKUP
-        .find(name)
-        .map(addr -> LINKER.downcallHandle(addr, desc, Linker.Option.critical(false)))
-        .orElse(null);
-  }
-
   public static void checkRequired() {
-    // Annotation support is technically optional but core to grimmory
-    Objects.requireNonNull(FPDFPage_GetAnnotCount, "FPDFPage_GetAnnotCount");
-    Objects.requireNonNull(FPDFPage_GetAnnot, "FPDFPage_GetAnnot");
-    Objects.requireNonNull(FPDFPage_CloseAnnot, "FPDFPage_CloseAnnot");
-    Objects.requireNonNull(FPDFAnnot_GetSubtype, "FPDFAnnot_GetSubtype");
-    Objects.requireNonNull(FPDFAnnot_GetStringValue, "FPDFAnnot_GetStringValue");
-    Objects.requireNonNull(FPDFAnnot_GetRect, "FPDFAnnot_GetRect");
+    Objects.requireNonNull(FPDFPage_GetAnnotCount(), "FPDFPage_GetAnnotCount");
+    Objects.requireNonNull(FPDFPage_GetAnnot(), "FPDFPage_GetAnnot");
+    Objects.requireNonNull(FPDFPage_CloseAnnot(), "FPDFPage_CloseAnnot");
+    Objects.requireNonNull(FPDFAnnot_GetSubtype(), "FPDFAnnot_GetSubtype");
+    Objects.requireNonNull(FPDFAnnot_GetStringValue(), "FPDFAnnot_GetStringValue");
+    Objects.requireNonNull(FPDFAnnot_GetRect(), "FPDFAnnot_GetRect");
   }
-
   /** FS_RECTF struct layout: left, bottom, right, top (all floats). */
   public static final StructLayout FS_RECTF_LAYOUT =
       MemoryLayout.structLayout(
-          JAVA_FLOAT.withName("left"),
-          JAVA_FLOAT.withName("bottom"),
-          JAVA_FLOAT.withName("right"),
-          JAVA_FLOAT.withName("top"));
-
-  /** Get the number of annotations on a page. */
-  public static final MethodHandle FPDFPage_GetAnnotCount =
-      downcallCritical("FPDFPage_GetAnnotCount", FunctionDescriptor.of(JAVA_INT, ADDRESS));
-
-  /** Get annotation by index. Returns FPDF_ANNOTATION (must be closed). */
-  public static final MethodHandle FPDFPage_GetAnnot =
-      downcall("FPDFPage_GetAnnot", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT));
-
-  /** Close an annotation handle. */
-  public static final MethodHandle FPDFPage_CloseAnnot =
-      downcallCritical("FPDFPage_CloseAnnot", FunctionDescriptor.ofVoid(ADDRESS));
-
-  /** Get annotation subtype. Returns FPDF_ANNOTATION_SUBTYPE (int). */
-  public static final MethodHandle FPDFAnnot_GetSubtype =
-      downcallCritical("FPDFAnnot_GetSubtype", FunctionDescriptor.of(JAVA_INT, ADDRESS));
-
-  /**
-   * Get annotation string value by key (UTF-16LE, double-call pattern). Common keys: "Contents",
-   * "T" (author), "Subj" (subject), "M" (modification date).
-   */
-  public static final MethodHandle FPDFAnnot_GetStringValue =
-      downcall(
-          "FPDFAnnot_GetStringValue",
-          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
-
-  /** Get annotation bounding rectangle. Writes into FS_RECTF. Returns 1 on success. */
-  public static final MethodHandle FPDFAnnot_GetRect =
-      downcallCritical("FPDFAnnot_GetRect", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
+          ValueLayout.JAVA_FLOAT.withName("left"),
+          ValueLayout.JAVA_FLOAT.withName("bottom"),
+          ValueLayout.JAVA_FLOAT.withName("right"),
+          ValueLayout.JAVA_FLOAT.withName("top"));
+  private static final StableValue<MethodHandle> FPDFPage_GetAnnotCount_SV = StableValue.of();
+  public static MethodHandle FPDFPage_GetAnnotCount() {
+    return FPDFPage_GetAnnotCount_SV.orElseSet(
+        () -> find("FPDFPage_GetAnnotCount", FunctionDescriptor.of(C_INT, C_POINTER), true));
+  }
+  private static final StableValue<MethodHandle> FPDFPage_GetAnnot_SV = StableValue.of();
+  public static MethodHandle FPDFPage_GetAnnot() {
+    return FPDFPage_GetAnnot_SV.orElseSet(
+        () -> find("FPDFPage_GetAnnot", FunctionDescriptor.of(C_POINTER, C_POINTER, C_INT), true));
+  }
+  private static final StableValue<MethodHandle> FPDFPage_CloseAnnot_SV = StableValue.of();
+  public static MethodHandle FPDFPage_CloseAnnot() {
+    return FPDFPage_CloseAnnot_SV.orElseSet(
+        () -> find("FPDFPage_CloseAnnot", FunctionDescriptor.ofVoid(C_POINTER), true));
+  }
+  private static final StableValue<MethodHandle> FPDFAnnot_GetSubtype_SV = StableValue.of();
+  public static MethodHandle FPDFAnnot_GetSubtype() {
+    return FPDFAnnot_GetSubtype_SV.orElseSet(
+        () -> find("FPDFAnnot_GetSubtype", FunctionDescriptor.of(C_INT, C_POINTER), true));
+  }
+  private static final StableValue<MethodHandle> FPDFAnnot_GetStringValue_SV = StableValue.of();
+  public static MethodHandle FPDFAnnot_GetStringValue() {
+    return FPDFAnnot_GetStringValue_SV.orElseSet(
+        () ->
+            find(
+                "FPDFAnnot_GetStringValue",
+                FunctionDescriptor.of(C_LONG, C_POINTER, C_POINTER, C_POINTER, C_LONG),
+                false));
+  }
+  private static final StableValue<MethodHandle> FPDFAnnot_GetRect_SV = StableValue.of();
+  public static MethodHandle FPDFAnnot_GetRect() {
+    return FPDFAnnot_GetRect_SV.orElseSet(
+        () -> find("FPDFAnnot_GetRect", FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER), true));
+  }
 }

@@ -2,9 +2,14 @@ package org.grimmory.pdfium4j.internal;
 
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 
+import java.lang.foreign.AddressLayout;
 import java.lang.foreign.Arena;
+import java.lang.foreign.Linker;
+import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 /**
  * Utility methods for Foreign Function &amp; Memory interop with PDFium.
@@ -14,6 +19,31 @@ import java.nio.charset.StandardCharsets;
  * allocations.
  */
 public final class FfmHelper {
+
+  public static final Map<String, MemoryLayout> CANONICAL_LAYOUTS =
+      Linker.nativeLinker().canonicalLayouts();
+
+  public static final ValueLayout.OfInt C_INT =
+      (ValueLayout.OfInt) CANONICAL_LAYOUTS.getOrDefault("int", ValueLayout.JAVA_INT);
+
+  public static final ValueLayout.OfLong C_LONG =
+      (ValueLayout.OfLong) CANONICAL_LAYOUTS.getOrDefault("long", ValueLayout.JAVA_LONG);
+
+  public static final ValueLayout.OfInt C_BOOL =
+      (ValueLayout.OfInt) CANONICAL_LAYOUTS.getOrDefault("int", ValueLayout.JAVA_INT);
+
+  public static final AddressLayout C_POINTER = ValueLayout.ADDRESS;
+
+  /** Standard options for non-critical downcalls. */
+  public static final Linker.Option[] NO_OPTIONS = new Linker.Option[0];
+
+  /** Options for critical downcalls that do NOT access Java heap. Fastest for trivial native calls. */
+  public static final Linker.Option[] CRITICAL_OPTIONS =
+      new Linker.Option[] {Linker.Option.critical(false)};
+
+  /** Options for critical downcalls that MAY access Java heap. Useful for certain optimizations. */
+  public static final Linker.Option[] HEAP_CRITICAL_OPTIONS =
+      new Linker.Option[] {Linker.Option.critical(true)};
 
   private FfmHelper() {}
 
@@ -112,11 +142,6 @@ public final class FfmHelper {
     return seg == null || seg.equals(MemorySegment.NULL) || seg.address() == 0;
   }
 
-  /** Check for native null pointers. */
-  public static boolean isNull(long address) {
-    return address == 0;
-  }
-
   /** Encode a Java String to a null-terminated UTF-16LE MemorySegment. */
   public static MemorySegment writeWideString(Arena arena, String text) {
     return arena.allocateFrom(text, StandardCharsets.UTF_16LE);
@@ -144,16 +169,20 @@ public final class FfmHelper {
     return arena.allocateFrom(text, StandardCharsets.UTF_8);
   }
 
-  /** Decode a UTF-16LE buffer into a Java String. */
-  public static String readUtf16String(MemorySegment seg, long byteLen) {
-    return fromWideString(seg, byteLen);
-  }
-
   /** Decode an ASCII/UTF-8 buffer into a Java String. */
   public static String readAsciiString(MemorySegment seg, long byteLen) {
     if (byteLen <= 1) return "";
     long lenLong = byteLen - 1; // remove null terminator
     int len = (int) Math.min(lenLong, Integer.MAX_VALUE);
+    byte[] arr = ScratchBuffer.getByteArray(len);
+    MemorySegment.copy(seg, JAVA_BYTE, 0, arr, 0, len);
+    return new String(arr, 0, len, StandardCharsets.UTF_8);
+  }
+
+  /** Decode a UTF-8 buffer into a Java String. */
+  public static String fromUtf8String(MemorySegment seg, int byteLen) {
+    if (byteLen <= 1) return "";
+    int len = byteLen - 1;
     byte[] arr = ScratchBuffer.getByteArray(len);
     MemorySegment.copy(seg, JAVA_BYTE, 0, arr, 0, len);
     return new String(arr, 0, len, StandardCharsets.UTF_8);

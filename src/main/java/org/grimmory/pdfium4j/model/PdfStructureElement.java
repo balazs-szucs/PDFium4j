@@ -1,5 +1,6 @@
 package org.grimmory.pdfium4j.model;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -8,6 +9,7 @@ import java.util.Optional;
  * Represents a logical element in a PDF structure tree (e.g., Heading, Table, Paragraph). Used for
  * accessibility and structured data extraction from Tagged PDFs.
  */
+@SuppressFBWarnings("EI_EXPOSE_REP")
 public record PdfStructureElement(
     String type,
     Optional<String> title,

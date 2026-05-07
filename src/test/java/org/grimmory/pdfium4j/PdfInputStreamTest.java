@@ -32,7 +32,7 @@ class PdfInputStreamTest {
 
   @Test
   void testOpenFromCorruptedInputStream() {
-    byte[] badData = "Not a PDF".getBytes();
+    byte[] badData = "Not a PDF".getBytes(java.nio.charset.StandardCharsets.UTF_8);
     try (ByteArrayInputStream bais = new ByteArrayInputStream(badData)) {
       assertThrows(PdfCorruptException.class, () -> PdfDocument.open(bais));
     } catch (IOException e) {
@@ -43,7 +43,6 @@ class PdfInputStreamTest {
   @Test
   void testTempFileDeletion() throws IOException {
     byte[] data = Files.readAllBytes(SAMPLE_PDF);
-    ByteArrayInputStream bais = new ByteArrayInputStream(data);
 
     // We want to verify the temp file is gone after close.
     // Since we can't easily get the temp file path from the public API,

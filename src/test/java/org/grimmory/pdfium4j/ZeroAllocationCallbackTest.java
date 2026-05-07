@@ -28,13 +28,17 @@ class ZeroAllocationCallbackTest {
   void testWithMetadataUtf16() {
     try (PdfDocument doc = PdfDocument.open(SAMPLE_PDF)) {
       doc.setMetadata(MetadataTag.TITLE, "Zero Alloc Test");
-      
+
       AtomicBoolean called = new AtomicBoolean(false);
-      doc.withMetadataUtf16(MetadataTag.TITLE, (segment, length) -> {
-        called.set(true);
-        String title = new String(segment.asSlice(0, length).toArray(JAVA_BYTE), StandardCharsets.UTF_16LE);
-        assertTrue(title.startsWith("Zero Alloc Test"));
-      });
+      doc.withMetadataUtf16(
+          MetadataTag.TITLE,
+          (segment, length) -> {
+            called.set(true);
+            String title =
+                new String(
+                    segment.asSlice(0, length).toArray(JAVA_BYTE), StandardCharsets.UTF_16LE);
+            assertTrue(title.startsWith("Zero Alloc Test"));
+          });
       assertTrue(called.get());
     }
   }
@@ -44,16 +48,17 @@ class ZeroAllocationCallbackTest {
     asserter.verifyAllocationTrackingAvailable();
     try (PdfDocument doc = PdfDocument.open(SAMPLE_PDF)) {
       doc.setMetadata(MetadataTag.TITLE, "Zero Alloc Test");
-      
+
       try (var scope = ScratchBuffer.acquireScope()) {
-          // Warmup heavily with constant consumer
-          for (int i = 0; i < 50000; i++) {
-            doc.withMetadataUtf16(MetadataTag.TITLE, CONSTANT_CONSUMER);
-          }
-          
-          asserter.startRecording();
+        PdfiumLibrary.ignore(scope);
+        // Warmup heavily with constant consumer
+        for (int i = 0; i < 50000; i++) {
           doc.withMetadataUtf16(MetadataTag.TITLE, CONSTANT_CONSUMER);
-          asserter.assertNoAllocations(0);
+        }
+
+        asserter.startRecording();
+        doc.withMetadataUtf16(MetadataTag.TITLE, CONSTANT_CONSUMER);
+        asserter.assertNoAllocations(0);
       }
     }
   }
@@ -65,18 +70,21 @@ class ZeroAllocationCallbackTest {
       boolean foundText = false;
       int searchLimit = Math.min(doc.pageCount(), 10);
       for (int i = 0; i < searchLimit; i++) {
-          try (PdfPage page = doc.page(i)) {
-            AtomicBoolean called = new AtomicBoolean(false);
-            page.withText((segment, length) -> {
-              called.set(true);
-            });
-            if (called.get()) {
-                foundText = true;
-                break;
-            }
+        try (PdfPage page = doc.page(i)) {
+          AtomicBoolean called = new AtomicBoolean(false);
+          page.withText(
+              (segment, length) -> {
+                called.set(true);
+              });
+          if (called.get()) {
+            foundText = true;
+            break;
           }
+        }
       }
-      assertTrue(foundText, "withText consumer was never called for any of the first " + searchLimit + " pages");
+      assertTrue(
+          foundText,
+          "withText consumer was never called for any of the first " + searchLimit + " pages");
     }
   }
 
@@ -87,27 +95,28 @@ class ZeroAllocationCallbackTest {
     try (PdfDocument doc = PdfDocument.open(testPdf)) {
       try (PdfPage page = doc.page(1)) {
         try (var scope = ScratchBuffer.acquireScope()) {
-            // Warmup
-            for (int i = 0; i < 50000; i++) {
-              page.withText(CONSTANT_CONSUMER);
-            }
-            
-            asserter.startRecording();
+          PdfiumLibrary.ignore(scope);
+          // Warmup
+          for (int i = 0; i < 50000; i++) {
             page.withText(CONSTANT_CONSUMER);
-            asserter.assertNoAllocations(0);
+          }
+
+          asserter.startRecording();
+          page.withText(CONSTANT_CONSUMER);
+          asserter.assertNoAllocations(0);
         }
       }
     }
   }
 
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {
-        corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
     }
     if (!Files.exists(corpusPdf)) {
-        return SAMPLE_PDF; 
+      return SAMPLE_PDF;
     }
     return corpusPdf;
   }

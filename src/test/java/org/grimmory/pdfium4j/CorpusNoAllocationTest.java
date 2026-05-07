@@ -27,12 +27,10 @@ class CorpusNoAllocationTest {
   private Arena arena;
   private MemorySegment renderBuffer;
   private MemorySegment trailerBuffer;
-  private int[] output = new int[3];
+  private final int[] output = new int[3];
 
-  /**
-   * Allocation tolerance for JVM/JIT noise.
-   */
-  private static final long STEADY_STATE_TOLERANCE = 8192;
+  /** Allocation tolerance for JVM/JIT noise. */
+  private static final long STEADY_STATE_TOLERANCE = 256;
 
   @BeforeAll
   void setUp() throws IOException {
@@ -60,6 +58,7 @@ class CorpusNoAllocationTest {
         }
       } catch (Exception e) {
         // Skip problematic files during warmup
+        PdfiumLibrary.ignore(e);
       }
     }
   }
@@ -96,11 +95,12 @@ class CorpusNoAllocationTest {
         asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
       } catch (Exception e) {
         // Some PDFs might be corrupt or have issues, we skip them but report if many fail
+        PdfiumLibrary.ignore(e);
       }
     }
   }
 
-  private Stream<Path> getCorpusFiles() throws IOException {
+  private static Stream<Path> getCorpusFiles() throws IOException {
     Path corpusDir = Path.of("corpus", "gutenberg");
     if (!Files.exists(corpusDir)) {
       corpusDir = Path.of("..", "corpus", "gutenberg");

@@ -21,9 +21,9 @@ class PdfBookmarkAllocationTest {
 
   /**
    * Allocation tolerance for bookmark extraction.
-   * 
-   * <p>This API returns a List of Bookmark objects, so allocations
-   * are expected. This threshold ensures the implementation remains efficient.
+   *
+   * <p>This API returns a List of Bookmark objects, so allocations are expected. This threshold
+   * ensures the implementation remains efficient.
    */
   private static final long EFFICIENCY_TOLERANCE = 256 * 1024;
 
@@ -66,7 +66,7 @@ class PdfBookmarkAllocationTest {
     asserter.assertNoAllocations(EFFICIENCY_TOLERANCE);
   }
 
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {

@@ -22,9 +22,9 @@ class PdfStructureTreeAllocationTest {
 
   /**
    * Allocation tolerance for complex structure tree extraction.
-   * 
-   * <p>This API returns a List of PdfStructureElement objects, so allocations
-   * are expected. This threshold ensures the implementation remains efficient.
+   *
+   * <p>This API returns a List of PdfStructureElement objects, so allocations are expected. This
+   * threshold ensures the implementation remains efficient.
    */
   private static final long EFFICIENCY_TOLERANCE = 128 * 1024;
 
@@ -71,7 +71,7 @@ class PdfStructureTreeAllocationTest {
     asserter.assertNoAllocations(EFFICIENCY_TOLERANCE);
   }
 
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {

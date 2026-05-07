@@ -5,7 +5,6 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.ByteBuffer;
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageWriteParam;
@@ -27,15 +26,6 @@ public record RenderResult(int width, int height, byte[] rgba) {
 
   public RenderResult {
     rgba = rgba.clone();
-  }
-
-  /**
-   * Returns a read-only view of the pixel data.
-   *
-   * @return a read-only ByteBuffer wrapping the rgba array
-   */
-  public ByteBuffer asReadOnlyBuffer() {
-    return ByteBuffer.wrap(rgba).asReadOnlyBuffer();
   }
 
   @Override

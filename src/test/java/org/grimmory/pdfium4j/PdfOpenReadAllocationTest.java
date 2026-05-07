@@ -30,10 +30,8 @@ class PdfOpenReadAllocationTest {
   private PdfDocument.NoAllocationPathProbe openProbe;
   private PdfDocument metadataDoc;
 
-  /**
-   * Allocation tolerance for JVM/JIT noise.
-   */
-  private static final long STEADY_STATE_TOLERANCE = 8192;
+  /** Allocation tolerance for JVM/JIT noise. */
+  private static final long STEADY_STATE_TOLERANCE = 256;
 
   static boolean pdfiumAvailable() {
     try {
@@ -114,7 +112,7 @@ class PdfOpenReadAllocationTest {
     }
   }
 
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {

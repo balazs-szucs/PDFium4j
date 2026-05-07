@@ -25,9 +25,7 @@ public class PdfRepairAllocationTest {
   private MemorySegment corruptPdf;
   private Arena arena;
 
-  /**
-   * Allocation tolerance for JVM/JIT noise.
-   */
+  /** Allocation tolerance for JVM/JIT noise. */
   private static final long STEADY_STATE_TOLERANCE = 8192;
 
   @BeforeAll
@@ -37,7 +35,11 @@ public class PdfRepairAllocationTest {
 
     Path corpusPdf = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
     byte[] data = Files.readAllBytes(corpusPdf);
-    corruptPdf = arena.allocateFrom(JAVA_BYTE, data);
+    
+    // Truncate just enough to break the startxref (usually last ~10 bytes)
+    int truncatedLen = data.length - 10;
+    corruptPdf = arena.allocate(truncatedLen);
+    MemorySegment.copy(MemorySegment.ofArray(data), 0, corruptPdf, 0, truncatedLen);
 
     // Disable logging to avoid noise
     LogManager.getLogManager().reset();
@@ -56,7 +58,7 @@ public class PdfRepairAllocationTest {
   @Test
   @EnabledIf("pdfiumAvailable")
   public void repairDoesNotAllocateAfterWarmup() throws IOException {
-    // Pre-allocate a large enough buffer to avoid resizing during test (Amontillado is 367KB)
+    // Pre-allocate a large enough buffer to avoid resizing during test
     ByteArrayOutputStream out = new ByteArrayOutputStream(1024 * 1024);
 
     // Warmup
@@ -80,15 +82,11 @@ public class PdfRepairAllocationTest {
     }
   }
 
-  private Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf(String relativePath) {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {
-      // Fallback for different test execution environments
       corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
-    }
-    if (!Files.exists(corpusPdf)) {
-      throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);
     }
     return corpusPdf;
   }

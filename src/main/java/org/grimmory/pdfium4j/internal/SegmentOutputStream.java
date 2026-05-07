@@ -1,5 +1,6 @@
 package org.grimmory.pdfium4j.internal;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.OutputStream;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -14,6 +15,7 @@ public final class SegmentOutputStream extends OutputStream {
   private MemorySegment segment;
   private long pos;
 
+  @SuppressFBWarnings("EI_EXPOSE_REP2")
   public SegmentOutputStream(MemorySegment segment) {
     this.segment = segment;
     this.pos = 0;
@@ -37,6 +39,7 @@ public final class SegmentOutputStream extends OutputStream {
     return pos;
   }
 
+  @SuppressFBWarnings("EI_EXPOSE_REP")
   public MemorySegment segment() {
     return segment;
   }

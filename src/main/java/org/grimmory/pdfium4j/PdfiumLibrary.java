@@ -72,14 +72,14 @@ public final class PdfiumLibrary {
         ShimBindings.checkRequired();
 
         // Set renderer type if supported
-        if (ViewBindings.FPDF_SetRendererType != null) {
-          ViewBindings.FPDF_SetRendererType.invokeExact(rendererType);
+        if (ViewBindings.FPDF_SetRendererType() != null) {
+          ViewBindings.FPDF_SetRendererType().invokeExact(rendererType);
         }
 
         Arena arena = Arena.global();
         MemorySegment config = arena.allocate(ViewBindings.LIBRARY_CONFIG_LAYOUT);
         config.set(ValueLayout.JAVA_INT, 0, 2); // Version 2
-        ViewBindings.FPDF_InitLibraryWithConfig.invokeExact(config);
+        ViewBindings.FPDF_InitLibraryWithConfig().invokeExact(config);
         initialized = true;
       } catch (Throwable t) {
         initError = t;
@@ -116,39 +116,6 @@ public final class PdfiumLibrary {
     }
   }
 
-  /**
-   * Shuts down the PDFium library and releases global resources.
-   *
-   * @throws IllegalStateException if documents are still open
-   * @throws PdfiumException if shutdown fails
-   */
-  public static void shutdown() {
-    synchronized (LOCK) {
-      if (!initialized) return;
-      int open = openDocumentCount.get();
-      if (open > 0) {
-        throw new IllegalStateException(
-            "Cannot shutdown PDFium: %d documents are still open".formatted(open));
-      }
-      try {
-        ViewBindings.FPDF_DestroyLibrary.invokeExact();
-        initialized = false;
-        initError = null;
-      } catch (Throwable t) {
-        throw new PdfiumException("Failed to shut down PDFium library", t);
-      }
-    }
-  }
-
-  /**
-   * Returns whether the PDFium library is currently initialized.
-   *
-   * @return {@code true} if initialized, {@code false} otherwise
-   */
-  public static boolean isInitialized() {
-    return initialized;
-  }
-
   private static final boolean LOG_SWALLOWED = false;
 
   private static final class SwallowLoggerHolder {
@@ -160,8 +127,10 @@ public final class PdfiumLibrary {
    *
    * @param t the exception to ignore
    */
-  public static void ignore(Throwable t) {
+  public static void ignore(Object t) {
     if (!LOG_SWALLOWED) return;
-    SwallowLoggerHolder.LOGGER.log(System.Logger.Level.DEBUG, "Swallowed exception", t);
+    if (t instanceof Throwable e) {
+      SwallowLoggerHolder.LOGGER.log(System.Logger.Level.DEBUG, "Swallowed exception", e);
+    }
   }
 }

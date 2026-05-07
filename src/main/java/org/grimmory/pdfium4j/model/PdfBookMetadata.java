@@ -5,18 +5,14 @@ import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.grimmory.pdfium4j.PdfDocument;
 import org.grimmory.pdfium4j.PdfiumLibrary;
-import org.grimmory.pdfium4j.XmpMetadataParser;
 
 /**
  * PDF implementation of {@link BookMetadata}. Wraps PDF metadata from Info dictionary and XMP
@@ -50,123 +46,13 @@ public record PdfBookMetadata(
     Map<String, String> customFields)
     implements BookMetadata {
 
-  private static final System.Logger LOG = System.getLogger(PdfBookMetadata.class.getName());
   private static final Pattern UNIFORM_DIGIT_PATTERN = Pattern.compile("^(\\d)\\1{9,12}$");
   private static final Pattern NON_ISBN_CHARS_PATTERN = Pattern.compile("[^0-9Xx]");
-  private static final Pattern SEPARATOR_PATTERN = Pattern.compile("[,;]");
 
   public PdfBookMetadata {
     authors = Collections.unmodifiableList(authors);
     subjects = Collections.unmodifiableList(subjects);
     customFields = Collections.unmodifiableMap(customFields);
-  }
-
-  /** Create an empty PdfBookMetadata. */
-  public static PdfBookMetadata empty() {
-    return new PdfBookMetadata(
-        Optional.empty(),
-        List.of(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        Optional.empty(),
-        List.of(),
-        Optional.empty(),
-        Optional.empty(),
-        XmpMetadata.empty(),
-        Map.of());
-  }
-
-  /**
-   * Extract book metadata from an open {@link PdfDocument}.
-   *
-   * @param document the open document
-   * @return combined metadata from Info dictionary and XMP packet
-   */
-  public static PdfBookMetadata from(PdfDocument document) {
-    XmpMetadata xmp = XmpMetadataParser.parseFrom(document);
-
-    return new PdfBookMetadata(
-        xmp.title().or(() -> document.metadata(MetadataTag.TITLE)),
-        extractAuthors(xmp, document),
-        xmp.calibreSeries(),
-        xmp.calibreSeriesIndex().isPresent()
-            ? Optional.of((float) xmp.calibreSeriesIndex().getAsDouble())
-            : Optional.empty(),
-        extractIsbn(xmp),
-        xmp.language()
-            .or(() -> document.metadata("Language").map(PdfBookMetadata::normalizeLanguage)),
-        extractPublishedDate(xmp)
-            .or(
-                () ->
-                    document
-                        .metadata(MetadataTag.CREATION_DATE)
-                        .flatMap(PdfBookMetadata::parseDate)),
-        extractSubjects(xmp, document),
-        xmp.description().or(() -> document.metadata(MetadataTag.SUBJECT)),
-        xmp.publisher().or(() -> document.metadata(MetadataTag.PRODUCER)),
-        xmp,
-        extractCustomFields(xmp, document));
-  }
-
-  private static List<String> extractAuthors(XmpMetadata xmp, PdfDocument document) {
-
-    List<String> authors = new ArrayList<>(xmp.creators());
-
-    if (authors.isEmpty()) {
-      document
-          .metadata(MetadataTag.AUTHOR)
-          .ifPresent(
-              author -> {
-                String[] parts = SEPARATOR_PATTERN.split(author);
-                for (String part : parts) {
-                  String trimmed = part.trim();
-                  if (!trimmed.isBlank() && !authors.contains(trimmed)) {
-                    authors.add(trimmed);
-                  }
-                }
-              });
-    }
-
-    return Collections.unmodifiableList(authors);
-  }
-
-  private static List<String> extractSubjects(XmpMetadata xmp, PdfDocument document) {
-    List<String> subjects = new ArrayList<>(xmp.subjects());
-    if (subjects.isEmpty()) {
-      document
-          .metadata(MetadataTag.KEYWORDS)
-          .ifPresent(
-              keywords -> {
-                String[] parts = SEPARATOR_PATTERN.split(keywords);
-                for (String part : parts) {
-                  String trimmed = part.trim();
-                  if (!trimmed.isBlank() && !subjects.contains(trimmed)) {
-                    subjects.add(trimmed);
-                  }
-                }
-              });
-    }
-    return Collections.unmodifiableList(subjects);
-  }
-
-  private static Optional<String> extractIsbn(XmpMetadata xmp) {
-    List<String> isbns = xmp.isbns();
-    if (!isbns.isEmpty()) {
-      return Optional.of(isbns.getFirst());
-    }
-
-    for (String id : xmp.identifiers()) {
-      if (id.toLowerCase(Locale.ROOT).contains("isbn")) {
-        String cleaned = cleanIsbn(id);
-        if (cleaned != null) {
-          return Optional.of(cleaned);
-        }
-      }
-    }
-
-    return Optional.empty();
   }
 
   private static final Pattern PDF_DATE_PATTERN =
@@ -186,19 +72,6 @@ public record PdfBookMetadata(
           DateTimeFormatter.ofPattern("dd MMM yyyy", Locale.US), // 15 Jan 2024
           DateTimeFormatter.ofPattern("yyyy") // 2024 (year only)
           );
-
-  private static Optional<LocalDate> extractPublishedDate(XmpMetadata xmp) {
-    List<String> candidates = new ArrayList<>(8);
-    xmp.date().ifPresent(candidates::add);
-    String createDate = xmp.customFields().get("CreateDate");
-    if (createDate != null) candidates.add(createDate);
-
-    for (String raw : candidates) {
-      Optional<LocalDate> parsed = parseDate(raw.strip());
-      if (parsed.isPresent()) return parsed;
-    }
-    return Optional.empty();
-  }
 
   private static Optional<LocalDate> parseDate(String dateStr) {
     if (dateStr == null || dateStr.isEmpty()) return Optional.empty();
@@ -241,45 +114,6 @@ public record PdfBookMetadata(
     return Optional.empty();
   }
 
-  private static Map<String, String> extractCustomFields(XmpMetadata xmp, PdfDocument document) {
-
-    Map<String, String> custom = new LinkedHashMap<>(xmp.customFields());
-
-    for (Map.Entry<String, String> entry : xmp.calibreFields().entrySet()) {
-      if (!"series".equalsIgnoreCase(entry.getKey())
-          && !"series_index".equalsIgnoreCase(entry.getKey())) {
-        custom.put("calibre:" + entry.getKey(), entry.getValue());
-      }
-    }
-
-    xmp.pdfaConformance().ifPresent(conf -> custom.put("pdfaConformance", conf));
-
-    try {
-      Map<String, String> infoDict = document.metadata();
-      for (Map.Entry<String, String> entry : infoDict.entrySet()) {
-        String key = entry.getKey();
-        if ("Title".equalsIgnoreCase(key)
-            || "Author".equalsIgnoreCase(key)
-            || "Subject".equalsIgnoreCase(key)
-            || "Keywords".equalsIgnoreCase(key)
-            || "Creator".equalsIgnoreCase(key)
-            || "Producer".equalsIgnoreCase(key)
-            || "CreationDate".equalsIgnoreCase(key)
-            || "ModDate".equalsIgnoreCase(key)) {
-          continue;
-        }
-        custom.put("info:" + key, entry.getValue());
-      }
-    } catch (Exception e) {
-      LOG.log(
-          System.Logger.Level.DEBUG,
-          "Ignoring supplemental Info dictionary metadata extraction failure",
-          e);
-    }
-
-    return Collections.unmodifiableMap(custom);
-  }
-
   @CheckForNull
   private static String cleanIsbn(String id) {
     if (id == null) return null;
@@ -312,16 +146,5 @@ public record PdfBookMetadata(
       sum += digit * ((i % 2 == 0) ? 1 : 3);
     }
     return sum % 10 == 0;
-  }
-
-  @CheckForNull
-  private static String normalizeLanguage(String language) {
-    if (language == null || language.isBlank()) return null;
-    String lower = language.trim().toLowerCase();
-    if (lower.length() == 2) return lower;
-    int dashPos = lower.indexOf('-');
-    if (dashPos > 0) return lower.substring(0, dashPos);
-
-    return lower;
   }
 }

@@ -17,9 +17,7 @@ import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.model.XmpMetadata;
 import org.grimmory.pdfium4j.model.XmpMetadata.QualifiedIdentifier;
 
-/**
- * Serializes {@link XmpMetadata} to XMP XML packets suitable for embedding in PDF files.
- */
+/** Serializes {@link XmpMetadata} to XMP XML packets suitable for embedding in PDF files. */
 public final class XmpMetadataWriter {
 
   private static final String NS_RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -81,26 +79,45 @@ public final class XmpMetadataWriter {
 
   private interface Sink {
     void write(String s) throws IOException;
+
     void write(char c) throws IOException;
   }
 
   private static final class WriterSink implements Sink {
     private final Writer writer;
-    WriterSink(Writer writer) { this.writer = writer; }
-    @Override public void write(String s) throws IOException { writer.write(s); }
-    @Override public void write(char c) throws IOException { writer.write(c); }
+
+    WriterSink(Writer writer) {
+      this.writer = writer;
+    }
+
+    @Override
+    public void write(String s) throws IOException {
+      writer.write(s);
+    }
+
+    @Override
+    public void write(char c) throws IOException {
+      writer.write(c);
+    }
   }
 
   private static final class OutputStreamSink implements Sink {
     private final OutputStream out;
-    OutputStreamSink(OutputStream out) { this.out = out; }
-    @Override public void write(String s) throws IOException {
+
+    OutputStreamSink(OutputStream out) {
+      this.out = out;
+    }
+
+    @Override
+    public void write(String s) throws IOException {
       int len = s.length();
       for (int i = 0; i < len; i++) {
         write(s.charAt(i));
       }
     }
-    @Override public void write(char c) throws IOException {
+
+    @Override
+    public void write(char c) throws IOException {
       if (c <= 127) {
         out.write((byte) c);
       } else {
@@ -133,11 +150,16 @@ public final class XmpMetadataWriter {
   }
 
   private static void writeDublinCore(Sink s, XmpMetadata metadata) throws IOException {
-    boolean hasDc = metadata.title().isPresent() || !metadata.creators().isEmpty() ||
-                    metadata.description().isPresent() || !metadata.subjects().isEmpty() ||
-                    metadata.publisher().isPresent() || metadata.language().isPresent() ||
-                    metadata.date().isPresent() || metadata.rights().isPresent() ||
-                    !metadata.identifiers().isEmpty();
+    boolean hasDc =
+        metadata.title().isPresent()
+            || !metadata.creators().isEmpty()
+            || metadata.description().isPresent()
+            || !metadata.subjects().isEmpty()
+            || metadata.publisher().isPresent()
+            || metadata.language().isPresent()
+            || metadata.date().isPresent()
+            || metadata.rights().isPresent()
+            || !metadata.identifiers().isEmpty();
     if (!hasDc) return;
 
     s.write(RDF_DESCRIPTION_START);
@@ -250,7 +272,9 @@ public final class XmpMetadataWriter {
     writeUnprefixedCustomDescription(s, simpleUnprefixed, listUnprefixed);
   }
 
-  private static void writeUnprefixedCustomDescription(Sink s, Map<String, String> simpleUnprefixed, Map<String, List<String>> listUnprefixed) throws IOException {
+  private static void writeUnprefixedCustomDescription(
+      Sink s, Map<String, String> simpleUnprefixed, Map<String, List<String>> listUnprefixed)
+      throws IOException {
     if (simpleUnprefixed.isEmpty() && listUnprefixed.isEmpty()) return;
 
     s.write(RDF_DESCRIPTION_START);
@@ -267,7 +291,8 @@ public final class XmpMetadataWriter {
     s.write(RDF_DESCRIPTION_END);
   }
 
-  private static void writeSimpleField(Sink s, String prefix, String localName, String value) throws IOException {
+  private static void writeSimpleField(Sink s, String prefix, String localName, String value)
+      throws IOException {
     s.write("  <");
     s.write(prefix);
     s.write(":");
@@ -281,7 +306,8 @@ public final class XmpMetadataWriter {
     s.write(">\n");
   }
 
-  private static void writeListField(Sink s, String prefix, String localName, List<String> values) throws IOException {
+  private static void writeListField(Sink s, String prefix, String localName, List<String> values)
+      throws IOException {
     writeBag(s, prefix + ":" + localName, values);
   }
 
@@ -315,17 +341,23 @@ public final class XmpMetadataWriter {
   }
 
   private static void writeAlt(Sink s, String tag, String value) throws IOException {
-    s.write("  <"); s.write(tag); s.write(">\n");
+    s.write("  <");
+    s.write(tag);
+    s.write(">\n");
     s.write("    <rdf:Alt>\n");
     s.write("      <rdf:li xml:lang=\"x-default\">");
     writeEscaped(s, value);
     s.write(RDF_LI_END);
     s.write("    </rdf:Alt>\n");
-    s.write("  </"); s.write(tag); s.write(">\n");
+    s.write("  </");
+    s.write(tag);
+    s.write(">\n");
   }
 
   private static void writeSeq(Sink s, String tag, List<String> values) throws IOException {
-    s.write("  <"); s.write(tag); s.write(">\n");
+    s.write("  <");
+    s.write(tag);
+    s.write(">\n");
     s.write(RDF_SEQ_START);
     for (String v : values) {
       s.write(RDF_LI_START);
@@ -333,11 +365,15 @@ public final class XmpMetadataWriter {
       s.write(RDF_LI_END);
     }
     s.write(RDF_SEQ_END);
-    s.write("  </"); s.write(tag); s.write(">\n");
+    s.write("  </");
+    s.write(tag);
+    s.write(">\n");
   }
 
   private static void writeBag(Sink s, String tag, List<String> values) throws IOException {
-    s.write("  <"); s.write(tag); s.write(">\n");
+    s.write("  <");
+    s.write(tag);
+    s.write(">\n");
     s.write(RDF_BAG_START);
     for (String v : values) {
       s.write(RDF_LI_START);
@@ -345,11 +381,14 @@ public final class XmpMetadataWriter {
       s.write(RDF_LI_END);
     }
     s.write(RDF_BAG_END);
-    s.write("  </"); s.write(tag); s.write(">\n");
+    s.write("  </");
+    s.write(tag);
+    s.write(">\n");
   }
 
   private static void writePadding(Sink s) throws IOException {
-    String padding = "                                                                                \n";
+    String padding =
+        "                                                                                \n";
     for (int i = 0; i < 20; i++) s.write(padding);
   }
 
@@ -410,22 +449,38 @@ public final class XmpMetadataWriter {
     return isValidNcNameStart(c) || (c >= '0' && c <= '9') || c == '-' || c == '.';
   }
 
-  private static <T> void processField(String key, T value, Map<String, Map<String, T>> grouped, Map<String, T> unprefixed) {
+  private static <T> void processField(
+      String key, T value, Map<String, Map<String, T>> grouped, Map<String, T> unprefixed) {
     int colonIdx = key.indexOf(':');
     if (colonIdx > 0) {
       String prefix = key.substring(0, colonIdx);
       if ("xmp".equals(prefix)) unprefixed.put(key, value);
-      else grouped.computeIfAbsent(prefix, _ -> LinkedHashMap.newLinkedHashMap(8)).put(key.substring(colonIdx + 1), value);
+      else
+        grouped
+            .computeIfAbsent(prefix, _ -> LinkedHashMap.newLinkedHashMap(8))
+            .put(key.substring(colonIdx + 1), value);
     } else unprefixed.put(key, value);
   }
 
-  private static void groupCustomFields(XmpMetadata metadata, Map<String, Map<String, String>> simpleGrouped, Map<String, Map<String, List<String>>> listGrouped, Map<String, String> simpleUnprefixed, Map<String, List<String>> listUnprefixed) {
+  private static void groupCustomFields(
+      XmpMetadata metadata,
+      Map<String, Map<String, String>> simpleGrouped,
+      Map<String, Map<String, List<String>>> listGrouped,
+      Map<String, String> simpleUnprefixed,
+      Map<String, List<String>> listUnprefixed) {
     metadata.customFields().forEach((k, v) -> processField(k, v, simpleGrouped, simpleUnprefixed));
     metadata.customListFields().forEach((k, v) -> processField(k, v, listGrouped, listUnprefixed));
   }
 
-  private interface ThrowingRunnable { void run() throws IOException; }
+  private interface ThrowingRunnable {
+    void run() throws IOException;
+  }
+
   private static void wrapError(ThrowingRunnable r) {
-    try { r.run(); } catch (IOException e) { throw new PdfiumException("XMP serialization error", e); }
+    try {
+      r.run();
+    } catch (IOException e) {
+      throw new PdfiumException("XMP serialization error", e);
+    }
   }
 }

@@ -17,6 +17,7 @@ class ScratchBufferTest {
 
   @BeforeEach
   void setup() {
+    ScratchBuffer.purge();
     ScratchBuffer.acquire();
   }
 
@@ -136,7 +137,7 @@ class ScratchBufferTest {
 
     // both arenas should now be closed
     assertThrows(IllegalStateException.class, () -> first.get(JAVA_BYTE, 0));
-    
+
     // Restore state for cleanup()
     ScratchBuffer.acquire();
   }
