@@ -1,5 +1,6 @@
 package org.grimmory.pdfium4j.model;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -16,4 +17,24 @@ public record PdfStructureElement(
     List<PdfStructureElement> children,
     List<Integer> markedContentIds,
     int attributeCount) {
+  /**
+   * Recursively find all elements of a specific type.
+   *
+   * @param type the type to search for (e.g. "H1", "Table")
+   * @return a list of matching elements
+   */
+  public List<PdfStructureElement> findAll(String type) {
+    List<PdfStructureElement> result = new ArrayList<>();
+    findAll(type, result);
+    return result;
+  }
+
+  private void findAll(String type, List<PdfStructureElement> accumulator) {
+    if (this.type.equalsIgnoreCase(type)) {
+      accumulator.add(this);
+    }
+    for (PdfStructureElement child : children) {
+      child.findAll(type, accumulator);
+    }
+  }
 }

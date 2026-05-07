@@ -102,10 +102,7 @@ public final class EditBindings {
           "FPDF_SaveWithVersion",
           FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT));
 
-  public static final int FPDF_INCREMENTAL = 1 << 0;
   public static final int FPDF_NO_INCREMENTAL = 1 << 1;
-  public static final int FPDF_REMOVE_SECURITY = 1 << 2;
-  public static final int FPDF_SUBSET_NEW_FONTS = 1 << 3;
 
   /** Create a new blank page at the given index. Returns FPDF_PAGE handle (NULL on failure). */
   public static final MethodHandle FPDFPage_New =

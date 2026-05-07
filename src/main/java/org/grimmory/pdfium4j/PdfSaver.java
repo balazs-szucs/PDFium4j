@@ -44,8 +44,6 @@ import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.IoUtils;
-import org.grimmory.pdfium4j.internal.ScratchBuffer;
-import org.grimmory.pdfium4j.internal.ShimBindings;
 import org.grimmory.pdfium4j.internal.XmpUpdate;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.grimmory.pdfium4j.model.PdfProcessingPolicy;
@@ -147,8 +145,7 @@ final class PdfSaver {
     }
   }
 
-  // Byte constants for zero-allocation dictionary key scanning (replacing regex patterns).
-  private static final byte[] METADATA_KEY = "/Metadata".getBytes(StandardCharsets.ISO_8859_1);
+    // Byte constants for zero-allocation dictionary key scanning (replacing regex patterns).
   private static final byte[] FILTER_KEY = "/Filter".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] LENGTH_KEY = "/Length".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] FIRST_KEY = "/First".getBytes(StandardCharsets.ISO_8859_1);
@@ -157,10 +154,6 @@ final class PdfSaver {
   private static final byte[] COLUMNS_KEY = "/Columns".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] W_KEY = "/W".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] INDEX_KEY = "/Index".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] FLATEDECODE_NAME =
-      "FlateDecode".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] FL_NAME = "Fl".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] R_KEYWORD = "R".getBytes(StandardCharsets.ISO_8859_1);
 
   private static final byte[] DICT_START = "<<".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] TRAILER_KEYWORD = "trailer".getBytes(StandardCharsets.ISO_8859_1);
@@ -250,22 +243,6 @@ final class PdfSaver {
       throw new PdfiumException("Failed to save document", t);
     } finally {
       context.finish();
-    }
-  }
-
-  static void saveToPath(MemorySegment docHandle, Path path, boolean incremental) throws IOException {
-    try (var _ = ScratchBuffer.acquireScope()) {
-      MemorySegment pathSeg = ScratchBuffer.getUtf8(path.toAbsolutePath().toString());
-      int ok;
-      if (incremental) {
-        ok = (int) ShimBindings.pdfium4j_save_incremental.invokeExact(docHandle, pathSeg);
-      } else {
-        ok = (int) ShimBindings.pdfium4j_save_copy.invokeExact(docHandle, pathSeg);
-      }
-      if (ok == 0) throw new IOException("Native shim save failed for " + path);
-    } catch (Throwable t) {
-      if (t instanceof IOException e) throw e;
-      throw new IOException("Failed to save to path " + path, t);
     }
   }
 
@@ -1057,7 +1034,9 @@ final class PdfSaver {
     for (int i = 0; i < totalObjs; ) {
       int start = sortedNums.get(i);
       int count = 1;
-      while (i + count < totalObjs && sortedNums.get(i + count) == start + count) {
+      while (i + count < totalObjs) {
+        final Integer nextOffset = sortedNums.get(i + count);
+        if (!(nextOffset == start + count)) break;
         count++;
       }
       int len = formatInt(intBuf, start);
@@ -1090,12 +1069,14 @@ final class PdfSaver {
   private static int formatInt(byte[] buf, int value) {
     int pos = buf.length;
     if (value == 0) {
-      buf[--pos] = '0';
+        --pos;
+        buf[pos] = '0';
       return 1;
     }
     int temp = value;
     while (temp > 0) {
-      buf[--pos] = (byte) ('0' + (temp % 10));
+        --pos;
+        buf[pos] = (byte) ('0' + (temp % 10));
       temp /= 10;
     }
     return buf.length - pos;
@@ -1219,9 +1200,6 @@ final class PdfSaver {
   }
 
   private static void writeLong(OutputStream out, long value) throws IOException {
-    byte[] buf = REPAIR_INT_BUF.get(); // REPAIR_INT_BUF is 11 bytes, but long needs up to 20.
-    // Wait, let's use a bigger buffer or a dedicated long buffer.
-    // Actually, I'll use IO_BUFFER for temporary formatting if needed, or just a 20 byte buffer.
     byte[] longBuf = REPAIR_ENTRY_BUF.get(); // 20 bytes
     int pos = longBuf.length;
     if (value == 0) {
@@ -1230,7 +1208,8 @@ final class PdfSaver {
     }
     long temp = value;
     while (temp > 0) {
-      longBuf[--pos] = (byte) ('0' + (temp % 10));
+        --pos;
+        longBuf[pos] = (byte) ('0' + (temp % 10));
       temp /= 10;
     }
     out.write(longBuf, pos, longBuf.length - pos);
@@ -1261,7 +1240,7 @@ final class PdfSaver {
    * Pre-renders the full XMP stream object to a byte array so the caller knows its size before
    * writing the enclosing xref table entry.
    */
-  private static byte[] buildXmpObjectBytes(int num, XmpUpdate xmp) throws IOException {
+  private static byte[] buildXmpObjectBytes(int num, XmpUpdate xmp) {
     byte[] content =
         switch (xmp) {
           case XmpUpdate.Raw raw -> raw.xmp().getBytes(StandardCharsets.UTF_8);
@@ -1325,7 +1304,7 @@ final class PdfSaver {
     while (end < len && dict.charAt(end) >= '0' && dict.charAt(end) <= '9') end++;
     // skip whitespace
     while (end < len && isWs(dict.charAt(end))) end++;
-    // expect 'R'
+    // skip 'R'
     if (end < len && dict.charAt(end) == 'R') {
       end++;
       return dict.substring(0, idx) + dict.substring(end);
@@ -1718,7 +1697,7 @@ final class PdfSaver {
     parseObjectStreamHeader(decodedSeg, firstOffset, objectCount, objNumbers, offsets);
 
     int resolvedIndex = objectIndex;
-    if (resolvedIndex >= objNumbers.length || objNumbers[resolvedIndex] != targetObjNum) {
+    if (objNumbers[resolvedIndex] != targetObjNum) {
       resolvedIndex = -1;
       for (int i = 0; i < objNumbers.length; i++) {
         if (objNumbers[i] == targetObjNum) {
@@ -1894,8 +1873,9 @@ final class PdfSaver {
     for (int row = 0; row < data.length / rowSpan; row++) {
       int src = row * rowSpan;
       int dst = row * columns;
-      int filter = data[src++] & 0xFF;
-      for (int i = 0; i < columns; i++) {
+      int filter = data[src] & 0xFF;
+        src++;
+        for (int i = 0; i < columns; i++) {
         int left = i == 0 ? 0 : out[dst + i - 1] & 0xFF;
         int up = row == 0 ? 0 : out[dst - columns + i] & 0xFF;
         int upLeft = (i == 0 || row == 0) ? 0 : out[dst - columns + i - 1] & 0xFF;
@@ -2066,10 +2046,11 @@ final class PdfSaver {
     return next > 0 ? next : trailerSize;
   }
 
-  @CheckForNull
   private static int parseObjectHeaderNum(MemorySegment seg, long objKeywordPos) {
     long genEnd = objKeywordPos;
-    while (genEnd > 0 && isAsciiWhitespace(seg, genEnd - 1)) {
+    while (genEnd > 0) {
+      final boolean isWhitespace = isAsciiWhitespace(seg, genEnd - 1);
+      if (!isWhitespace) break;
       genEnd--;
     }
     long genStart = genEnd;
@@ -2081,7 +2062,8 @@ final class PdfSaver {
     }
 
     long separatorEnd = genStart;
-    while (separatorEnd > 0 && isAsciiWhitespace(seg, separatorEnd - 1)) {
+    while (separatorEnd > 0) {
+      if (!isAsciiWhitespace(seg, separatorEnd - 1)) break;
       separatorEnd--;
     }
     if (separatorEnd == genStart) {
@@ -2108,11 +2090,15 @@ final class PdfSaver {
     }
 
     long genEnd = objKeywordPos;
-    while (genEnd > 0 && isAsciiWhitespace(seg, genEnd - 1)) {
+    while (genEnd > 0) {
+      final boolean asciiWhitespace = isAsciiWhitespace(seg, genEnd - 1);
+      if (!asciiWhitespace) break;
       genEnd--;
     }
     long genStart = genEnd;
-    while (genStart > 0 && isAsciiDigit(seg, genStart - 1)) {
+    while (genStart > 0) {
+      final boolean isValid = isAsciiDigit(seg, genStart - 1);
+      if (!isValid) break;
       genStart--;
     }
     if (genStart == genEnd) {
@@ -2120,7 +2106,8 @@ final class PdfSaver {
     }
 
     long separatorEnd = genStart;
-    while (separatorEnd > 0 && isAsciiWhitespace(seg, separatorEnd - 1)) {
+    while (separatorEnd > 0) {
+      if (!isAsciiWhitespace(seg, separatorEnd - 1)) break;
       separatorEnd--;
     }
     if (separatorEnd == genStart) {
@@ -2129,7 +2116,9 @@ final class PdfSaver {
 
     long objEnd = separatorEnd;
     long objStart = objEnd;
-    while (objStart > 0 && isAsciiDigit(seg, objStart - 1)) {
+    while (objStart > 0) {
+      final boolean asciiDigit = isAsciiDigit(seg, objStart - 1);
+      if (!asciiDigit) break;
       objStart--;
     }
     if (objStart == objEnd || !isAtLineBoundary(seg, objStart)) {
@@ -2264,7 +2253,6 @@ final class PdfSaver {
     return pos;
   }
 
-  @CheckForNull
   private static int parseObjectRefNum(MemorySegment seg, long pos, long limit) {
     long numStart = skipAsciiWhitespace(seg, pos, limit);
     if (numStart >= limit) return -1;

@@ -38,6 +38,7 @@ public final class XmpMetadataWriter {
   private static final String RDF_BAG_END = "    </rdf:Bag>\n";
   private static final String RDF_SEQ_START = "    <rdf:Seq>\n";
   private static final String RDF_SEQ_END = "    </rdf:Seq>\n";
+  private static final String ATTRIBUTE_END = "\">\n";
 
   private final Map<String, String> customNamespaces = LinkedHashMap.newLinkedHashMap(8);
 
@@ -113,7 +114,7 @@ public final class XmpMetadataWriter {
     s.write("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n");
     s.write("<rdf:RDF xmlns:rdf=\"");
     s.write(NS_RDF);
-    s.write("\">\n");
+    s.write(ATTRIBUTE_END);
 
     writeDescriptions(s, metadata);
 
@@ -143,7 +144,7 @@ public final class XmpMetadataWriter {
     s.write(XMLNS_ATTR);
     s.write("dc=\"");
     s.write(NS_DC);
-    s.write("\">\n");
+    s.write(ATTRIBUTE_END);
 
     metadata.title().ifPresent(v -> wrapError(() -> writeAlt(s, "dc:title", v)));
     if (!metadata.creators().isEmpty()) writeSeq(s, "dc:creator", metadata.creators());
@@ -168,7 +169,7 @@ public final class XmpMetadataWriter {
     s.write(XMLNS_ATTR);
     s.write("pdfaid=\"");
     s.write(NS_PDFA_ID);
-    s.write("\">\n");
+    s.write(ATTRIBUTE_END);
 
     if (conf.length() >= 2 && Character.isDigit(conf.charAt(0))) {
       s.write("  <pdfaid:part>");
@@ -193,7 +194,7 @@ public final class XmpMetadataWriter {
     s.write(XMLNS_ATTR);
     s.write("calibre=\"");
     s.write(NS_CALIBRE);
-    s.write("\">\n");
+    s.write(ATTRIBUTE_END);
 
     for (Map.Entry<String, String> entry : metadata.calibreFields().entrySet()) {
       String key = entry.getKey();
@@ -229,7 +230,7 @@ public final class XmpMetadataWriter {
       s.write(prefix);
       s.write("=\"");
       writeEscaped(s, uri);
-      s.write("\">\n");
+      s.write(ATTRIBUTE_END);
 
       Map<String, String> simples = simpleGrouped.get(prefix);
       if (simples != null) {
@@ -256,7 +257,7 @@ public final class XmpMetadataWriter {
     s.write(XMLNS_ATTR);
     s.write("xmp=\"");
     s.write(NS_XAP);
-    s.write("\">\n");
+    s.write(ATTRIBUTE_END);
     for (Map.Entry<String, String> entry : simpleUnprefixed.entrySet()) {
       writeSimpleField(s, "xmp", stripPrefix(entry.getKey()), entry.getValue());
     }
@@ -295,7 +296,7 @@ public final class XmpMetadataWriter {
     s.write(XMLNS_ATTR);
     s.write("xmpidq=\"");
     s.write(NS_XMP_IDQ);
-    s.write("\">\n");
+    s.write(ATTRIBUTE_END);
     s.write("  <xmp:Identifier>\n");
     s.write(RDF_BAG_START);
     for (QualifiedIdentifier id : metadata.xmpIdentifiers()) {
@@ -354,7 +355,8 @@ public final class XmpMetadataWriter {
 
   private static void writeEscaped(Sink s, String text) throws IOException {
     if (text == null) return;
-    for (int i = 0; i < text.length(); i++) {
+    final int textLength = text.length();
+    for (int i = 0; i < textLength; i++) {
       char c = text.charAt(i);
       switch (c) {
         case '&' -> s.write("&amp;");
@@ -394,7 +396,8 @@ public final class XmpMetadataWriter {
   private static void validateNcName(String name) {
     if (name == null || name.isEmpty() || !isValidNcNameStart(name.charAt(0)))
       throw new IllegalArgumentException("Invalid XML name: '" + name + "'");
-    for (int i = 1; i < name.length(); i++)
+    final int nameLength = name.length();
+    for (int i = 1; i < nameLength; i++)
       if (!isValidNcNameChar(name.charAt(i)))
         throw new IllegalArgumentException("Invalid XML name: '" + name + "'");
   }
@@ -407,7 +410,7 @@ public final class XmpMetadataWriter {
     return isValidNcNameStart(c) || (c >= '0' && c <= '9') || c == '-' || c == '.';
   }
 
-  private <T> void processField(String key, T value, Map<String, Map<String, T>> grouped, Map<String, T> unprefixed) {
+  private static <T> void processField(String key, T value, Map<String, Map<String, T>> grouped, Map<String, T> unprefixed) {
     int colonIdx = key.indexOf(':');
     if (colonIdx > 0) {
       String prefix = key.substring(0, colonIdx);
@@ -416,7 +419,7 @@ public final class XmpMetadataWriter {
     } else unprefixed.put(key, value);
   }
 
-  private void groupCustomFields(XmpMetadata metadata, Map<String, Map<String, String>> simpleGrouped, Map<String, Map<String, List<String>>> listGrouped, Map<String, String> simpleUnprefixed, Map<String, List<String>> listUnprefixed) {
+  private static void groupCustomFields(XmpMetadata metadata, Map<String, Map<String, String>> simpleGrouped, Map<String, Map<String, List<String>>> listGrouped, Map<String, String> simpleUnprefixed, Map<String, List<String>> listUnprefixed) {
     metadata.customFields().forEach((k, v) -> processField(k, v, simpleGrouped, simpleUnprefixed));
     metadata.customListFields().forEach((k, v) -> processField(k, v, listGrouped, listUnprefixed));
   }

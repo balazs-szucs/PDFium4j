@@ -29,10 +29,18 @@ final class BookmarkReader {
   }
  
   private static List<Bookmark> collectBookmarks(MemorySegment docHandle, MemorySegment current) throws Throwable {
-    List<Bookmark> result = new ArrayList<>();
-    while (!FfmHelper.isNull(current)) {
-      result.add(toBookmark(docHandle, current));
-      current = (MemorySegment) ShimBindings.pdfium4j_bookmark_next.invokeExact(docHandle, current);
+    int count = 0;
+    MemorySegment it = current;
+    while (!FfmHelper.isNull(it)) {
+      count++;
+      it = (MemorySegment) ShimBindings.pdfium4j_bookmark_next.invokeExact(docHandle, it);
+    }
+
+    List<Bookmark> result = new ArrayList<>(count);
+    it = current;
+    while (!FfmHelper.isNull(it)) {
+      result.add(toBookmark(docHandle, it));
+      it = (MemorySegment) ShimBindings.pdfium4j_bookmark_next.invokeExact(docHandle, it);
     }
     return List.copyOf(result);
   }

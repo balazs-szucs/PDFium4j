@@ -122,7 +122,7 @@ public final class PdfPage implements AutoCloseable {
       }
 
       BitmapBindings.FPDFBitmap_FillRect.invokeExact(
-          bitmap, 0, 0, w, h, (long) (background & 0xFFFFFFFFL));
+          bitmap, 0, 0, w, h, (background & 0xFFFFFFFFL));
 
       ViewBindings.FPDF_RenderPageBitmap.invokeExact(bitmap, handle, 0, 0, w, h, 0, flags);
     } catch (Throwable t) {
@@ -175,7 +175,7 @@ public final class PdfPage implements AutoCloseable {
     if (consumer == null) {
       throw new IllegalArgumentException("consumer must not be null");
     }
-    try (var scope = ScratchBuffer.acquireScope()) {
+    try (var _ = ScratchBuffer.acquireScope()) {
       withTextPage(
           "Failed to extract text",
           textPage -> {
@@ -303,7 +303,7 @@ public final class PdfPage implements AutoCloseable {
 
     if (ThumbnailBindings.FPDFPage_GetThumbnailAsBitmap != null) {
         try {
-            RenderResult nativeThumb = renderThumbnailNative(maxDimension);
+            RenderResult nativeThumb = renderThumbnailNative();
             if (nativeThumb != null) {
                 return nativeThumb;
             }
@@ -334,7 +334,7 @@ public final class PdfPage implements AutoCloseable {
       return ((long) h << 32) | (w & 0xFFFFFFFFL);
   }
 
-  private RenderResult renderThumbnailNative(int maxDimension) throws Throwable {
+  private RenderResult renderThumbnailNative() throws Throwable {
     MemorySegment bitmap = (MemorySegment) ThumbnailBindings.FPDFPage_GetThumbnailAsBitmap.invokeExact(handle);
     if (FfmHelper.isNull(bitmap)) {
         return null;

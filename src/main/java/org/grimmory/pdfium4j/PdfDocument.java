@@ -1,24 +1,17 @@
 package org.grimmory.pdfium4j;
 
-import static java.lang.foreign.ValueLayout.ADDRESS;
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_DOUBLE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
-import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
-import edu.umd.cs.findbugs.annotations.CheckForNull;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.foreign.Arena;
-import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
 import java.lang.ref.Cleaner;
-import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
@@ -36,10 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.grimmory.pdfium4j.exception.PdfCorruptException;
@@ -77,7 +67,6 @@ public final class PdfDocument implements AutoCloseable {
   private static final Logger LOGGER = Logger.getLogger(PdfDocument.class.getName());
 
   private static final Map<Long, SeekableByteChannel> CHANNELS = new ConcurrentHashMap<>(16);
-  private static final AtomicLong CHANNEL_ID_SEQ = new AtomicLong();
   private static final Cleaner CLEANER = Cleaner.create();
   private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
   private static final int[] EMPTY_INT_ARRAY = new int[0];
@@ -95,9 +84,8 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
   private static final Arena PROBE_SEGMENT_ARENA = Arena.ofShared();
-  private static final MemorySegment[] METADATA_KEY_SEGMENTS = buildMetadataKeySegments();
 
-  private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
+    private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
 
   // Tail window for fallback file scanning (Info/XMP are typically near trailer/xref).
   private static final long FALLBACK_TAIL_SCAN_BYTES = 256L << 10;
@@ -496,122 +484,6 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
-  private static PdfDocument openFromChannel(
-      SeekableByteChannel channel,
-      Path sourcePath,
-      Path tempFile,
-      String password,
-      String label,
-      PdfProcessingPolicy policy) {
-    Arena docArena = Arena.ofShared();
-    long channelId = 0;
-    try {
-      channelId = CHANNEL_ID_SEQ.incrementAndGet();
-      CHANNELS.put(channelId, channel);
-
-      if (ViewBindings.FPDF_LoadCustomDocument == null) {
-        throw new PdfiumException("FPDF_LoadCustomDocument not available");
-      }
-
-      MemorySegment fileAccess = docArena.allocate(ViewBindings.FPDF_FILEACCESS_LAYOUT);
-      fileAccess.set(JAVA_LONG, 0, channel.size());
-      MethodHandle getBlockMH =
-          MethodHandles.lookup()
-              .findStatic(
-                  PdfDocument.class,
-                  "getFileBlock",
-                  MethodType.methodType(
-                      int.class, MemorySegment.class, long.class, MemorySegment.class, long.class));
-      MemorySegment getBlockStub =
-          Linker.nativeLinker().upcallStub(getBlockMH, ViewBindings.GET_BLOCK_DESC, docArena);
-      fileAccess.set(ADDRESS, 8, getBlockStub);
-      fileAccess.set(ADDRESS, 16, MemorySegment.ofAddress(channelId));
-
-      MemorySegment pwdSeg =
-          (password != null) ? docArena.allocateFrom(password) : MemorySegment.NULL;
-      MemorySegment doc =
-          (MemorySegment) ViewBindings.FPDF_LoadCustomDocument.invokeExact(fileAccess, pwdSeg);
-      if (FfmHelper.isNull(doc)) {
-        int err = (int) (long) ViewBindings.FPDF_GetLastError.invokeExact();
-        throw mapOpenError("Failed to open document: " + label, err);
-      }
-      return new PdfDocument(
-          doc,
-          docArena,
-          channel,
-          channelId,
-          sourcePath,
-          tempFile,
-          null,
-          policy,
-          readFileVersion(doc),
-          Thread.currentThread());
-    } catch (PdfiumException e) {
-      if (channelId > 0) CHANNELS.remove(channelId);
-      try {
-        channel.close();
-      } catch (IOException ex) {
-        PdfiumLibrary.ignore(ex);
-      }
-      if (tempFile != null) {
-        try {
-          Files.deleteIfExists(tempFile);
-        } catch (IOException ex) {
-          PdfiumLibrary.ignore(ex);
-        }
-      }
-      docArena.close();
-      throw e;
-    } catch (Throwable t) {
-      if (channelId > 0) CHANNELS.remove(channelId);
-      try {
-        channel.close();
-      } catch (IOException ex) {
-        PdfiumLibrary.ignore(ex);
-      }
-      if (tempFile != null) {
-        try {
-          Files.deleteIfExists(tempFile);
-        } catch (IOException ex) {
-          PdfiumLibrary.ignore(ex);
-        }
-      }
-      docArena.close();
-      throw new PdfiumException("Failed to open channel: " + label, t);
-    }
-  }
-
-  @SuppressWarnings("PMD.UnusedFormalParameter")
-  private static int getFileBlock(MemorySegment param, long pos, MemorySegment buf, long size) {
-    if (FfmHelper.isNull(param) || FfmHelper.isNull(buf)) return 0;
-    long channelId = param.address();
-    SeekableByteChannel channel = CHANNELS.get(channelId);
-    if (channel == null || size <= 0 || size > Integer.MAX_VALUE) return 0;
-    try {
-      ByteBuffer bb = buf.reinterpret(size).asByteBuffer();
-      if (channel instanceof FileChannel fc) {
-        // Positional read: no position mutation, no synchronization needed.
-        long readPos = pos;
-        while (bb.hasRemaining()) {
-          int read = fc.read(bb, readPos);
-          if (read <= 0) return 0; // EOF before filling buffer – signal failure to PDFium
-          readPos += read;
-        }
-      } else {
-        synchronized (channel) {
-          channel.position(pos);
-          while (bb.hasRemaining()) {
-            int read = channel.read(bb);
-            if (read <= 0) return 0; // EOF before filling buffer
-          }
-        }
-      }
-      return 1;
-    } catch (IOException e) {
-      return 0;
-    }
-  }
-
   public int pageCount() {
     ensureOpen();
     if (cachedPageCount >= 0) return cachedPageCount;
@@ -874,12 +746,12 @@ public final class PdfDocument implements AutoCloseable {
         int needed = wideStringByteLength(pending);
         MemorySegment buf = ScratchBuffer.get(needed);
         writeWideString(buf, pending);
-        consumer.accept(buf, (long) needed);
+        consumer.accept(buf, needed);
       }
       return;
     }
  
-    try (var scope = ScratchBuffer.acquireScope()) {
+    try (var _ = ScratchBuffer.acquireScope()) {
       long needed = (long) DocBindings.FPDF_GetMetaText.invokeExact(handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
       if (needed <= 2) return;
  
@@ -933,76 +805,6 @@ public final class PdfDocument implements AutoCloseable {
     } catch (Throwable t) {
       PdfiumLibrary.ignore(t);
       return InputStream.nullInputStream();
-    }
-  }
-
-  int probeRawXmpByteLength() {
-    ensureOpen();
-    if (DocBindings.FPDF_GetXMPMetadata == null) {
-      return 0;
-    }
-    try {
-      long needed =
-          (long) DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, MemorySegment.NULL, 0L);
-      return needed <= 0 ? 0 : Math.toIntExact(needed);
-    } catch (PdfiumException e) {
-      throw e;
-    } catch (Throwable t) {
-      throw new PdfiumException("Failed to probe XMP length", t);
-    }
-  }
-
-  int readRawXmp(MemorySegment target) {
-    ensureOpen();
-    if (target == null || FfmHelper.isNull(target)) {
-      throw new IllegalArgumentException("target must not be null");
-    }
-    if (DocBindings.FPDF_GetXMPMetadata == null) {
-      return 0;
-    }
-    try {
-      long copied =
-          (long)
-              DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, target, target.byteSize());
-      if (copied <= 0) {
-        return 0;
-      }
-      long bounded = Math.min(copied, target.byteSize());
-      return Math.toIntExact(bounded);
-    } catch (PdfiumException e) {
-      throw e;
-    } catch (Throwable t) {
-      throw new PdfiumException("Failed to read XMP into caller buffer", t);
-    }
-  }
-
-  /**
-   * Accesses raw XMP metadata in a zero-allocation manner by yielding a memory segment and its
-   * actual length to the consumer. The segment is valid only during the callback execution.
-   *
-   * @param consumer a consumer that will receive the memory segment and the length of the raw XMP
-   *     data
-   */
-  public void withRawXmp(MemorySegmentConsumer consumer) {
-    ensureOpen();
-    if (consumer == null) {
-      throw new IllegalArgumentException("consumer must not be null");
-    }
-    if (DocBindings.FPDF_GetXMPMetadata == null) return;
-
-    try (var scope = ScratchBuffer.acquireScope()) {
-      long needed = (long) DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, MemorySegment.NULL, 0L);
-      if (needed <= 0) return;
-
-      MemorySegment buf = ScratchBuffer.get(needed);
-      long copied = (long) DocBindings.FPDF_GetXMPMetadata.invokeExact(handle, buf, needed);
-      if (copied > 0) {
-        consumer.accept(buf, Math.min(copied, needed));
-      }
-    } catch (PdfiumException e) {
-      throw e;
-    } catch (Throwable t) {
-      throw new PdfiumException("Failed to read XMP metadata", t);
     }
   }
 
@@ -1309,15 +1111,6 @@ public final class PdfDocument implements AutoCloseable {
     } catch (Throwable _) {
       return Optional.empty();
     }
-  }
-
-  private static ScratchBuffer.KeyValueSlots resolveMetaBuffer(
-      MemorySegment initialScratch, String key, MemorySegment keySeg, long needed) {
-    if (keySeg.byteSize() + needed <= initialScratch.byteSize()) {
-      return ScratchBuffer.keyAndWideValue(
-          keySeg, initialScratch.asSlice(keySeg.byteSize(), needed));
-    }
-    return ScratchBuffer.utf8KeyAndWideValue(key, needed);
   }
 
   private Optional<String> findMetadataInFallback(String customKey) {
@@ -1651,7 +1444,7 @@ public final class PdfDocument implements AutoCloseable {
             if (attachment == null || attachment.equals(MemorySegment.NULL)) continue;
 
             String name = readAttachmentString(attachment, AttachmentBindings.FPDFAttachment_GetName).orElse("unnamed");
-            long size = (long) getAttachmentFileSize(attachment);
+            long size = getAttachmentFileSize(attachment);
 
             result.add(new PdfAttachment(
                 i, name, size,
@@ -1697,7 +1490,7 @@ public final class PdfDocument implements AutoCloseable {
 
   public void addAttachment(String name, byte[] data, Map<String, String> properties) {
     ensureOpen();
-    try (var scope = ScratchBuffer.acquireScope()) {
+    try (var _ = ScratchBuffer.acquireScope()) {
       MemorySegment nameSeg = ScratchBuffer.getUtf8(name);
       if (AttachmentBindings.FPDFDoc_AddAttachment == null) {
         throw new UnsupportedOperationException("Attachment editing not supported by this build");
@@ -1725,20 +1518,6 @@ public final class PdfDocument implements AutoCloseable {
       } catch (Throwable t) {
           throw new PdfiumException("Failed to add attachment", t);
       }
-    }
-  }
-
-  public void deleteAttachment(int index) {
-    ensureOpen();
-    if (AttachmentBindings.FPDFDoc_DeleteAttachment == null) {
-      throw new UnsupportedOperationException("Attachment editing not supported by this build");
-    }
-    try {
-        int ok = (int) AttachmentBindings.FPDFDoc_DeleteAttachment.invokeExact(handle, index);
-        if (ok == 0) throw new PdfiumException("Failed to delete attachment at index " + index);
-        structurallyModified = true;
-    } catch (Throwable t) {
-        throw new PdfiumException("Failed to delete attachment", t);
     }
   }
 

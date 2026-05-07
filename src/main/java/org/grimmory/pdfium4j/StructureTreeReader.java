@@ -19,10 +19,7 @@ final class StructureTreeReader {
     private StructureTreeReader() {}
  
     static List<PdfStructureElement> read(MemorySegment pageHandle) {
-        if (ShimBindings.pdfium4j_struct_tree_get == null) {
-            return List.of();
-        }
- 
+
         try {
             MemorySegment treeHandle = (MemorySegment) ShimBindings.pdfium4j_struct_tree_get.invokeExact(pageHandle);
             if (FfmHelper.isNull(treeHandle)) {
@@ -58,8 +55,8 @@ final class StructureTreeReader {
         int attributeCount = (int) ShimBindings.pdfium4j_struct_element_get_attribute_count.invokeExact(elementHandle);
         int childCount = (int) ShimBindings.pdfium4j_struct_element_count_children.invokeExact(elementHandle);
         
-        List<Integer> mcids = new ArrayList<>();
-        List<PdfStructureElement> children = new ArrayList<>();
+        List<Integer> mcids = new ArrayList<>(childCount);
+        List<PdfStructureElement> children = new ArrayList<>(childCount);
         
         for (int i = 0; i < childCount; i++) {
             MemorySegment childHandle = (MemorySegment) ShimBindings.pdfium4j_struct_element_get_child.invokeExact(elementHandle, i);

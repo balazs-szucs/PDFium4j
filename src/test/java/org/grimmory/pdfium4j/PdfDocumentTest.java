@@ -1598,7 +1598,7 @@ class PdfDocumentTest {
   @SuppressWarnings("PMD.UnusedAssignment")
   private static byte[] minimalXrefStreamPdf() {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
-    List<Integer> offsets = new ArrayList<>();
+    List<Integer> offsets = new ArrayList<>(3);
 
     writeBytes(out, "%PDF-1.5\n");
 

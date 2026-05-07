@@ -274,7 +274,7 @@ public final class ScratchBuffer {
     private char[] charArray;
     private byte[] byteArray;
     private final KeyValueSlots keyValueSlots;
-    private SegmentInputStream inputStream;
+    private final SegmentInputStream inputStream;
 
     /**
      * State is only valid between construction and the {@link #close()} call. Subsequent accesses
