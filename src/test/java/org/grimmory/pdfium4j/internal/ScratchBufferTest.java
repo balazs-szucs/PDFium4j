@@ -128,14 +128,17 @@ class ScratchBufferTest {
   }
 
   @Test
-  void releaseClosesAllArenas() {
+  void purgeClosesAllArenas() {
     MemorySegment first = ScratchBuffer.get(4096);
     ScratchBuffer.get(2L * 1024L * 1024L); // force grow -> new arena
 
-    ScratchBuffer.release();
+    ScratchBuffer.purge();
 
     // both arenas should now be closed
     assertThrows(IllegalStateException.class, () -> first.get(JAVA_BYTE, 0));
+    
+    // Restore state for cleanup()
+    ScratchBuffer.acquire();
   }
 
   @Test

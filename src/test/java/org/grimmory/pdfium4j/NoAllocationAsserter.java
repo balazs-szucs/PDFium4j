@@ -39,7 +39,17 @@ final class NoAllocationAsserter {
     long delta = allocatedBytesAfter - allocatedBytesBefore;
     testThread = null;
     if (delta > tolerance) {
-      fail("Expected zero thread allocations (tolerance: " + tolerance + ") but observed " + delta + " allocated bytes");
+      fail(
+          "Expected zero thread allocations (tolerance: "
+              + tolerance
+              + ") but observed "
+              + delta
+              + " allocated bytes");
     }
+  }
+
+  long calculateDelta() {
+    if (testThread == null) return 0;
+    return threadMxBean.getThreadAllocatedBytes(testThread.threadId()) - allocatedBytesBefore;
   }
 }

@@ -1,10 +1,13 @@
 package org.grimmory.pdfium4j.internal;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.InputStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * A thread-local scratch buffer for temporary native allocations.
@@ -21,7 +24,7 @@ import java.util.List;
 public final class ScratchBuffer {
 
   private static final long INITIAL_SIZE = 4096;
-  private static final long STEADY_STATE_SIZE = 64L * 1024L;
+  private static final long STEADY_STATE_SIZE = 1024 * 1024;
   private static final long MAX_SIZE = 1024L * 1024L * 128L; // 128MB safety limit
 
   private static final ThreadLocal<State> STATE = new ThreadLocal<>();
@@ -55,6 +58,20 @@ public final class ScratchBuffer {
   public static MemorySegment utf8ProbeBuffer(String key) {
     return get(probeSize(FfmHelper.utf8ByteLengthWithNull(key)));
   }
+ 
+  /** Returns a scratch segment containing a null-terminated UTF-8 string. */
+  public static MemorySegment getUtf8(String s) {
+    long len = FfmHelper.utf8ByteLengthWithNull(s);
+    MemorySegment seg = get(len);
+    return FfmHelper.writeUtf8String(seg, s);
+  }
+
+  /** Returns a scratch segment containing a null-terminated UTF-16LE string. */
+  public static MemorySegment getWide(String s) {
+    long len = (long) s.length() * 2 + 2;
+    MemorySegment seg = get(len);
+    return FfmHelper.writeWideString(seg, s);
+  }
 
   static long probeSize(long keyBytes) {
     if (keyBytes < 0) {
@@ -64,6 +81,15 @@ public final class ScratchBuffer {
       return MAX_SIZE;
     }
     return keyBytes + 1024;
+  }
+ 
+  /**
+   * Returns a zero-allocation InputStream wrapping the given segment.
+   * The stream MUST be closed to release the scratch buffer acquisition.
+   */
+  public static InputStream wrap(MemorySegment segment, long size) {
+    acquire();
+    return getOrCreateState().getInputStream(segment, size);
   }
 
   /**
@@ -146,14 +172,19 @@ public final class ScratchBuffer {
     if (count <= 0) return;
     count--;
     countRef[0] = count;
-    if (count == 0) {
-      State s = STATE.get();
-      if (s != null) {
-        s.close();
-        STATE.remove();
-      }
-      USE_COUNT.remove();
+    // We keep the State in the ThreadLocal to allow zero-allocation reuse.
+    // The native memory is tied to the State's Arenas, which will stay open
+    // until the thread dies or an explicit purge is called.
+  }
+
+  /** Explicitly purge the thread-local scratch state to release native memory. */
+  public static void purge() {
+    State s = STATE.get();
+    if (s != null) {
+      s.close();
+      STATE.remove();
     }
+    USE_COUNT.remove();
   }
 
   /** Returns a thread-local char array for temporary string construction. */
@@ -243,6 +274,7 @@ public final class ScratchBuffer {
     private char[] charArray;
     private byte[] byteArray;
     private final KeyValueSlots keyValueSlots;
+    private SegmentInputStream inputStream;
 
     /**
      * State is only valid between construction and the {@link #close()} call. Subsequent accesses
@@ -261,6 +293,7 @@ public final class ScratchBuffer {
       this.charArray = new char[1024];
       this.byteArray = new byte[2048];
       this.keyValueSlots = new KeyValueSlots();
+      this.inputStream = new SegmentInputStream();
     }
 
     char[] getCharArray(int minChars) {
@@ -275,6 +308,11 @@ public final class ScratchBuffer {
         byteArray = new byte[Math.max(byteArray.length * 2, minBytes)];
       }
       return byteArray;
+    }
+ 
+    InputStream getInputStream(MemorySegment segment, long size) {
+      inputStream.wrap(segment, size);
+      return inputStream;
     }
 
     MemorySegment getLoopScratch(long minBytes) {
@@ -340,6 +378,48 @@ public final class ScratchBuffer {
       largestSegment = null;
       keyValueSlots.keySeg = null;
       keyValueSlots.valueSeg = null;
+      if (inputStream != null) {
+        inputStream.segment = null;
+      }
+    }
+  }
+ 
+  private static final class SegmentInputStream extends InputStream {
+    private MemorySegment segment;
+    private long pos;
+    private long size;
+ 
+    void wrap(MemorySegment segment, long size) {
+      this.segment = segment;
+      this.size = size;
+      this.pos = 0;
+    }
+ 
+    @Override
+    public int read() {
+      if (pos >= size) return -1;
+      return segment.get(ValueLayout.JAVA_BYTE, pos++) & 0xFF;
+    }
+ 
+    @Override
+    public int read(byte[] b, int off, int len) {
+      Objects.checkFromIndexSize(off, len, b.length);
+      if (pos >= size) return -1;
+      long n = Math.min(len, size - pos);
+      MemorySegment.copy(segment, pos, MemorySegment.ofArray(b), off, n);
+      pos += n;
+      return (int) n;
+    }
+ 
+    @Override
+    public int available() {
+      return (int) Math.min(Integer.MAX_VALUE, size - pos);
+    }
+ 
+    @Override
+    public void close() {
+      segment = null;
+      release();
     }
   }
 }

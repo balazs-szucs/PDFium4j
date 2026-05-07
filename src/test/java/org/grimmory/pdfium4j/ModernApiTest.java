@@ -59,23 +59,27 @@ class ModernApiTest {
   void testThumbnail() {
     try (PdfDocument doc = PdfDocument.open(SAMPLE_PDF)) {
       try (PdfPage page = doc.page(0)) {
-        page.getThumbnail().ifPresent(thumb -> {
-            assertTrue(thumb.width() > 0);
-            System.out.println("Thumbnail found: " + thumb.width() + "x" + thumb.height());
-        });
+        page.getThumbnail()
+            .ifPresent(
+                thumb -> {
+                  assertTrue(thumb.width() > 0);
+                  System.out.println("Thumbnail found: " + thumb.width() + "x" + thumb.height());
+                });
       }
     }
   }
 
   @Test
   void test64BitLoading() {
-      // Small file but tests the 64-bit API path
-      byte[] data = new byte[1024]; // Just a dummy, will fail format check but tests the entry point
-      try {
-          PdfDocument.open(data);
-      } catch (Exception e) {
-          // Expected failure due to bad format, but ensures FFM mapping works
-          assertTrue(e.getMessage().contains("Failed to open document") || e.getMessage().contains("corruption"));
-      }
+    // Small file but tests the 64-bit API path
+    byte[] data = new byte[1024]; // Just a dummy, will fail format check but tests the entry point
+    try {
+      PdfDocument.open(data);
+    } catch (Exception e) {
+      // Expected failure due to bad format, but ensures FFM mapping works
+      assertTrue(
+          e.getMessage().contains("Failed to open document")
+              || e.getMessage().contains("corruption"));
+    }
   }
 }

@@ -9,9 +9,7 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 
-/**
- * FFM bindings for PDFium digital signature functions from {@code fpdf_signature.h}.
- */
+/** FFM bindings for PDFium digital signature functions from {@code fpdf_signature.h}. */
 public final class SignatureBindings {
 
   private static final Linker LINKER = Linker.nativeLinker();
@@ -40,21 +38,31 @@ public final class SignatureBindings {
 
   /** Get the contents of the signature object. */
   public static final MethodHandle FPDFSignatureObj_GetContents =
-      downcall("FPDFSignatureObj_GetContents", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFSignatureObj_GetContents",
+          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 
   /** Get the byte range of the signature object. */
   public static final MethodHandle FPDFSignatureObj_GetByteRange =
-      downcall("FPDFSignatureObj_GetByteRange", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFSignatureObj_GetByteRange",
+          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 
   /** Get the subfilter of the signature object. */
   public static final MethodHandle FPDFSignatureObj_GetSubFilter =
-      downcall("FPDFSignatureObj_GetSubFilter", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFSignatureObj_GetSubFilter",
+          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 
   /** Get the reason for the signature. */
   public static final MethodHandle FPDFSignatureObj_GetReason =
-      downcall("FPDFSignatureObj_GetReason", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFSignatureObj_GetReason",
+          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 
   /** Get the time of the signature. */
   public static final MethodHandle FPDFSignatureObj_GetTime =
-      downcall("FPDFSignatureObj_GetTime", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFSignatureObj_GetTime",
+          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 }

@@ -46,8 +46,8 @@ public final class BitmapBindings {
       downcall("FPDFBitmap_Create", FunctionDescriptor.of(ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT));
 
   /**
-   * Create a new bitmap with an external buffer.
-   * Parameters: width, height, format, first_scan, stride.
+   * Create a new bitmap with an external buffer. Parameters: width, height, format, first_scan,
+   * stride.
    */
   public static final MethodHandle FPDFBitmap_CreateEx =
       downcall(

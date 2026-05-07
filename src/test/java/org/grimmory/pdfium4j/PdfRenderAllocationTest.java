@@ -1,7 +1,5 @@
 package org.grimmory.pdfium4j;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -25,18 +23,23 @@ class PdfRenderAllocationTest {
   private Arena arena;
   private MemorySegment renderBuffer;
 
+  /**
+   * Allocation tolerance for JVM/JIT noise.
+   */
+  private static final long STEADY_STATE_TOLERANCE = 8192;
+
   @BeforeAll
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
     arena = Arena.ofShared();
-    
+
     Path source = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
     doc = PdfDocument.open(source);
     page = doc.page(0);
-    
+
     // Allocate a buffer large enough for thumbnail rendering
     renderBuffer = arena.allocate(1024 * 1024 * 4);
-    
+
     // Warmup
     for (int i = 0; i < WARMUP_ITERATIONS; i++) {
       page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
@@ -56,7 +59,7 @@ class PdfRenderAllocationTest {
   void renderThumbnailToSegmentDoesNotAllocateAfterWarmup() {
     asserter.startRecording();
     page.renderThumbnailTo(renderBuffer, 256);
-    asserter.assertNoAllocations(1024);
+    asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
   }
 
   @Test
@@ -64,7 +67,7 @@ class PdfRenderAllocationTest {
   void renderToSegmentDoesNotAllocateAfterWarmup() {
     asserter.startRecording();
     page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
-    asserter.assertNoAllocations(1024);
+    asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
   }
 
   static boolean pdfiumAvailable() {

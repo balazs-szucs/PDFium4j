@@ -1,96 +1,62 @@
 package org.grimmory.pdfium4j;
-
+ 
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.List;
-import org.grimmory.pdfium4j.exception.PdfiumException;
-import org.grimmory.pdfium4j.internal.DocBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
+import org.grimmory.pdfium4j.internal.ShimBindings;
 import org.grimmory.pdfium4j.model.Bookmark;
-
+ 
+/**
+ * Internal helper to read the document outline (bookmarks) using optimized shim bindings.
+ */
 final class BookmarkReader {
-
-  private static final int MAX_BOOKMARK_DEPTH = 100;
-
+ 
   private BookmarkReader() {}
-
+ 
   static List<Bookmark> readBookmarks(MemorySegment docHandle) {
-    return collectBookmarkChildren(docHandle, MemorySegment.NULL, 0);
-  }
-
-  private static List<Bookmark> collectBookmarkChildren(
-      MemorySegment docHandle, MemorySegment parent, int depth) {
-    if (depth > MAX_BOOKMARK_DEPTH) return List.of();
-
-    List<Bookmark> result = new ArrayList<>(16);
-    MemorySegment child;
     try {
-      child = (MemorySegment) DocBindings.FPDFBookmark_GetFirstChild.invokeExact(docHandle, parent);
-    } catch (Throwable t) {
-      throw new PdfiumException("FPDFBookmark_GetFirstChild failed", t);
-    }
-
-    while (!FfmHelper.isNull(child)) {
-      result.add(toBookmark(docHandle, child, depth));
-      try {
-        child =
-            (MemorySegment) DocBindings.FPDFBookmark_GetNextSibling.invokeExact(docHandle, child);
-      } catch (Throwable t) {
-        throw new PdfiumException("FPDFBookmark_GetNextSibling failed", t);
+      MemorySegment first = (MemorySegment) ShimBindings.pdfium4j_bookmark_first.invokeExact(docHandle);
+      if (FfmHelper.isNull(first)) {
+        return List.of();
       }
+      return collectBookmarks(docHandle, first);
+    } catch (Throwable t) {
+      PdfiumLibrary.ignore(t);
+      return List.of();
+    }
+  }
+ 
+  private static List<Bookmark> collectBookmarks(MemorySegment docHandle, MemorySegment current) throws Throwable {
+    List<Bookmark> result = new ArrayList<>();
+    while (!FfmHelper.isNull(current)) {
+      result.add(toBookmark(docHandle, current));
+      current = (MemorySegment) ShimBindings.pdfium4j_bookmark_next.invokeExact(docHandle, current);
     }
     return List.copyOf(result);
   }
-
-  private static Bookmark toBookmark(MemorySegment docHandle, MemorySegment bm, int depth) {
+ 
+  private static Bookmark toBookmark(MemorySegment docHandle, MemorySegment bm) throws Throwable {
     String title = getBookmarkTitle(bm);
-    int pageIndex = resolveBookmarkPage(docHandle, bm);
-    List<Bookmark> children = collectBookmarkChildren(docHandle, bm, depth + 1);
+    int pageIndex = (int) ShimBindings.pdfium4j_bookmark_page_index.invokeExact(docHandle, bm);
+    
+    MemorySegment firstChild = (MemorySegment) ShimBindings.pdfium4j_bookmark_first_child.invokeExact(docHandle, bm);
+    List<Bookmark> children = FfmHelper.isNull(firstChild) ? List.of() : collectBookmarks(docHandle, firstChild);
+    
     return new Bookmark(title, pageIndex, children);
   }
-
-  private static String getBookmarkTitle(MemorySegment bm) {
-    try {
-      long needed =
-          (long) DocBindings.FPDFBookmark_GetTitle.invokeExact(bm, MemorySegment.NULL, 0L);
-      if (needed <= 2) return "";
-
+ 
+  private static String getBookmarkTitle(MemorySegment bm) throws Throwable {
+    try (var _ = ScratchBuffer.acquireScope()) {
+      int needed = (int) ShimBindings.pdfium4j_bookmark_title.invokeExact(bm, MemorySegment.NULL, 0);
+      if (needed <= 1) return "";
+ 
       MemorySegment buf = ScratchBuffer.get(needed);
-      long copied = (long) DocBindings.FPDFBookmark_GetTitle.invokeExact(bm, buf, needed);
-      long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
-      if (byteLen == 0) {
-        return "";
-      }
-      return FfmHelper.fromWideString(buf, byteLen);
-    } catch (Throwable e) {
-      PdfiumLibrary.ignore(e);
-      return "";
+      int copied = (int) ShimBindings.pdfium4j_bookmark_title.invokeExact(bm, buf, needed);
+      if (copied <= 1) return "";
+ 
+      return buf.reinterpret(needed).getString(0);
     }
-  }
-
-  private static int resolveBookmarkPage(MemorySegment docHandle, MemorySegment bm) {
-    try {
-      MemorySegment action = (MemorySegment) DocBindings.FPDFBookmark_GetAction.invokeExact(bm);
-      if (!FfmHelper.isNull(action)) {
-        long type = (long) DocBindings.FPDFAction_GetType.invokeExact(action);
-        if (type == DocBindings.PDFACTION_GOTO) {
-          MemorySegment dest =
-              (MemorySegment) DocBindings.FPDFAction_GetDest.invokeExact(docHandle, action);
-          if (!FfmHelper.isNull(dest)) {
-            return (int) DocBindings.FPDFDest_GetDestPageIndex.invokeExact(docHandle, dest);
-          }
-        }
-      }
-
-      MemorySegment dest =
-          (MemorySegment) DocBindings.FPDFBookmark_GetDest.invokeExact(docHandle, bm);
-      if (!FfmHelper.isNull(dest)) {
-        return (int) DocBindings.FPDFDest_GetDestPageIndex.invokeExact(docHandle, dest);
-      }
-    } catch (Throwable e) {
-      PdfiumLibrary.ignore(e);
-    }
-    return -1;
   }
 }

@@ -160,7 +160,9 @@ public final class NativeLoader {
         extractLib(resourceBase + libName, tmpDir, libName);
       }
 
-      // Dependencies must be loaded before libpdfium
+      // Load main PDFium library first so dependencies (like the shim) can link against it
+      System.load(pdfiumPath.toAbsolutePath().toString());
+
       for (String lib : libs) {
         if (!lib.equals(libName)) {
           Path depPath = tmpDir.resolve(lib);
@@ -169,8 +171,6 @@ public final class NativeLoader {
           }
         }
       }
-
-      System.load(pdfiumPath.toAbsolutePath().toString());
     } catch (IOException e) {
       throw new NativeLoadException("Failed to extract native library", e);
     }

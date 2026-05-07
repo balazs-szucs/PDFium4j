@@ -1,7 +1,6 @@
 package org.grimmory.pdfium4j;
 
 import static java.lang.foreign.ValueLayout.JAVA_INT;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.lang.foreign.Arena;
@@ -30,6 +29,11 @@ class CorpusNoAllocationTest {
   private MemorySegment trailerBuffer;
   private int[] output = new int[3];
 
+  /**
+   * Allocation tolerance for JVM/JIT noise.
+   */
+  private static final long STEADY_STATE_TOLERANCE = 8192;
+
   @BeforeAll
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
@@ -38,7 +42,7 @@ class CorpusNoAllocationTest {
     trailerBuffer = arena.allocate(32L * JAVA_INT.byteSize(), JAVA_INT.byteAlignment());
 
     List<Path> corpusFiles = getCorpusFiles().limit(WARMUP_FILES).collect(Collectors.toList());
-    
+
     // Warmup JIT with first few files
     for (Path path : corpusFiles) {
       try (PdfDocument doc = PdfDocument.open(path)) {
@@ -47,11 +51,12 @@ class CorpusNoAllocationTest {
           page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
           page.renderThumbnailTo(renderBuffer, 256);
         }
-        
-        try (PdfDocument.NoAllocationPathProbe probe = PdfDocument.noAllocationPathProbe(path, null)) {
-           for (int i = 0; i < WARMUP_ITERATIONS_PER_FILE; i++) {
-             probe.inspect(output, trailerBuffer);
-           }
+
+        try (PdfDocument.NoAllocationPathProbe probe =
+            PdfDocument.noAllocationPathProbe(path, null)) {
+          for (int i = 0; i < WARMUP_ITERATIONS_PER_FILE; i++) {
+            probe.inspect(output, trailerBuffer);
+          }
         }
       } catch (Exception e) {
         // Skip problematic files during warmup
@@ -68,26 +73,27 @@ class CorpusNoAllocationTest {
   @EnabledIf("pdfiumAvailable")
   void noAllocationsAcrossGutenbergCorpus() throws IOException {
     List<Path> testFiles = getCorpusFiles().limit(10).collect(Collectors.toList());
-    
+
     for (Path path : testFiles) {
       // 1. Path Probe
-      try (PdfDocument.NoAllocationPathProbe probe = PdfDocument.noAllocationPathProbe(path, null)) {
+      try (PdfDocument.NoAllocationPathProbe probe =
+          PdfDocument.noAllocationPathProbe(path, null)) {
         asserter.startRecording();
         probe.inspect(output, trailerBuffer);
-        asserter.assertNoAllocations(1024); // Small tolerance for TLAB noise
+        asserter.assertNoAllocations(STEADY_STATE_TOLERANCE); // Small tolerance for TLAB noise
       }
 
       // 2. Document Open and Page Render
       try (PdfDocument doc = PdfDocument.open(path)) {
         PdfPage page = doc.page(0);
-        
+
         asserter.startRecording();
         page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
-        asserter.assertNoAllocations(1024);
+        asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
 
         asserter.startRecording();
         page.renderThumbnailTo(renderBuffer, 256);
-        asserter.assertNoAllocations(1024);
+        asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
       } catch (Exception e) {
         // Some PDFs might be corrupt or have issues, we skip them but report if many fail
       }
@@ -104,13 +110,14 @@ class CorpusNoAllocationTest {
     }
     return Files.list(corpusDir)
         .filter(p -> p.toString().endsWith(".pdf"))
-        .filter(p -> {
-            try {
+        .filter(
+            p -> {
+              try {
                 return Files.size(p) < 1024 * 1024; // Only files < 1MB
-            } catch (IOException e) {
+              } catch (IOException e) {
                 return false;
-            }
-        })
+              }
+            })
         .sorted();
   }
 

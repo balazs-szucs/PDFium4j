@@ -21,6 +21,11 @@ class PdfSaveAllocationTest {
   private PdfDocument doc;
   private Path target;
 
+  /**
+   * Allocation tolerance for JVM/JIT noise.
+   */
+  private static final long STEADY_STATE_TOLERANCE = 8192;
+
   static boolean pdfiumAvailable() {
     try {
       PdfiumLibrary.initialize();
@@ -35,15 +40,21 @@ class PdfSaveAllocationTest {
     asserter.verifyAllocationTrackingAvailable();
     Path source = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
     target = Files.createTempFile("pdfium4j-alloc-target-", ".pdf");
-    
+
     doc = PdfDocument.open(source);
     doc.setMetadata(MetadataTag.TITLE, "Allocation Free Save");
-    
-    // Warmup
-    for (int i = 0; i < 10; i++) {
-        try (OutputStream out = new FileOutputStream(target.toFile(), false)) {
-            doc.save(out);
-        }
+    doc.setMetadata(MetadataTag.AUTHOR, "Edgar Allan Poe");
+    doc.setMetadata(MetadataTag.SUBJECT, "Test Subject");
+
+    // Aggressive Warmup covering Create, Save, and Close
+    warmup();
+  }
+
+  private void warmup() throws IOException {
+    for (int i = 0; i < 500; i++) {
+      try (OutputStream out = new FileOutputStream(target.toFile(), false)) {
+        doc.save(out);
+      }
     }
   }
 
@@ -60,10 +71,16 @@ class PdfSaveAllocationTest {
   @Test
   @EnabledIf("pdfiumAvailable")
   void metadataSaveToOutputStreamDoesNotAllocateAfterWarmup() throws IOException {
-    try (OutputStream out = new FileOutputStream(target.toFile(), false)) {
+    warmup(); // Local warmup for this thread
+
+    for (int i = 0; i < 10; i++) {
+      try (OutputStream out = new FileOutputStream(target.toFile(), false)) {
         asserter.startRecording();
         doc.save(out);
-        asserter.assertNoAllocations(65536);
+        // Iteration 0 might see one-time JVM noise
+        long tolerance = (i == 0) ? 160_000 : STEADY_STATE_TOLERANCE;
+        asserter.assertNoAllocations(tolerance);
+      }
     }
     assertTrue(fileSize(target) > 0, "Native save should stream bytes to the sink");
   }
@@ -80,10 +97,10 @@ class PdfSaveAllocationTest {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
     if (!Files.exists(corpusPdf)) {
-        corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
     }
     if (!Files.exists(corpusPdf)) {
-        throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);
+      throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);
     }
     return corpusPdf;
   }

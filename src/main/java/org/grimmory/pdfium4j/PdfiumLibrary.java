@@ -10,6 +10,7 @@ import org.grimmory.pdfium4j.internal.BitmapBindings;
 import org.grimmory.pdfium4j.internal.DocBindings;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.NativeLoader;
+import org.grimmory.pdfium4j.internal.ShimBindings;
 import org.grimmory.pdfium4j.internal.TextBindings;
 import org.grimmory.pdfium4j.internal.ViewBindings;
 
@@ -68,10 +69,11 @@ public final class PdfiumLibrary {
         BitmapBindings.checkRequired();
         TextBindings.checkRequired();
         AnnotBindings.checkRequired();
+        ShimBindings.checkRequired();
 
         // Set renderer type if supported
         if (ViewBindings.FPDF_SetRendererType != null) {
-            ViewBindings.FPDF_SetRendererType.invokeExact(rendererType);
+          ViewBindings.FPDF_SetRendererType.invokeExact(rendererType);
         }
 
         Arena arena = Arena.global();

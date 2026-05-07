@@ -98,23 +98,19 @@ public final class ViewBindings {
 
   public static final MethodHandle FPDF_DocumentHasValidCrossReferenceTable =
       downcall(
-          "FPDF_DocumentHasValidCrossReferenceTable",
-          FunctionDescriptor.of(JAVA_INT, ADDRESS));
+          "FPDF_DocumentHasValidCrossReferenceTable", FunctionDescriptor.of(JAVA_INT, ADDRESS));
 
   public static final MethodHandle FPDF_DocumentHasValidCrossReferenceTable_Raw =
       downcall(
-          "FPDF_DocumentHasValidCrossReferenceTable",
-          FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
+          "FPDF_DocumentHasValidCrossReferenceTable", FunctionDescriptor.of(JAVA_INT, JAVA_LONG));
 
   public static final MethodHandle FPDF_GetTrailerEnds =
       downcall(
-          "FPDF_GetTrailerEnds",
-          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, NATIVE_LONG));
+          "FPDF_GetTrailerEnds", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, NATIVE_LONG));
 
   public static final MethodHandle FPDF_GetTrailerEnds_Raw =
       downcall(
-          "FPDF_GetTrailerEnds",
-          FunctionDescriptor.of(JAVA_LONG, JAVA_LONG, ADDRESS, NATIVE_LONG));
+          "FPDF_GetTrailerEnds", FunctionDescriptor.of(JAVA_LONG, JAVA_LONG, ADDRESS, NATIVE_LONG));
 
   public static final MethodHandle FPDF_GetPageCount =
       downcallCritical("FPDF_GetPageCount", FunctionDescriptor.of(JAVA_INT, ADDRESS));
@@ -145,15 +141,11 @@ public final class ViewBindings {
           FunctionDescriptor.ofVoid(
               ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
 
-  /**
-   * Set the renderer type. 0 for AGG, 1 for Skia. (Experimental API)
-   */
+  /** Set the renderer type. 0 for AGG, 1 for Skia. (Experimental API) */
   public static final MethodHandle FPDF_SetRendererType =
       downcall("FPDF_SetRendererType", FunctionDescriptor.ofVoid(JAVA_INT));
 
-  /**
-   * Load a document from memory with 64-bit size support.
-   */
+  /** Load a document from memory with 64-bit size support. */
   public static final MethodHandle FPDF_LoadMemDocument64 =
       downcall(
           "FPDF_LoadMemDocument64", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_LONG, ADDRESS));

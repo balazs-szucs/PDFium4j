@@ -20,6 +20,7 @@ import org.grimmory.pdfium4j.internal.BitmapBindings;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
+import org.grimmory.pdfium4j.internal.ShimBindings;
 import org.grimmory.pdfium4j.internal.TextBindings;
 import org.grimmory.pdfium4j.internal.ThumbnailBindings;
 import org.grimmory.pdfium4j.internal.ViewBindings;
@@ -418,37 +419,26 @@ public final class PdfPage implements AutoCloseable {
             return List.of();
           }
 
-          List<TextCharInfo> result = new ArrayList<>(charCount);
           try (Arena arena = Arena.ofConfined()) {
-            MemorySegment leftSeg = arena.allocate(JAVA_DOUBLE);
-            MemorySegment rightSeg = arena.allocate(JAVA_DOUBLE);
-            MemorySegment bottomSeg = arena.allocate(JAVA_DOUBLE);
-            MemorySegment topSeg = arena.allocate(JAVA_DOUBLE);
-
-            for (int i = 0; i < charCount; i++) {
-              int charCode = (int) TextBindings.FPDFText_GetUnicode.invokeExact(textPage, i);
-              if (charCode <= 0 || charCode == UNICODE_BOM || charCode == UNICODE_INVALID) {
-                continue;
-              }
-
-              int ok =
-                  (int)
-                      TextBindings.FPDFText_GetCharBox.invokeExact(
-                          textPage, i, leftSeg, rightSeg, bottomSeg, topSeg);
-
-              double left = 0, right = 0, bottom = 0, top = 0;
-              if (ok != 0) {
-                left = leftSeg.get(JAVA_DOUBLE, 0);
-                right = rightSeg.get(JAVA_DOUBLE, 0);
-                bottom = bottomSeg.get(JAVA_DOUBLE, 0);
-                top = topSeg.get(JAVA_DOUBLE, 0);
-              }
-
-              double fontSize = (double) TextBindings.FPDFText_GetFontSize.invokeExact(textPage, i);
+            MemorySegment buffer = arena.allocate(24L * charCount);
+            int actual =
+                (int)
+                    ShimBindings.pdfium4j_text_get_chars_with_bounds.invokeExact(
+                        textPage, 0, charCount, buffer);
+ 
+            List<TextCharInfo> result = new ArrayList<>(actual);
+            for (int i = 0; i < actual; i++) {
+              long offset = i * 24L;
+              int charCode = buffer.get(JAVA_INT, offset);
+              float left = buffer.get(JAVA_FLOAT, offset + 4);
+              float bottom = buffer.get(JAVA_FLOAT, offset + 8);
+              float right = buffer.get(JAVA_FLOAT, offset + 12);
+              float top = buffer.get(JAVA_FLOAT, offset + 16);
+              float fontSize = buffer.get(JAVA_FLOAT, offset + 20);
               result.add(new TextCharInfo(charCode, left, bottom, right, top, fontSize));
             }
+            return List.copyOf(result);
           }
-          return List.copyOf(result);
         });
   }
 

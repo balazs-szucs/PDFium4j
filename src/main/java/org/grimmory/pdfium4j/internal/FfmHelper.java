@@ -122,6 +122,23 @@ public final class FfmHelper {
     return arena.allocateFrom(text, StandardCharsets.UTF_16LE);
   }
 
+  /** Encode a Java String to a null-terminated UTF-16LE MemorySegment (FPDF_WIDESTRING). */
+  public static MemorySegment writeWideString(MemorySegment seg, String text) {
+    long len = text.length();
+    long required = len * 2 + 2;
+    if (seg.byteSize() < required) {
+      throw new IllegalArgumentException("Segment too small for UTF-16 string");
+    }
+    for (int i = 0; i < len; i++) {
+      char c = text.charAt(i);
+      seg.set(JAVA_BYTE, (long) i * 2, (byte) (c & 0xFF));
+      seg.set(JAVA_BYTE, (long) i * 2 + 1, (byte) (c >> 8));
+    }
+    seg.set(JAVA_BYTE, len * 2, (byte) 0);
+    seg.set(JAVA_BYTE, len * 2 + 1, (byte) 0);
+    return seg.asSlice(0, required);
+  }
+
   /** Encode a Java String to a null-terminated UTF-8 MemorySegment. */
   public static MemorySegment writeUtf8String(Arena arena, String text) {
     return arena.allocateFrom(text, StandardCharsets.UTF_8);
@@ -144,12 +161,37 @@ public final class FfmHelper {
 
   /** Calculate the byte length of a string in UTF-8 including the null terminator. */
   public static long utf8ByteLengthWithNull(String s) {
+    return utf8ByteLength(s) + 1L;
+  }
+
+  /** Calculate the byte length of a string in UTF-8. */
+  public static long utf8ByteLength(String s) {
     int len = s.length();
     for (int i = 0; i < len; i++) {
       if (s.charAt(i) > 127) {
-        return s.getBytes(StandardCharsets.UTF_8).length + 1L;
+        return s.getBytes(StandardCharsets.UTF_8).length;
       }
     }
-    return len + 1L;
+    return len;
+  }
+
+  /** Writes a Java string as a UTF-8 string into the given segment (no null terminator). */
+  public static void writeUtf8StringNoNull(MemorySegment seg, String s) {
+    int len = s.length();
+    for (int i = 0; i < len; i++) {
+      char c = s.charAt(i);
+      if (c > 127) {
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        if (seg.byteSize() < bytes.length) {
+          throw new IllegalArgumentException("Segment too small for UTF-8 string");
+        }
+        MemorySegment.copy(bytes, 0, seg, JAVA_BYTE, 0, bytes.length);
+        return;
+      }
+      if (seg.byteSize() < (long) i + 1) {
+        throw new IllegalArgumentException("Segment too small for UTF-8 string");
+      }
+      seg.set(JAVA_BYTE, i, (byte) c);
+    }
   }
 }

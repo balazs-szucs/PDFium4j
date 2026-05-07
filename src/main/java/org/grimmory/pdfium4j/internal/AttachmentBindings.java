@@ -9,9 +9,7 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 
-/**
- * FFM bindings for PDFium document attachment functions from {@code fpdf_attachment.h}.
- */
+/** FFM bindings for PDFium document attachment functions from {@code fpdf_attachment.h}. */
 public final class AttachmentBindings {
 
   private static final Linker LINKER = Linker.nativeLinker();
@@ -37,16 +35,21 @@ public final class AttachmentBindings {
       downcallCritical("FPDFDoc_GetAttachment", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT));
 
   public static final MethodHandle FPDFAttachment_GetName =
-      downcall("FPDFAttachment_GetName", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFAttachment_GetName", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG));
 
   public static final MethodHandle FPDFAttachment_HasKey =
       downcall("FPDFAttachment_HasKey", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS));
 
   public static final MethodHandle FPDFAttachment_GetStringValue =
-      downcall("FPDFAttachment_GetStringValue", FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFAttachment_GetStringValue",
+          FunctionDescriptor.of(JAVA_LONG, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
 
   public static final MethodHandle FPDFAttachment_GetFile =
-      downcall("FPDFAttachment_GetFile", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS));
+      downcall(
+          "FPDFAttachment_GetFile",
+          FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS));
 
   public static final MethodHandle FPDFDoc_AddAttachment =
       downcall("FPDFDoc_AddAttachment", FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS));
@@ -55,8 +58,12 @@ public final class AttachmentBindings {
       downcall("FPDFDoc_DeleteAttachment", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT));
 
   public static final MethodHandle FPDFAttachment_SetFile =
-      downcall("FPDFAttachment_SetFile", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
+      downcall(
+          "FPDFAttachment_SetFile",
+          FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG));
 
   public static final MethodHandle FPDFAttachment_SetStringValue =
-      downcall("FPDFAttachment_SetStringValue", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
+      downcall(
+          "FPDFAttachment_SetStringValue",
+          FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
 }

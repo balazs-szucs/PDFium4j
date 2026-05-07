@@ -1,9 +1,10 @@
 package org.grimmory.pdfium4j;
 
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.lang.foreign.MemorySegment;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
@@ -31,7 +32,7 @@ class ZeroAllocationCallbackTest {
       AtomicBoolean called = new AtomicBoolean(false);
       doc.withMetadataUtf16(MetadataTag.TITLE, (segment, length) -> {
         called.set(true);
-        String title = new String(segment.asSlice(0, length).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE), StandardCharsets.UTF_16LE);
+        String title = new String(segment.asSlice(0, length).toArray(JAVA_BYTE), StandardCharsets.UTF_16LE);
         assertTrue(title.startsWith("Zero Alloc Test"));
       });
       assertTrue(called.get());
@@ -100,12 +101,12 @@ class ZeroAllocationCallbackTest {
   }
 
   private Path findCorpusPdf(String relativePath) {
-    java.nio.file.Path projectRoot = java.nio.file.Path.of("").toAbsolutePath();
-    java.nio.file.Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
-    if (!java.nio.file.Files.exists(corpusPdf)) {
+    Path projectRoot = Path.of("").toAbsolutePath();
+    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    if (!Files.exists(corpusPdf)) {
         corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
     }
-    if (!java.nio.file.Files.exists(corpusPdf)) {
+    if (!Files.exists(corpusPdf)) {
         return SAMPLE_PDF; 
     }
     return corpusPdf;

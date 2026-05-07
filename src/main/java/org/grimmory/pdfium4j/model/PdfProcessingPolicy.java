@@ -50,12 +50,9 @@ public record PdfProcessingPolicy(
         DEFAULT_MAX_PARALLEL_THREADS,
         DEFAULT_FILE_BACKED_THRESHOLD);
   }
+
   public PdfProcessingPolicy withMode(Mode newMode) {
     return new PdfProcessingPolicy(
-        newMode,
-        maxDocumentBytes,
-        maxRenderPixels,
-        maxParallelRenderThreads,
-        fileBackedThreshold);
+        newMode, maxDocumentBytes, maxRenderPixels, maxParallelRenderThreads, fileBackedThreshold);
   }
 }

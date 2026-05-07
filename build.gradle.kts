@@ -119,7 +119,7 @@ tasks.withType<JavaCompile> {
 
 tasks.withType<Test> {
     useJUnitPlatform()
-    dependsOn("extractPdfiumBinaries")
+    dependsOn("buildShim")
     classpath += files(layout.buildDirectory.dir("generated-natives"))
     jvmArgs(
         "--enable-preview",
@@ -184,7 +184,7 @@ tasks.register<JavaExec>("runCorpusProcessor") {
     group = "application"
     description = "Runs the CorpusProcessor to write metadata to PDFs"
     if (enableCorpusTools.get()) {
-        dependsOn("extractPdfiumBinaries")
+        dependsOn("buildShim")
     }
     mainClass.set("org.grimmory.pdfium4j.CorpusProcessor")
     classpath = sourceSets["test"].runtimeClasspath
@@ -234,7 +234,7 @@ tasks.register<JavaExec>("runCorpusMetadataStress") {
     group = "application"
     description = "Runs metadata save stress validation against corpus PDFs"
     if (enableCorpusTools.get()) {
-        dependsOn("extractPdfiumBinaries")
+        dependsOn("buildShim")
     }
     mainClass.set("org.grimmory.pdfium4j.CorpusMetadataStressRunner")
     classpath = sourceSets["test"].runtimeClasspath
@@ -330,11 +330,9 @@ val extractPdfiumBinaries by tasks.registering {
     description = "Extracts PDFium native libraries for bundling into the JAR"
     dependsOn(downloadPdfiumBinaries)
     outputs.dir(pdfiumNativesDir)
-    // Capture project reference at configuration time to avoid deprecated Task.project at execution time
     val proj = project
     doLast {
         val nativesRoot = pdfiumNativesDir.get().asFile.resolve("natives")
-        nativesRoot.deleteRecursively()
         activePlatforms.forEach { (localName, remoteName) ->
             val archive = pdfiumArchiveDir.get().asFile.resolve("pdfium-$remoteName.tgz")
             val platformDir = nativesRoot.resolve(localName)
@@ -353,7 +351,112 @@ val extractPdfiumBinaries by tasks.registering {
                 into(platformDir)
                 includeEmptyDirs = false
             }
-            platformDir.resolve("native-libs.txt").writeText("$libFileName\n")
+        }
+    }
+}
+
+val pdfiumHeadersDir = layout.buildDirectory.dir("pdfium-headers")
+
+val extractPdfiumHeaders by tasks.registering {
+    description = "Extracts PDFium headers for building the shim"
+    dependsOn(downloadPdfiumBinaries)
+    outputs.dir(pdfiumHeadersDir)
+    val proj = project
+    doLast {
+        val headersDir = pdfiumHeadersDir.get().asFile
+        headersDir.deleteRecursively()
+        headersDir.mkdirs()
+        val platform = activePlatforms.values.first()
+        val archive = pdfiumArchiveDir.get().asFile.resolve("pdfium-$platform.tgz")
+        proj.copy {
+            from(proj.tarTree(proj.resources.gzip(archive))) {
+                include("include/**")
+            }
+            into(headersDir)
+        }
+    }
+}
+
+val buildShim by tasks.registering {
+    description = "Builds the C++ shim library"
+    dependsOn(extractPdfiumHeaders, extractPdfiumBinaries)
+
+    val shimDir = project.file("shim")
+    val buildDir = layout.buildDirectory.dir("shim-build")
+    val proj = project
+
+    inputs.dir(shimDir)
+    outputs.dir(buildDir)
+
+    doLast {
+        if (hostPlatform == null) {
+            logger.warn("Unknown host platform; skipping shim build")
+            return@doLast
+        }
+
+        buildDir.get().asFile.mkdirs()
+        val hostLibDir = pdfiumNativesDir.get().asFile.resolve("natives/$hostPlatform")
+
+        val pdfiumRoot = layout.buildDirectory.dir("pdfium-env").get().asFile
+        pdfiumRoot.mkdirs()
+        proj.copy {
+            from(pdfiumHeadersDir) { include("include/**") }
+            from(hostLibDir) {
+                into("lib")
+                if (hostPlatform!!.startsWith("windows")) {
+                    into("../bin")
+                }
+            }
+            into(pdfiumRoot)
+        }
+
+        logger.lifecycle("Running CMake in ${buildDir.get().asFile}")
+        val cmakeProcess = ProcessBuilder("cmake", "-S", shimDir.absolutePath, "-B", ".", "-DPDFIUM_ROOT=${pdfiumRoot.absolutePath}")
+            .directory(buildDir.get().asFile)
+            .inheritIO()
+            .start()
+        if (cmakeProcess.waitFor() != 0) error("CMake configuration failed")
+
+        val buildProcess = ProcessBuilder("cmake", "--build", ".")
+            .directory(buildDir.get().asFile)
+            .inheritIO()
+            .start()
+        if (buildProcess.waitFor() != 0) error("CMake build failed")
+
+        val shimLibName = when {
+            hostPlatform!!.startsWith("linux")   -> "pdfium4j_shim.so"
+            hostPlatform!!.startsWith("darwin")  -> "pdfium4j_shim.dylib"
+            hostPlatform!!.startsWith("windows") -> "pdfium4j_shim.dll"
+            else -> error("Unknown platform")
+        }
+
+        val builtLib = buildDir.get().asFile.resolve(shimLibName)
+        proj.copy {
+            from(builtLib)
+            into(hostLibDir)
+        }
+    }
+}
+
+val generateNativeIndex by tasks.registering {
+    description = "Generates native-libs.txt index files for all platforms"
+    dependsOn(extractPdfiumBinaries, buildShim)
+    val nativesRoot = pdfiumNativesDir.map { it.dir("natives") }
+    inputs.dir(nativesRoot)
+    outputs.dir(nativesRoot)
+
+    doLast {
+        nativesRoot.get().asFile.listFiles()?.filter { it.isDirectory }?.forEach { platformDir ->
+            val libs = platformDir.listFiles()?.filter { 
+                val name = it.name
+                name.endsWith(".so") || name.endsWith(".dylib") || name.endsWith(".dll")
+            }?.map { it.name }?.sortedBy { 
+                // Ensure libpdfium is first
+                if (it.contains("pdfium") && !it.contains("shim")) 0 else 1
+            }
+            if (libs != null && libs.isNotEmpty()) {
+                platformDir.resolve("native-libs.txt").writeText(libs.joinToString("\n") + "\n")
+            }
         }
     }
 }
@@ -363,7 +466,7 @@ val extractPdfiumBinaries by tasks.registering {
 val nativeJarTasks = pdfiumPlatforms.keys.map { localName ->
     val sanitized = localName.split("-").joinToString("") { it.replaceFirstChar(Char::uppercase) }
     tasks.register<Jar>("nativesJar$sanitized") {
-        dependsOn(extractPdfiumBinaries)
+        dependsOn(generateNativeIndex)
         group = "build"
         description = "Packages $localName native library"
         archiveClassifier.set("natives-$localName")
@@ -387,6 +490,7 @@ dependencies {
 tasks.register<Test>("allocationTests") {
     group = "verification"
     description = "Runs allocation assertions for native save hot paths"
+    dependsOn(generateNativeIndex)
     useJUnitPlatform()
     testClassesDirs = sourceSets["test"].output.classesDirs
     classpath = sourceSets["test"].runtimeClasspath + files(layout.buildDirectory.dir("generated-natives"))

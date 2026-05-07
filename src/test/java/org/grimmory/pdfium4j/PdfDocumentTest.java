@@ -12,6 +12,7 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -539,7 +540,7 @@ class PdfDocumentTest {
 
     // Verify the raw file contains the xpacket marker
     byte[] rawBytes = Files.readAllBytes(pdf);
-    String rawStr = new String(rawBytes, java.nio.charset.StandardCharsets.ISO_8859_1);
+    String rawStr = new String(rawBytes, StandardCharsets.ISO_8859_1);
     assertTrue(rawStr.contains("<?xpacket begin="), "Saved file should contain xpacket marker");
     assertTrue(rawStr.contains("ExistingXmpSeries"), "Saved file should contain our XMP content");
 
@@ -924,9 +925,6 @@ class PdfDocumentTest {
     }
   }
 
-  // --- Tests for new APIs (metadata(String), renderPageToBytes, RenderResult encoding, image
-  // extraction, isBlank) ---
-
   @Test
   @EnabledIf("pdfiumAvailable")
   void metadataByStringKeyReadsStandardTag(@TempDir Path tempDir) throws IOException {
@@ -1188,8 +1186,6 @@ class PdfDocumentTest {
                 """;
     return pdf.getBytes(StandardCharsets.US_ASCII);
   }
-
-  // --- Metadata save correctness tests ---
 
   @Test
   @EnabledIf("pdfiumAvailable")
@@ -1594,8 +1590,6 @@ class PdfDocumentTest {
     }
   }
 
-  // --- Cross-reference stream (§7.5.8) tests ---
-
   /**
    * Create a minimal valid PDF that uses a cross-reference stream instead of a traditional xref
    * table. This is the format used by many modern PDF generators (e.g., Stirling-PDF, Chrome
@@ -1604,7 +1598,7 @@ class PdfDocumentTest {
   @SuppressWarnings("PMD.UnusedAssignment")
   private static byte[] minimalXrefStreamPdf() {
     ByteArrayOutputStream out = new ByteArrayOutputStream();
-    List<Integer> offsets = new java.util.ArrayList<>();
+    List<Integer> offsets = new ArrayList<>();
 
     writeBytes(out, "%PDF-1.5\n");
 
