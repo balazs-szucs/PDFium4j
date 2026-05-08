@@ -137,6 +137,17 @@ public final class NativeLoader {
     }
   }
 
+  private static final java.util.Set<String> ALLOWED_LIBS =
+      java.util.Set.of(
+          "pdfium",
+          "pdfium4j_shim",
+          "libpdfium.so",
+          "libpdfium.dylib",
+          "pdfium.dll",
+          "pdfium4j_shim.so",
+          "pdfium4j_shim.dylib",
+          "pdfium4j_shim.dll");
+
   private static void tryLoadFromClasspath() {
     String platform = detectPlatform();
     String resourceBase = "/natives/" + platform + "/";
@@ -152,6 +163,9 @@ public final class NativeLoader {
 
       List<String> libs = readLibraryIndex(resourceBase + "native-libs.txt");
       for (String lib : libs) {
+        if (!isAllowed(lib)) {
+          throw new NativeLoadException("Refusing to load untrusted native library: " + lib);
+        }
         extractToDir(resourceBase + lib, tmpDir);
       }
 
@@ -174,6 +188,15 @@ public final class NativeLoader {
     } catch (IOException e) {
       throw new NativeLoadException("Failed to extract native library", e);
     }
+  }
+
+  private static boolean isAllowed(String lib) {
+    if (ALLOWED_LIBS.contains(lib)) return true;
+    String base = lib;
+    if (base.startsWith("lib")) base = base.substring(3);
+    int dot = base.indexOf('.');
+    if (dot > 0) base = base.substring(0, dot);
+    return ALLOWED_LIBS.contains(base);
   }
 
   private static List<String> readLibraryIndex(String resource) {

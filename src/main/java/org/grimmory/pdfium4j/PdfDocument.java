@@ -97,11 +97,11 @@ public final class PdfDocument implements AutoCloseable {
 
     static {
       PdfiumLibrary.ensureInitialized();
-      Arena auto = Arena.ofAuto();
+      Arena global = Arena.global();
       TAG_SEGMENTS = new EnumMap<>(MetadataTag.class);
       META_HANDLES = new MethodHandle[METADATA_TAGS.length];
       for (MetadataTag tag : METADATA_TAGS) {
-        MemorySegment keySeg = auto.allocateFrom(tag.pdfKey(), StandardCharsets.UTF_8);
+        MemorySegment keySeg = global.allocateFrom(tag.pdfKey(), StandardCharsets.UTF_8);
         TAG_SEGMENTS.put(tag, keySeg);
         META_HANDLES[tag.ordinal()] =
             MethodHandles.insertArguments(DocBindings.FPDF_GetMetaText(), 1, keySeg);
@@ -300,15 +300,15 @@ public final class PdfDocument implements AutoCloseable {
             PdfiumLibrary.ignore(e);
           }
         }
-        if (docArena != null) {
-          docArena.close();
-        }
         if (!FfmHelper.isNull(handle)) {
           try {
             ViewBindings.FPDF_CloseDocument().invokeExact(handle);
           } catch (Throwable t) {
             PdfiumLibrary.ignore(t);
           }
+        }
+        if (docArena != null) {
+          docArena.close();
         }
       } finally {
         PdfiumLibrary.decrementDocumentCount();
@@ -1520,8 +1520,7 @@ public final class PdfDocument implements AutoCloseable {
   public void setMetadata(MetadataTag tag, String value) {
     ensureOpen();
     pendingMetadata.put(tag, value);
-    try (var scope = ScratchBuffer.acquireScope()) {
-      PdfiumLibrary.ignore(scope);
+    try (var _ = ScratchBuffer.acquireScope()) {
       MemorySegment keySeg = ScratchBuffer.getUtf8(tag.pdfKey());
       MemorySegment valSeg = ScratchBuffer.getUtf8(value);
       ShimBindings.pdfium4j_set_meta_utf8().invokeExact(handle, keySeg, valSeg);
@@ -1774,8 +1773,7 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   private static Optional<String> getSignatureString(MemorySegment sig, MethodHandle getter) {
-    try (var scope = ScratchBuffer.acquireScope()) {
-      PdfiumLibrary.ignore(scope);
+    try (var _ = ScratchBuffer.acquireScope()) {
       long needed = (long) getter.invokeExact(sig, MemorySegment.NULL, 0L);
       if (needed <= 2) return Optional.empty();
       MemorySegment buf = ScratchBuffer.get(needed);
@@ -1796,8 +1794,7 @@ public final class PdfDocument implements AutoCloseable {
 
   private static Optional<Instant> getSignatureTime(MemorySegment sig) {
     if (SignatureBindings.FPDFSignatureObj_GetTime() == null) return Optional.empty();
-    try (var scope = ScratchBuffer.acquireScope()) {
-      PdfiumLibrary.ignore(scope);
+    try (var _ = ScratchBuffer.acquireScope()) {
       try {
         long needed =
             (long)
@@ -1837,8 +1834,7 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   private static Optional<String> readAttachmentString(MemorySegment handle, String key) {
-    try (var scope = ScratchBuffer.acquireScope()) {
-      PdfiumLibrary.ignore(scope);
+    try (var _ = ScratchBuffer.acquireScope()) {
       MemorySegment keySeg = ScratchBuffer.getUtf8(key);
       try {
         long needed =

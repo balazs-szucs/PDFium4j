@@ -2221,8 +2221,7 @@ final class PdfSaver {
     inflater.reset();
     inflater.setInput(raw, 0, len);
     try {
-      final boolean isFinished = inflater.finished();
-      while (!isFinished) {
+      while (!inflater.finished()) {
         int read = inflater.inflate(chunk);
         if (read > 0) {
           out.write(chunk, 0, read);
@@ -2236,7 +2235,7 @@ final class PdfSaver {
         }
         throw new IOException("Failed to inflate Flate stream");
       }
-      if (!isFinished) {
+      if (!inflater.finished()) {
         throw new IOException("Flate stream ended before inflater reached stream end");
       }
     } catch (DataFormatException e) {

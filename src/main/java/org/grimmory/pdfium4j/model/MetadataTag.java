@@ -26,8 +26,13 @@ public enum MetadataTag {
     return pdfKey;
   }
 
-  /** The pre-encoded PDF metadata key bytes. */
+  /**
+   * The pre-encoded PDF metadata key bytes.
+   *
+   * @return the internal byte array (MUST NOT BE MODIFIED)
+   */
+  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings("EI_EXPOSE_REP")
   public byte[] pdfKeyBytes() {
-    return pdfKeyBytes.clone();
+    return pdfKeyBytes;
   }
 }

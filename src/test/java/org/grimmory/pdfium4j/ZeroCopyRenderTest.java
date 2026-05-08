@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 class ZeroCopyRenderTest {
 
   @Test
+  @edu.umd.cs.findbugs.annotations.SuppressFBWarnings("DLS_DEAD_LOCAL_STORE")
   void testNativeRender() throws Exception {
     Path path = Paths.get("src/test/resources/minimal.pdf");
     if (!path.toFile().exists()) return;
@@ -29,8 +30,8 @@ class ZeroCopyRenderTest {
           assertEquals(bitmap.height(), img.getHeight());
 
           // Verify we can access pixels without crashing
+          @SuppressWarnings("unused")
           int rgb = img.getRGB(0, 0);
-          PdfiumLibrary.ignore(rgb);
           // System.out.println("Pixel at 0,0: " + Integer.toHexString(rgb));
         }
       }

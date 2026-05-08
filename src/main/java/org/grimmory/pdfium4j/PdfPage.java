@@ -376,8 +376,9 @@ public final class PdfPage implements AutoCloseable {
   public void renderThumbnailTo(MemorySegment dest, int maxDimension) {
     ensureOpen();
     PageSize size = size();
-    int naturalW = (int) Math.ceil(size.width());
-    int naturalH = (int) Math.ceil(size.height());
+    // Default thumbnail DPI is 150 for decent quality vs performance balance
+    int naturalW = size.widthPixels(150);
+    int naturalH = size.heightPixels(150);
 
     int w = naturalW;
     int h = naturalH;
@@ -387,7 +388,8 @@ public final class PdfPage implements AutoCloseable {
       h = Math.max(1, (int) Math.round(h * scale));
     }
 
-    renderTo(dest, w, h, w * 4, RenderFlags.DEFAULT.value(), OPAQUE_WHITE);
+    int flags = RenderFlags.builder().annotations(false).antiAlias(true).build().value();
+    renderTo(dest, w, h, w * 4, flags, OPAQUE_WHITE);
   }
 
   private RenderResult renderThumbnailNative() throws Throwable {
@@ -397,25 +399,39 @@ public final class PdfPage implements AutoCloseable {
       return null;
     }
 
-    int w = (int) BitmapBindings.FPDFBitmap_GetWidth().invokeExact(bitmap);
-    int h = (int) BitmapBindings.FPDFBitmap_GetHeight().invokeExact(bitmap);
+    try {
+      int w = (int) BitmapBindings.FPDFBitmap_GetWidth().invokeExact(bitmap);
+      int h = (int) BitmapBindings.FPDFBitmap_GetHeight().invokeExact(bitmap);
 
-    MemorySegment buffer =
-        (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer().invokeExact(bitmap);
-    int stride = (int) BitmapBindings.FPDFBitmap_GetStride().invokeExact(bitmap);
-    byte[] rgba;
-    if (stride == w * 4) {
-      rgba = buffer.reinterpret((long) stride * h).toArray(JAVA_BYTE);
-    } else {
-      rgba = new byte[w * h * 4];
-      MemorySegment dest = MemorySegment.ofArray(rgba);
-      for (int y = 0; y < h; y++) {
-        MemorySegment.copy(
-            buffer, JAVA_BYTE, (long) y * stride, dest, JAVA_BYTE, (long) y * w * 4, (long) w * 4);
+      MemorySegment buffer =
+          (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer().invokeExact(bitmap);
+      int stride = (int) BitmapBindings.FPDFBitmap_GetStride().invokeExact(bitmap);
+      byte[] rgba;
+      if (stride == w * 4) {
+        rgba = buffer.reinterpret((long) stride * h).toArray(JAVA_BYTE);
+      } else {
+        rgba = new byte[w * h * 4];
+        MemorySegment dest = MemorySegment.ofArray(rgba);
+        for (int y = 0; y < h; y++) {
+          MemorySegment.copy(
+              buffer,
+              JAVA_BYTE,
+              (long) y * stride,
+              dest,
+              JAVA_BYTE,
+              (long) y * w * 4,
+              (long) w * 4);
+        }
+      }
+
+      return new RenderResult(w, h, rgba);
+    } finally {
+      try {
+        BitmapBindings.FPDFBitmap_Destroy().invokeExact(bitmap);
+      } catch (Throwable e) {
+        PdfiumLibrary.ignore(e);
       }
     }
-
-    return new RenderResult(w, h, rgba);
   }
 
   private RenderResult renderAtSize(int w, int h, RenderFlags flags, int background) {

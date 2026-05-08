@@ -49,8 +49,7 @@ class ZeroAllocationCallbackTest {
     try (PdfDocument doc = PdfDocument.open(SAMPLE_PDF)) {
       doc.setMetadata(MetadataTag.TITLE, "Zero Alloc Test");
 
-      try (var scope = ScratchBuffer.acquireScope()) {
-        PdfiumLibrary.ignore(scope);
+      try (var _ = ScratchBuffer.acquireScope()) {
         // Warmup heavily with constant consumer
         for (int i = 0; i < 50000; i++) {
           doc.withMetadataUtf16(MetadataTag.TITLE, CONSTANT_CONSUMER);
@@ -91,8 +90,7 @@ class ZeroAllocationCallbackTest {
     Path testPdf = findCorpusPdf();
     try (PdfDocument doc = PdfDocument.open(testPdf)) {
       try (PdfPage page = doc.page(1)) {
-        try (var scope = ScratchBuffer.acquireScope()) {
-          PdfiumLibrary.ignore(scope);
+        try (var _ = ScratchBuffer.acquireScope()) {
           // Warmup
           for (int i = 0; i < 50000; i++) {
             page.withText(CONSTANT_CONSUMER);

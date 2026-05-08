@@ -127,10 +127,8 @@ public final class PdfiumLibrary {
    *
    * @param t the exception to ignore
    */
-  public static void ignore(Object t) {
+  public static void ignore(Throwable t) {
     if (!LOG_SWALLOWED) return;
-    if (t instanceof Throwable e) {
-      SwallowLoggerHolder.LOGGER.log(System.Logger.Level.DEBUG, "Swallowed exception", e);
-    }
+    SwallowLoggerHolder.LOGGER.log(System.Logger.Level.DEBUG, "Swallowed exception", t);
   }
 }

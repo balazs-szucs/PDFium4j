@@ -83,7 +83,6 @@ public final class ScratchBuffer {
    * release the scratch buffer acquisition.
    */
   public static InputStream wrap(MemorySegment segment, long size) {
-    acquire();
     return getOrCreateState().getInputStream(segment, size);
   }
 
@@ -167,9 +166,10 @@ public final class ScratchBuffer {
     if (count <= 0) return;
     count--;
     countRef[0] = count;
-    // We keep the State in the ThreadLocal to allow zero-allocation reuse.
-    // The native memory is tied to the State's Arenas, which will stay open
-    // until the thread dies or an explicit purge is called.
+
+    if (count == 0 && currentCapacity() > STEADY_STATE_SIZE) {
+      purge();
+    }
   }
 
   /** Clear all thread-local buffers and close their arenas. */

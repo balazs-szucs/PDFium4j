@@ -120,8 +120,19 @@ public final class XmpMetadataWriter {
     public void write(char c) throws IOException {
       if (c <= 127) {
         out.write((byte) c);
-      } else {
+      } else if (c <= 0x7FF) {
+        out.write((byte) (0xC0 | (c >> 6)));
+        out.write((byte) (0x80 | (c & 0x3F)));
+      } else if (Character.isHighSurrogate(c)) {
+        // High surrogate - we wait for low surrogate in write(String) or similar
+        // But the current Sink API is char-by-char.
+        // For simplicity and safety in XMP (mostly BMP), we just use the existing fallback
+        // for complex cases, but optimize the common 2-byte and 3-byte UTF-8 cases.
         out.write(String.valueOf(c).getBytes(StandardCharsets.UTF_8));
+      } else {
+        out.write((byte) (0xE0 | (c >> 12)));
+        out.write((byte) (0x80 | ((c >> 6) & 0x3F)));
+        out.write((byte) (0x80 | (c & 0x3F)));
       }
     }
   }

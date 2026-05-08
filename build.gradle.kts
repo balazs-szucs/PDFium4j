@@ -1,6 +1,7 @@
 import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Path
+import java.security.MessageDigest
 
 plugins {
     `java-library`
@@ -155,6 +156,16 @@ val hostPlatform = when {
     else -> null
 }
 
+val pdfiumHashes = mapOf(
+    "linux-x64"        to "ae0e276bcdf276dca2746adb4780f79949620e5c655973ca252a3994bc516a13",
+    "linux-arm64"      to "b063f5244586f5e0c025cd4d74dd10f75bbb41e28bcdc1032349ca27814a06cf",
+    "linux-musl-x64"   to "c0d70bea47c93b055d6a9334c248f6c7957df130c5478fc0277c55ee98ade4bb",
+    "linux-musl-arm64" to "5e4cc22df55498cb2f094f479869a66575b317bbc0e35d633c1e7e99b783f3d3",
+    "mac-x64"          to "1e2f0a38bd7a8c369b0a1655a527c6b5491086fe3a45d1d82432e9229ac9b40c",
+    "mac-arm64"        to "0e9692fa2063f5b5e6f6129680fe618f47efb9d728dd02e9db9b8999e386c84e",
+    "win-x64"          to "eefb48c845ab22f0945151093ce8fd611a33687796728051f9a1b2b341e1b980"
+)
+
 val downloadPdfiumBinaries by tasks.registering {
     description = "Downloads prebuilt PDFium binaries for all supported platforms"
     outputs.dir(pdfiumArchiveDir)
@@ -162,23 +173,53 @@ val downloadPdfiumBinaries by tasks.registering {
         val dir = pdfiumArchiveDir.get().asFile
         dir.mkdirs()
         val base = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/$pdfiumVersion"
-        activePlatforms.values.forEach { remoteName ->
+        activePlatforms.forEach { (localName, remoteName) ->
             val target = dir.resolve("pdfium-$remoteName.tgz")
-            if (!target.exists()) {
-                logger.lifecycle("Downloading pdfium-$remoteName.tgz …")
-                val conn = URI("$base/pdfium-$remoteName.tgz").toURL()
-                    .openConnection() as HttpURLConnection
-                conn.instanceFollowRedirects = true
-                conn.connect()
-                check(conn.responseCode == 200) {
-                    "Download failed: HTTP ${conn.responseCode} for pdfium-$remoteName.tgz"
-                }
-                conn.inputStream.use { inp ->
-                    target.outputStream().buffered().use { out -> inp.copyTo(out) }
+            val expectedHash = pdfiumHashes[remoteName] ?: error("No hash for platform $remoteName")
+
+            if (target.exists()) {
+                val actualHash = calculateSha256(target)
+                if (actualHash == expectedHash) {
+                    logger.lifecycle("Skipping $remoteName (already downloaded and verified)")
+                    return@forEach
+                } else {
+                    logger.warn("Hash mismatch for existing $remoteName; redownloading...")
+                    target.delete()
                 }
             }
+
+            logger.lifecycle("Downloading pdfium-$remoteName.tgz …")
+            val conn = URI("$base/pdfium-$remoteName.tgz").toURL()
+                .openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = true
+            conn.connect()
+            check(conn.responseCode == 200) {
+                "Download failed: HTTP ${conn.responseCode} for pdfium-$remoteName.tgz"
+            }
+            conn.inputStream.use { inp ->
+                target.outputStream().buffered().use { out -> inp.copyTo(out) }
+            }
+
+            val actualHash = calculateSha256(target)
+            if (actualHash != expectedHash) {
+                target.delete()
+                error("SHA-256 verification failed for pdfium-$remoteName.tgz!\nExpected: $expectedHash\nActual:   $actualHash")
+            }
+            logger.lifecycle("Verified pdfium-$remoteName.tgz")
         }
     }
+}
+
+fun calculateSha256(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { inp ->
+        val buffer = ByteArray(8192)
+        var read: Int
+        while (inp.read(buffer).also { read = it } != -1) {
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 val extractPdfiumBinaries by tasks.registering {
