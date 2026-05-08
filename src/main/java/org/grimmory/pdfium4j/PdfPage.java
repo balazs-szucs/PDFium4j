@@ -838,11 +838,13 @@ public final class PdfPage implements AutoCloseable {
   }
 
   void acquire() {
+    ensureThreadConfinement();
     if (closed) throw new IllegalStateException("PdfPage is already closed");
     REF_COUNT.getAndAdd(this, 1);
   }
 
   void release() {
+    ensureThreadConfinement();
     if (closed) return;
     if ((int) REF_COUNT.getAndAdd(this, -1) == 1) {
       doClose();

@@ -157,13 +157,15 @@ val hostPlatform = when {
 }
 
 val pdfiumHashes = mapOf(
-    "linux-x64"        to "ae0e276bcdf276dca2746adb4780f79949620e5c655973ca252a3994bc516a13",
-    "linux-arm64"      to "b063f5244586f5e0c025cd4d74dd10f75bbb41e28bcdc1032349ca27814a06cf",
-    "linux-musl-x64"   to "c0d70bea47c93b055d6a9334c248f6c7957df130c5478fc0277c55ee98ade4bb",
-    "linux-musl-arm64" to "5e4cc22df55498cb2f094f479869a66575b317bbc0e35d633c1e7e99b783f3d3",
-    "mac-x64"          to "1e2f0a38bd7a8c369b0a1655a527c6b5491086fe3a45d1d82432e9229ac9b40c",
-    "mac-arm64"        to "0e9692fa2063f5b5e6f6129680fe618f47efb9d728dd02e9db9b8999e386c84e",
-    "win-x64"          to "eefb48c845ab22f0945151093ce8fd611a33687796728051f9a1b2b341e1b980"
+    "7825" to mapOf(
+        "linux-x64"        to "ae0e276bcdf276dca2746adb4780f79949620e5c655973ca252a3994bc516a13",
+        "linux-arm64"      to "b063f5244586f5e0c025cd4d74dd10f75bbb41e28bcdc1032349ca27814a06cf",
+        "linux-musl-x64"   to "c0d70bea47c93b055d6a9334c248f6c7957df130c5478fc0277c55ee98ade4bb",
+        "linux-musl-arm64" to "5e4cc22df55498cb2f094f479869a66575b317bbc0e35d633c1e7e99b783f3d3",
+        "mac-x64"          to "1e2f0a38bd7a8c369b0a1655a527c6b5491086fe3a45d1d82432e9229ac9b40c",
+        "mac-arm64"        to "0e9692fa2063f5b5e6f6129680fe618f47efb9d728dd02e9db9b8999e386c84e",
+        "win-x64"          to "eefb48c845ab22f0945151093ce8fd611a33687796728051f9a1b2b341e1b980"
+    )
 )
 
 val downloadPdfiumBinaries by tasks.registering {
@@ -172,10 +174,20 @@ val downloadPdfiumBinaries by tasks.registering {
     doLast {
         val dir = pdfiumArchiveDir.get().asFile
         dir.mkdirs()
+
+        val hashesForVersion = pdfiumHashes[pdfiumVersion]
+            ?: error("No hashes defined for PDFium version $pdfiumVersion. Please update pdfiumHashes in build.gradle.kts")
+
+        // Security check: ensure all supported platforms have hashes for this version
+        val missingHashes = pdfiumPlatforms.values.toSet() - hashesForVersion.keys
+        if (missingHashes.isNotEmpty()) {
+            error("Missing hashes for version $pdfiumVersion: $missingHashes")
+        }
+
         val base = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/$pdfiumVersion"
         activePlatforms.forEach { (localName, remoteName) ->
             val target = dir.resolve("pdfium-$remoteName.tgz")
-            val expectedHash = pdfiumHashes[remoteName] ?: error("No hash for platform $remoteName")
+            val expectedHash = hashesForVersion[remoteName] ?: error("No hash for platform $remoteName")
 
             if (target.exists()) {
                 val actualHash = calculateSha256(target)

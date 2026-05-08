@@ -167,6 +167,7 @@ final class PdfSaver {
   private static final byte[] PREDICTOR_KEY = "/Predictor".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] COLUMNS_KEY = "/Columns".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] W_KEY = "/W".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] INDEX_KEY = "/Index".getBytes(StandardCharsets.ISO_8859_1);
 
   private static final byte[] DICT_START = "<<".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] DICT_END = ">>".getBytes(StandardCharsets.ISO_8859_1);
@@ -235,7 +236,12 @@ final class PdfSaver {
 
   private static final ThreadLocal<int[]> XREF_W_BUF = ThreadLocal.withInitial(() -> new int[3]);
   private static final ThreadLocal<int[]> XREF_INDEX_BUF =
-      ThreadLocal.withInitial(() -> new int[256]);
+      ThreadLocal.withInitial(
+          () -> {
+            int[] arr = new int[256];
+            Arrays.fill(arr, -1);
+            return arr;
+          });
   private static final ThreadLocal<long[]> XREF_ENTRY_BUF_TL =
       ThreadLocal.withInitial(() -> new long[3]);
   private static final ThreadLocal<long[]> RANGE_BUF = ThreadLocal.withInitial(() -> new long[2]);
@@ -1811,6 +1817,15 @@ final class PdfSaver {
     int[] widths = XREF_W_BUF.get();
     scanWArray(pdf, dictStart, dictEnd, widths);
 
+    int[] indexPairs = XREF_INDEX_BUF.get();
+    Arrays.fill(indexPairs, -1);
+    if (!scanIndexArray(pdf, dictStart, dictEnd, indexPairs)) {
+      // Default index [0 Size]
+      indexPairs[0] = 0;
+      indexPairs[1] = (int) out[TRAILER_IDX_SIZE];
+      indexPairs[2] = -1;
+    }
+
     long prevOffset = scanIntAfterKey(pdf, dictStart, dictEnd, PREV_KEY);
     out[TRAILER_IDX_PREV] = prevOffset;
 
@@ -2103,6 +2118,30 @@ final class PdfSaver {
       out[i] = parsePositiveInt(seg, pos, numEnd);
       pos = numEnd;
     }
+  }
+
+  /**
+   * Scans /Index array from a dictionary MemorySegment. Zero-allocation replacement for
+   * parseRequiredTriple(String, INDEX_ARRAY_PATTERN, "/Index").
+   */
+  private static boolean scanIndexArray(
+      MemorySegment seg, long dictStart, long dictEnd, int[] out) {
+    long indexPos = findTopLevelKey(seg, dictStart, dictEnd, INDEX_KEY);
+    if (indexPos < 0) return false;
+    long pos = skipAsciiWhitespace(seg, indexPos + INDEX_KEY.length, dictEnd);
+    if (pos >= dictEnd || seg.get(JAVA_BYTE, pos) != '[') return false;
+    pos++; // skip '['
+    int count = 0;
+    while (count < out.length - 1) {
+      pos = skipAsciiWhitespace(seg, pos, dictEnd);
+      if (pos >= dictEnd || seg.get(JAVA_BYTE, pos) == ']') break;
+      long numEnd = scanDigits(seg, pos, dictEnd);
+      if (numEnd <= pos) break;
+      out[count++] = parsePositiveInt(seg, pos, numEnd);
+      pos = numEnd;
+    }
+    if (count < out.length) out[count] = -1;
+    return count > 0;
   }
 
   /**
@@ -2678,33 +2717,8 @@ final class PdfSaver {
   }
 
   private static void writeCurrentPdfDate(OutputStream out) throws IOException {
-    // PDF Date format: (D:YYYYMMDDHHmmSSOHH'mm')
-    // We'll write a simple one for now: (D:20260507180000Z)
-    // To be truly zero-allocation, we need to format the current time manually.
-    // Since we don't have a fast date formatter, we'll use a pre-formatted stub for now
-    // or implement a simple one.
     out.write('(');
-    out.write('D');
-    out.write(':');
-
-    // In a real impl, we'd convert the current time to YYYYMMDDHHmmss.
-    // For the zero-allocation test, we'll write a fixed but valid-looking date
-    // to avoid ANY allocation.
-    out.write('2');
-    out.write('0');
-    out.write('2');
-    out.write('6');
-    out.write('0');
-    out.write('5');
-    out.write('0');
-    out.write('7');
-    out.write('1');
-    out.write('8');
-    out.write('0');
-    out.write('0');
-    out.write('0');
-    out.write('0');
-    out.write('Z');
+    org.grimmory.pdfium4j.util.PdfDateUtils.writeCurrentPdfDate(out);
     out.write(')');
   }
 

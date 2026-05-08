@@ -83,6 +83,7 @@ public final class ScratchBuffer {
    * release the scratch buffer acquisition.
    */
   public static InputStream wrap(MemorySegment segment, long size) {
+    acquire();
     return getOrCreateState().getInputStream(segment, size);
   }
 

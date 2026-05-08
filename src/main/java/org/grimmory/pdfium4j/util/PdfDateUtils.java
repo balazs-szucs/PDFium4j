@@ -151,6 +151,39 @@ public final class PdfDateUtils {
     return sb.toString();
   }
 
+  /**
+   * Writes the current UTC date and time in PDF format (D:YYYYMMDDHHmmssZ) to the output stream.
+   *
+   * @param out the output stream to write to
+   * @throws java.io.IOException if an I/O error occurs
+   */
+  public static void writeCurrentPdfDate(java.io.OutputStream out) throws java.io.IOException {
+    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+    out.write('D');
+    out.write(':');
+    writePadded(out, now.getYear(), 4);
+    writePadded(out, now.getMonthValue(), 2);
+    writePadded(out, now.getDayOfMonth(), 2);
+    writePadded(out, now.getHour(), 2);
+    writePadded(out, now.getMinute(), 2);
+    writePadded(out, now.getSecond(), 2);
+    out.write('Z');
+  }
+
+  private static void writePadded(java.io.OutputStream out, int value, int width)
+      throws java.io.IOException {
+    int v = Math.abs(value);
+    if (width == 2) {
+      out.write('0' + (v / 10 % 10));
+      out.write('0' + (v % 10));
+    } else if (width == 4) {
+      out.write('0' + (v / 1000 % 10));
+      out.write('0' + (v / 100 % 10));
+      out.write('0' + (v / 10 % 10));
+      out.write('0' + (v % 10));
+    }
+  }
+
   private static void appendPadded(StringBuilder sb, int value, int width) {
     long v = Math.abs((long) value);
     if (width == 2) {

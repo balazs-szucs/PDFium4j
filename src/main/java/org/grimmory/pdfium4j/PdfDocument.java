@@ -33,8 +33,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -79,15 +77,6 @@ public final class PdfDocument implements AutoCloseable {
   private static final Cleaner CLEANER = Cleaner.create();
   private static final byte[] EMPTY_BYTE_ARRAY = Generators.emptyByteArray();
   private static final int[] EMPTY_INT_ARRAY = Generators.emptyIntArray();
-
-  private static final ExecutorService PREFETCH_EXECUTOR =
-      Executors.newFixedThreadPool(
-          Math.max(1, Runtime.getRuntime().availableProcessors() / 4),
-          r -> {
-            Thread t = new Thread(r, "pdfium4j-prefetch");
-            t.setDaemon(true);
-            return t;
-          });
 
   private static final MetadataTag[] METADATA_TAGS = MetadataTag.values();
 
@@ -561,7 +550,6 @@ public final class PdfDocument implements AutoCloseable {
     PdfPage cached = pageCache.get(index);
     if (cached != null && !cached.isClosed()) {
       cached.acquire();
-      triggerPrefetch(index);
       return cached;
     }
 
@@ -584,59 +572,10 @@ public final class PdfDocument implements AutoCloseable {
       page.acquire(); // Cache takes a reference
       pageCache.put(index, page, page.estimatedSizeBytes());
 
-      triggerPrefetch(index);
       return page;
     } catch (Throwable t) {
       throw new PdfiumException("Failed to load page " + index, t);
     }
-  }
-
-  private void triggerPrefetch(int index) {
-    int radius = policy.prefetchRadius();
-    if (radius <= 0) return;
-
-    int count = pageCount();
-    for (int i = 1; i <= radius; i++) {
-      int next = index + i;
-      int prev = index - i;
-      if (next < count) warmPage(next);
-      if (prev >= 0) warmPage(prev);
-    }
-  }
-
-  private void warmPage(int index) {
-    if (pageCache.get(index) != null) return;
-
-    PREFETCH_EXECUTOR.submit(
-        () -> {
-          if (closed) return;
-          try {
-            synchronized (this) {
-              if (closed || pageCache.get(index) != null) return;
-
-              MemorySegment pageHandle =
-                  (MemorySegment) ViewBindings.FPDF_LoadPage().invokeExact(handle, index);
-              if (FfmHelper.isNull(pageHandle)) return;
-
-              PdfPage page =
-                  new PdfPage(
-                      pageHandle,
-                      ownerThread,
-                      policy.maxRenderPixels(),
-                      p -> {
-                        unregisterPage(p);
-                        pageCache.remove(index);
-                      },
-                      this::markStructurallyModified);
-
-              registerPage(page);
-              page.acquire();
-              pageCache.put(index, page, page.estimatedSizeBytes());
-            }
-          } catch (Throwable t) {
-            PdfiumLibrary.ignore(t);
-          }
-        });
   }
 
   public synchronized PageSize pageSize(int index) {
@@ -1023,42 +962,22 @@ public final class PdfDocument implements AutoCloseable {
    */
   public InputStream metadataStream(MetadataTag tag) {
     ensureOpen();
-    /*
-        if (pendingMetadata.containsKey(tag)) {
-          String pending = pendingMetadata.get(tag);
-          if (pending == null || pending.isEmpty()) return InputStream.nullInputStream();
-          int needed = wideStringByteLength(pending);
-          ScratchBuffer.acquire();
-          try {
-            MemorySegment buf = ScratchBuffer.get(needed);
-            writeWideString(buf, pending);
-            return ScratchBuffer.wrap(buf, needed);
-          } finally {
-            ScratchBuffer.release();
-          }
-        }
-    */
 
-    try {
+    try (var _ = ScratchBuffer.acquireScope()) {
       long needed =
           (long)
               DocBindings.FPDF_GetMetaText()
                   .invokeExact(handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
       if (needed <= 2) return InputStream.nullInputStream();
 
-      ScratchBuffer.acquire();
-      try {
-        MemorySegment buf = ScratchBuffer.get(needed);
-        long copied =
-            (long)
-                DocBindings.FPDF_GetMetaText()
-                    .invokeExact(handle, metadataKeySegment(tag), buf, needed);
-        long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
-        if (byteLen <= 0) return InputStream.nullInputStream();
-        return ScratchBuffer.wrap(buf, byteLen);
-      } finally {
-        ScratchBuffer.release();
-      }
+      MemorySegment buf = ScratchBuffer.get(needed);
+      long copied =
+          (long)
+              DocBindings.FPDF_GetMetaText()
+                  .invokeExact(handle, metadataKeySegment(tag), buf, needed);
+      long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
+      if (byteLen <= 0) return InputStream.nullInputStream();
+      return ScratchBuffer.wrap(buf, byteLen);
     } catch (Throwable t) {
       PdfiumLibrary.ignore(t);
       return InputStream.nullInputStream();
@@ -1411,29 +1330,22 @@ public final class PdfDocument implements AutoCloseable {
    */
   public InputStream xmpMetadataStream() {
     ensureOpen();
-    if (pendingXmp != null) {
-      if (pendingXmp instanceof XmpUpdate.Raw(String xmp)) {
-        long len = FfmHelper.utf8ByteLength(xmp);
-        MemorySegment buf = ScratchBuffer.get(len);
-        FfmHelper.writeUtf8StringNoNull(buf, xmp);
-        return ScratchBuffer.wrap(buf, len);
-      }
-      if (pendingXmp instanceof XmpUpdate.Structured(XmpMetadata metadata)) {
-        ScratchBuffer.acquire();
-        try {
+    try (var _ = ScratchBuffer.acquireScope()) {
+      if (pendingXmp != null) {
+        if (pendingXmp instanceof XmpUpdate.Raw(String xmp)) {
+          long len = FfmHelper.utf8ByteLength(xmp);
+          MemorySegment buf = ScratchBuffer.get(len);
+          FfmHelper.writeUtf8StringNoNull(buf, xmp);
+          return ScratchBuffer.wrap(buf, len);
+        }
+        if (pendingXmp instanceof XmpUpdate.Structured(XmpMetadata metadata)) {
           MemorySegment buf = ScratchBuffer.get(64 * 1024);
           SegmentOutputStream sos = new SegmentOutputStream(buf);
           XMP_WRITER.write(metadata, sos);
           return ScratchBuffer.wrap(sos.segment(), sos.size());
-        } catch (Throwable t) {
-          ScratchBuffer.release();
-          throw (t instanceof PdfiumException pe)
-              ? pe
-              : new PdfiumException("Failed to serialize pending XMP", t);
         }
       }
-    }
-    try {
+
       int needed =
           (int) ShimBindings.pdfium4j_get_xmp_metadata().invokeExact(handle, MemorySegment.NULL, 0);
       if (needed <= 0) return InputStream.nullInputStream();
@@ -1442,8 +1354,9 @@ public final class PdfDocument implements AutoCloseable {
       int copied = (int) ShimBindings.pdfium4j_get_xmp_metadata().invokeExact(handle, buf, needed);
       if (copied <= 0) return InputStream.nullInputStream();
 
-      return ScratchBuffer.wrap(buf, Math.min(copied, needed));
+      return ScratchBuffer.wrap(buf, Math.min(copied, (long) needed));
     } catch (Throwable t) {
+      if (t instanceof PdfiumException pe) throw pe;
       PdfiumLibrary.ignore(t);
       return InputStream.nullInputStream();
     }
