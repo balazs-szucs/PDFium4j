@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.logging.Level;
@@ -29,7 +28,7 @@ public class PdfSaveAllocationTest {
   @BeforeAll
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
-    Path source = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
+    Path source = findCorpusPdf();
     target = Files.createTempFile("pdfium4j-alloc-target-", ".pdf");
 
     doc = PdfDocument.open(source);
@@ -79,11 +78,11 @@ public class PdfSaveAllocationTest {
     assertTrue(bos.size() > 0, "Native save should stream bytes to the sink");
   }
 
-  private static Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     return corpusPdf;
   }

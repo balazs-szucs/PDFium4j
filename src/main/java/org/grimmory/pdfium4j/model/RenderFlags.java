@@ -26,7 +26,7 @@ public record RenderFlags(int value) {
 
   public static final class Builder {
     private boolean annotations = true;
-    private final boolean printing = false;
+    private static final boolean printing = false;
     private boolean antiAlias = true;
 
     private Builder() {}

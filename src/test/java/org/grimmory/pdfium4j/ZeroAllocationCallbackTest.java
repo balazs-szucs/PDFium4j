@@ -65,7 +65,7 @@ class ZeroAllocationCallbackTest {
 
   @Test
   void testWithText() {
-    Path testPdf = findCorpusPdf("gutenberg/996_Don Quixote.pdf");
+    Path testPdf = findCorpusPdf();
     try (PdfDocument doc = PdfDocument.open(testPdf)) {
       boolean foundText = false;
       int searchLimit = Math.min(doc.pageCount(), 10);
@@ -91,7 +91,7 @@ class ZeroAllocationCallbackTest {
   @Test
   void testWithTextNoAllocation() {
     asserter.verifyAllocationTrackingAvailable();
-    Path testPdf = findCorpusPdf("gutenberg/996_Don Quixote.pdf");
+    Path testPdf = findCorpusPdf();
     try (PdfDocument doc = PdfDocument.open(testPdf)) {
       try (PdfPage page = doc.page(1)) {
         try (var scope = ScratchBuffer.acquireScope()) {
@@ -109,11 +109,11 @@ class ZeroAllocationCallbackTest {
     }
   }
 
-  private static Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/996_Don Quixote.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/996_Don Quixote.pdf");
     }
     if (!Files.exists(corpusPdf)) {
       return SAMPLE_PDF;

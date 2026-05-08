@@ -140,7 +140,7 @@ public final class NativeLoader {
   private static void tryLoadFromClasspath() {
     String platform = detectPlatform();
     String resourceBase = "/natives/" + platform + "/";
-    String libName = nativeFilename("pdfium");
+    String libName = nativeFilename();
 
     if (NativeLoader.class.getResource(resourceBase + libName) == null) {
       throw new NativeLoadException("No PDFium binary found on classpath for " + platform);
@@ -198,19 +198,19 @@ public final class NativeLoader {
 
   private static void extractToDir(String resource, Path dir) throws IOException {
     String filename = resource.substring(resource.lastIndexOf('/') + 1);
-    extractResource(resource, dir, filename, true);
+    extractResource(resource, dir, filename);
   }
 
   private static Path extractLib(String resource, Path dir, String filename) throws IOException {
-    return extractResource(resource, dir, filename, true);
+    return extractResource(resource, dir, filename);
   }
 
   @CheckForNull
-  private static Path extractResource(String resource, Path dir, String filename, boolean required)
+  private static Path extractResource(String resource, Path dir, String filename)
       throws IOException {
     try (InputStream is = NativeLoader.class.getResourceAsStream(resource)) {
       if (is == null) {
-        if (required) {
+        if (true) {
           throw new NativeLoadException("Resource not found: " + resource);
         }
         return null;
@@ -278,10 +278,10 @@ public final class NativeLoader {
     throw new NativeLoadException("Unsupported architecture: " + arch);
   }
 
-  static String nativeFilename(String lib) {
+  static String nativeFilename() {
     String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
-    if (os.contains("win")) return lib + ".dll";
-    if (os.contains("mac")) return "lib" + lib + ".dylib";
-    return "lib" + lib + ".so";
+    if (os.contains("win")) return "pdfium" + ".dll";
+    if (os.contains("mac")) return "lib" + "pdfium" + ".dylib";
+    return "lib" + "pdfium" + ".so";
   }
 }

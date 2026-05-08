@@ -31,7 +31,7 @@ class PdfRenderAllocationTest {
     asserter.verifyAllocationTrackingAvailable();
     arena = Arena.ofShared();
 
-    Path source = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
+    Path source = findCorpusPdf();
     doc = PdfDocument.open(source);
     page = doc.page(0);
 
@@ -77,11 +77,11 @@ class PdfRenderAllocationTest {
     }
   }
 
-  private static Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     if (!Files.exists(corpusPdf)) {
       throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);

@@ -7,7 +7,7 @@ import java.lang.foreign.Linker;
 import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 import java.lang.StableValue;
-import java.util.Objects;
+
 /** FFM bindings for PDFium digital signature functions from {@code fpdf_signature.h}. */
 public final class SignatureBindings {
   private static final Linker LINKER = Linker.nativeLinker();

@@ -46,8 +46,8 @@ class PdfOpenReadAllocationTest {
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
 
-    probeSource = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
-    openProbe = PdfDocument.noAllocationPathProbe(probeSource, null);
+    probeSource = findCorpusPdf();
+    openProbe = PdfDocument.noAllocationPathProbe(probeSource);
 
     metadataDoc = PdfDocument.open(probeSource);
     metadataDoc.setMetadata(MetadataTag.TITLE, TITLE);
@@ -89,7 +89,7 @@ class PdfOpenReadAllocationTest {
   @EnabledIf("pdfiumAvailable")
   void metadataProbeDoesNotAllocateAfterWarmup() {
     try (Arena arena = Arena.ofConfined()) {
-      int needed = metadataDoc.probeMetadataUtf16ByteLength(MetadataTag.TITLE);
+      int needed = metadataDoc.probeMetadataUtf16ByteLength();
       int expectedMinimum = (TITLE.length() * 2) + 2;
       assertTrue(
           needed >= expectedMinimum,
@@ -97,11 +97,11 @@ class PdfOpenReadAllocationTest {
 
       MemorySegment metadataBuffer = arena.allocate(needed, 2);
       for (int i = 0; i < 2000; i++) {
-        metadataDoc.readMetadataUtf16(MetadataTag.TITLE, metadataBuffer);
+        metadataDoc.readMetadataUtf16(metadataBuffer);
       }
 
       asserter.startRecording();
-      int copied = metadataDoc.readMetadataUtf16(MetadataTag.TITLE, metadataBuffer);
+      int copied = metadataDoc.readMetadataUtf16(metadataBuffer);
       asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
 
       assertEquals(needed, copied);
@@ -112,12 +112,12 @@ class PdfOpenReadAllocationTest {
     }
   }
 
-  private static Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
       // Fallback for different test execution environments
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     if (!Files.exists(corpusPdf)) {
       throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);

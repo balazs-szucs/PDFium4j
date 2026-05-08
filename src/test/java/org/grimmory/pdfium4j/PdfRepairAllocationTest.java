@@ -1,6 +1,5 @@
 package org.grimmory.pdfium4j;
 
-import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -33,7 +32,7 @@ public class PdfRepairAllocationTest {
     asserter.verifyAllocationTrackingAvailable();
     arena = Arena.ofShared();
 
-    Path corpusPdf = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
+    Path corpusPdf = findCorpusPdf();
     byte[] data = Files.readAllBytes(corpusPdf);
     
     // Truncate just enough to break the startxref (usually last ~10 bytes)
@@ -82,11 +81,11 @@ public class PdfRepairAllocationTest {
     }
   }
 
-  private static Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     return corpusPdf;
   }

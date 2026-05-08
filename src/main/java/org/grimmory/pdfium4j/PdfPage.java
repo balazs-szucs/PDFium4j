@@ -60,7 +60,7 @@ public final class PdfPage implements AutoCloseable {
   private final Runnable onModified;
 
   @SuppressWarnings("PMD.UnusedPrivateField")
-  private int refCount = 1;
+  private static int refCount = 1;
 
   private volatile boolean closedByUser = false;
 

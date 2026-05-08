@@ -53,7 +53,7 @@ class PdfStreamAllocationTest {
   @BeforeAll
   void setUp() throws Exception {
     asserter.verifyAllocationTrackingAvailable();
-    Path source = findCorpusPdf("gutenberg/1063_The Cask of Amontillado.pdf");
+    Path source = findCorpusPdf();
     doc = PdfDocument.open(source);
 
     // Ensure we have some metadata to read for zero-allocation testing
@@ -128,11 +128,11 @@ class PdfStreamAllocationTest {
     asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
   }
 
-  private static Path findCorpusPdf(String relativePath) {
+  private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve(relativePath);
+    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve(relativePath);
+      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     if (!Files.exists(corpusPdf)) {
       throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);

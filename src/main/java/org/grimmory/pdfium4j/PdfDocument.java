@@ -208,8 +208,6 @@ public final class PdfDocument implements AutoCloseable {
   private PdfDocument(
       MemorySegment handle,
       Arena docArena,
-      SeekableByteChannel sourceChannel,
-      long channelId,
       Path sourcePath,
       Path tempFile,
       byte[] sourceBytes,
@@ -218,15 +216,15 @@ public final class PdfDocument implements AutoCloseable {
       Thread ownerThread) {
     this.handle = handle.reinterpret(ValueLayout.ADDRESS.byteSize());
     this.docArena = docArena;
-    this.docSourceChannel = sourceChannel;
-    this.channelId = channelId;
+    this.docSourceChannel = null;
+    this.channelId = 0L;
     this.sourcePath = sourcePath;
     this.sourceBytes = sourceBytes;
     this.sourceSegment = sourceBytes != null ? MemorySegment.ofArray(sourceBytes) : null;
     this.policy = policy;
     this.sourceFileVersion = sourceFileVersion;
     this.ownerThread = ownerThread;
-    this.state = new CleanupState(handle, channelId, sourceChannel, tempFile, docArena);
+    this.state = new CleanupState(handle, 0L, null, tempFile, docArena);
     this.cleanable = CLEANER.register(this, state);
     this.pageCache =
         new IntObjectCache<>(policy.maxPageCacheBytes()) {
@@ -415,9 +413,7 @@ public final class PdfDocument implements AutoCloseable {
           new PdfDocument(
               doc,
               docArena,
-              null,
-              0L,
-              path,
+                  path,
               tempFile,
               null,
               policy,
@@ -511,8 +507,8 @@ public final class PdfDocument implements AutoCloseable {
     }
   }
 
-  static PdfDocument open(MemorySegment segment, String password, PdfProcessingPolicy policy) {
-    return open(segment, password, policy, Arena.ofShared(), null);
+  static PdfDocument open(MemorySegment segment, PdfProcessingPolicy policy) {
+    return open(segment, null, policy, Arena.ofShared(), null);
   }
 
   private static PdfDocument open(
@@ -538,9 +534,7 @@ public final class PdfDocument implements AutoCloseable {
       return new PdfDocument(
           docHandle,
           arena,
-          null,
-          0L,
-          null,
+              null,
           null,
           sourceBytes,
           resolvedPolicy,
@@ -712,11 +706,11 @@ public final class PdfDocument implements AutoCloseable {
     return sourceFileVersion;
   }
 
-  static NoAllocationPathProbe noAllocationPathProbe(Path path, String password) {
+  static NoAllocationPathProbe noAllocationPathProbe(Path path) {
     if (path == null) {
       throw new IllegalArgumentException("path must not be null");
     }
-    return new NoAllocationPathProbe(path.toAbsolutePath().normalize(), password);
+    return new NoAllocationPathProbe(path.toAbsolutePath().normalize(), null);
   }
 
   public synchronized boolean hasValidCrossReferenceTable() {
@@ -925,29 +919,29 @@ public final class PdfDocument implements AutoCloseable {
     return result;
   }
 
-  int probeMetadataUtf16ByteLength(MetadataTag tag) {
+  int probeMetadataUtf16ByteLength() {
     ensureOpen();
-    if (pendingMetadata.containsKey(tag)) {
-      return wideStringByteLength(pendingMetadata.get(tag));
+    if (pendingMetadata.containsKey(MetadataTag.TITLE)) {
+      return wideStringByteLength(pendingMetadata.get(MetadataTag.TITLE));
     }
     try {
       long needed =
           (long)
               DocBindings.FPDF_GetMetaText().invokeExact(
-                  handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
+                  handle, metadataKeySegment(MetadataTag.TITLE), MemorySegment.NULL, 0L);
       return needed <= 0 ? 0 : Math.toIntExact(needed);
     } catch (Throwable t) {
-      throw new PdfiumException("Failed to inspect metadata length for " + tag, t);
+      throw new PdfiumException("Failed to inspect metadata length for " + MetadataTag.TITLE, t);
     }
   }
 
-  int readMetadataUtf16(MetadataTag tag, MemorySegment buffer) {
+  int readMetadataUtf16(MemorySegment buffer) {
     ensureOpen();
     if (buffer == null || FfmHelper.isNull(buffer)) {
       throw new IllegalArgumentException("buffer must not be null");
     }
-    if (pendingMetadata.containsKey(tag)) {
-      return writeWideString(buffer, pendingMetadata.get(tag));
+    if (pendingMetadata.containsKey(MetadataTag.TITLE)) {
+      return writeWideString(buffer, pendingMetadata.get(MetadataTag.TITLE));
     }
     long capacity = buffer.byteSize();
     if (capacity <= 0) {
@@ -957,7 +951,7 @@ public final class PdfDocument implements AutoCloseable {
       long copied =
           (long)
               DocBindings.FPDF_GetMetaText().invokeExact(
-                  handle, metadataKeySegment(tag), buffer, capacity);
+                  handle, metadataKeySegment(MetadataTag.TITLE), buffer, capacity);
       if (copied <= 0) {
         return 0;
       }
@@ -967,7 +961,7 @@ public final class PdfDocument implements AutoCloseable {
       long byteLen = FfmHelper.normalizeWideByteLength(buffer, copied, capacity);
       return Math.toIntExact(byteLen);
     } catch (Throwable t) {
-      throw new PdfiumException("Failed to read metadata for " + tag, t);
+      throw new PdfiumException("Failed to read metadata for " + MetadataTag.TITLE, t);
     }
   }
 

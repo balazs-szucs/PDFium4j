@@ -4,10 +4,9 @@ import static org.grimmory.pdfium4j.internal.FfmHelper.C_LONG;
 import static org.grimmory.pdfium4j.internal.FfmHelper.C_POINTER;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
-import java.lang.foreign.SymbolLookup;
 import java.lang.invoke.MethodHandle;
 import java.lang.StableValue;
-import java.util.Objects;
+
 /** FFM bindings for PDFium document attachment functions from {@code fpdf_attachment.h}. */
 public final class AttachmentBindings {
   private static final Linker LINKER = Linker.nativeLinker();

@@ -10,14 +10,14 @@ public final class ThumbnailBindings {
   private static final Linker LINKER = Linker.nativeLinker();
   private static final SymbolLookup LOOKUP = SymbolLookup.loaderLookup();
   private ThumbnailBindings() {}
-  private static MethodHandle findOptional(String name, FunctionDescriptor desc) {
-    java.util.Optional<java.lang.foreign.MemorySegment> addr = LOOKUP.find(name);
+  private static MethodHandle findOptional(FunctionDescriptor desc) {
+    java.util.Optional<java.lang.foreign.MemorySegment> addr = LOOKUP.find("FPDFPage_GetThumbnailAsBitmap");
     return addr.map(memorySegment -> LINKER.downcallHandle(memorySegment, desc)).orElse(null);
   }
   private static final StableValue<MethodHandle> FPDFPage_GetThumbnailAsBitmap_SV = StableValue.of();
   /** Get the thumbnail of a page as a bitmap. (Experimental API) */
   public static MethodHandle FPDFPage_GetThumbnailAsBitmap() {
     return FPDFPage_GetThumbnailAsBitmap_SV.orElseSet(
-        () -> findOptional("FPDFPage_GetThumbnailAsBitmap", FunctionDescriptor.of(C_POINTER, C_POINTER)));
+        () -> findOptional(FunctionDescriptor.of(C_POINTER, C_POINTER)));
   }
 }

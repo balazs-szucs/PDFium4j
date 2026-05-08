@@ -26,17 +26,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.zip.DataFormatException;
@@ -44,7 +35,6 @@ import java.util.zip.Inflater;
 import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
-import org.grimmory.pdfium4j.internal.IoUtils;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.internal.XmpUpdate;
 import org.grimmory.pdfium4j.model.MetadataTag;
@@ -434,7 +424,7 @@ final class PdfSaver {
     try {
       PdfProcessingPolicy policy =
           PdfProcessingPolicy.defaultPolicy().withMode(PdfProcessingPolicy.Mode.STRICT);
-      try (PdfDocument doc = PdfDocument.open(pdf, null, policy)) {
+      try (PdfDocument doc = PdfDocument.open(pdf, policy)) {
         saveNativeFullRewrite(doc.handle(), out, doc.fileVersion());
         return true;
       }
@@ -536,15 +526,15 @@ final class PdfSaver {
       }
       long offset = objOffsets[i];
       if (offset != -1) {
-        formatXrefEntry(entryBuf, offset, 0, true);
+        formatXrefEntry(entryBuf, offset, true);
       } else {
-        formatXrefEntry(entryBuf, 0, 0, false);
+        formatXrefEntry(entryBuf, 0, false);
       }
       update.write(entryBuf);
     }
   }
 
-  private static void formatXrefEntry(byte[] buf, long offset, int gen, boolean inUse) {
+  private static void formatXrefEntry(byte[] buf, long offset, boolean inUse) {
     // Standard entry: "nnnnnnnnnn ggggg n \n" or "nnnnnnnnnn ggggg f \n"
     // We use \r\n as some older readers prefer it, but \n is standard.
     // Total 20 bytes: 10(off) + 1(sp) + 5(gen) + 1(sp) + 1(f/n) + 1(sp) + 1(\n)
@@ -555,7 +545,7 @@ final class PdfSaver {
       buf[i] = (byte) ('0' + (tempOffset % 10));
       tempOffset /= 10;
     }
-    int tempGen = gen;
+    int tempGen = 0;
     for (int i = 15; i >= 11; i--) {
       buf[i] = (byte) ('0' + (tempGen % 10));
       tempGen /= 10;
@@ -1073,7 +1063,7 @@ final class PdfSaver {
 
       for (int j = 0; j < count; j++) {
         long offset = objOffsets[start + j];
-        formatXrefEntry(entryBuf, offset, 0, true);
+        formatXrefEntry(entryBuf, offset, true);
         update.write(entryBuf);
       }
     }
@@ -1169,7 +1159,7 @@ final class PdfSaver {
     update.write(intBuf, intBuf.length - len, len);
 
     update.write(ROOT_KEY_BYTES);
-    writeRefNum(update, result.rootNum, 0);
+    writeRefNum(update, result.rootNum);
 
     if (infoObjNum > 0) {
       update.write(INFO_KEY_BYTES);
@@ -1178,7 +1168,7 @@ final class PdfSaver {
       update.write(ZERO_R);
     } else if (result.infoNum > 0) {
       update.write(INFO_KEY_BYTES);
-      writeRefNum(update, result.infoNum, 0);
+      writeRefNum(update, result.infoNum);
     }
 
     if (result.idOffset >= 0 && pdf != null) {
@@ -1197,7 +1187,7 @@ final class PdfSaver {
 
     if (result.encryptNum > 0) {
       update.write(ENCRYPT_KEY_BYTES);
-      writeRefNum(update, result.encryptNum, 0);
+      writeRefNum(update, result.encryptNum);
     }
 
     if (prevXrefOffset > 0) {
@@ -1210,12 +1200,12 @@ final class PdfSaver {
     update.write(EOF_MARKER);
   }
 
-  private static void writeRefNum(OutputStream out, int num, int gen) throws IOException {
+  private static void writeRefNum(OutputStream out, int num) throws IOException {
     byte[] intBuf = REPAIR_INT_BUF.get();
     int len = formatInt(intBuf, num);
     out.write(intBuf, intBuf.length - len, len);
     out.write(' ');
-    len = formatInt(intBuf, gen);
+    len = formatInt(intBuf, 0);
     out.write(intBuf, intBuf.length - len, len);
     out.write(R_REF_SUFFIX);
   }
@@ -1635,14 +1625,14 @@ final class PdfSaver {
   }
 
   private static boolean isCatalogDictionary(MemorySegment seg, long start, long end) {
-    if (dictionaryHasTopLevelNameValue(seg, start, end, TYPE_KEY, CATALOG_TYPE_NAME)) return true;
+    if (dictionaryHasTopLevelNameValue(seg, start, end, CATALOG_TYPE_NAME)) return true;
     // Lenient: Has /Pages but NOT /Type /Pages
     return findTopLevelKey(seg, start, end, PAGES_KEY) >= 0
-        && !dictionaryHasTopLevelNameValue(seg, start, end, TYPE_KEY, PAGES_TYPE_NAME);
+        && !dictionaryHasTopLevelNameValue(seg, start, end, PAGES_TYPE_NAME);
   }
 
   private static boolean isPagesDictionary(MemorySegment seg, long start, long end) {
-    if (dictionaryHasTopLevelNameValue(seg, start, end, TYPE_KEY, PAGES_TYPE_NAME)) return true;
+    if (dictionaryHasTopLevelNameValue(seg, start, end, PAGES_TYPE_NAME)) return true;
     // Lenient: Has /Kids and /Count
     return findTopLevelKey(seg, start, end, new byte[] {'/', 'K', 'i', 'd', 's'}) >= 0
         && findTopLevelKey(seg, start, end, new byte[] {'/', 'C', 'o', 'u', 'n', 't'}) >= 0;
@@ -2350,10 +2340,10 @@ final class PdfSaver {
   }
 
   private static boolean dictionaryHasTopLevelNameValue(
-      MemorySegment seg, long dictStart, long dictEndExclusive, byte[] key, byte[] value) {
-    long keyPos = findTopLevelKey(seg, dictStart, dictEndExclusive, key);
+          MemorySegment seg, long dictStart, long dictEndExclusive, byte[] value) {
+    long keyPos = findTopLevelKey(seg, dictStart, dictEndExclusive, PdfSaver.TYPE_KEY);
     if (keyPos < 0) return false;
-    long valPos = skipAsciiWhitespace(seg, keyPos + key.length, dictEndExclusive);
+    long valPos = skipAsciiWhitespace(seg, keyPos + PdfSaver.TYPE_KEY.length, dictEndExclusive);
     return matchesNameTokenAt(seg, valPos, value, dictEndExclusive);
   }
 
