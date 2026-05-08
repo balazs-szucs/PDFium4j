@@ -60,7 +60,7 @@ public final class PdfPage implements AutoCloseable {
   private final Runnable onModified;
 
   @SuppressWarnings("PMD.UnusedPrivateField")
-  private volatile int refCount = 1;
+  private int refCount = 1;
 
   private volatile boolean closedByUser = false;
 
@@ -373,7 +373,7 @@ public final class PdfPage implements AutoCloseable {
     return renderBounded(150, maxDimension, maxDimension, thumbnailFlags);
   }
 
-  public long renderThumbnailTo(MemorySegment dest, int maxDimension) {
+  public void renderThumbnailTo(MemorySegment dest, int maxDimension) {
     ensureOpen();
     PageSize size = size();
     int naturalW = (int) Math.ceil(size.width());
@@ -388,7 +388,6 @@ public final class PdfPage implements AutoCloseable {
     }
 
     renderTo(dest, w, h, w * 4, RenderFlags.DEFAULT.value(), OPAQUE_WHITE);
-    return ((long) h << 32) | (w & 0xFFFFFFFFL);
   }
 
   private RenderResult renderThumbnailNative() throws Throwable {
@@ -406,7 +405,7 @@ public final class PdfPage implements AutoCloseable {
     int stride = (int) BitmapBindings.FPDFBitmap_GetStride().invokeExact(bitmap);
     byte[] rgba;
     if (stride == w * 4) {
-      rgba = buffer.reinterpret(1L * stride * h).toArray(JAVA_BYTE);
+      rgba = buffer.reinterpret((long) stride * h).toArray(JAVA_BYTE);
     } else {
       rgba = new byte[w * h * 4];
       MemorySegment dest = MemorySegment.ofArray(rgba);
@@ -750,7 +749,7 @@ public final class PdfPage implements AutoCloseable {
   }
 
   private void ensureRenderBudget(int width, int height) {
-    long pixels = 1L * width * height;
+    long pixels = (long) width * height;
     if (pixels > maxRenderPixels) {
       throw new PdfiumRenderException(
           "Render exceeds policy pixel budget: %d > %d. Use renderBounded() or lower DPI."
@@ -783,7 +782,7 @@ public final class PdfPage implements AutoCloseable {
           (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer().invokeExact(bitmap);
       int stride = (int) BitmapBindings.FPDFBitmap_GetStride().invokeExact(bitmap);
 
-      byte[] rgba = buffer.reinterpret(1L * stride * h).toArray(JAVA_BYTE);
+      byte[] rgba = buffer.reinterpret((long) stride * h).toArray(JAVA_BYTE);
 
       if (stride != w * BYTES_PER_PIXEL) {
         int rowLen = w * BYTES_PER_PIXEL;

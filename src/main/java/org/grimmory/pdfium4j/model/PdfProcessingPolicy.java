@@ -8,7 +8,6 @@ package org.grimmory.pdfium4j.model;
  */
 public record PdfProcessingPolicy(
     Mode mode,
-    long maxDocumentBytes,
     long maxRenderPixels,
     int maxParallelRenderThreads,
     long fileBackedThreshold,
@@ -21,7 +20,6 @@ public record PdfProcessingPolicy(
     RECOVER
   }
 
-  public static final long DEFAULT_MAX_DOCUMENT_BYTES = 512L * 1024 * 1024;
   public static final long DEFAULT_MAX_RENDER_PIXELS = 80_000_000L;
   public static final int DEFAULT_MAX_PARALLEL_THREADS =
       Math.max(1, Runtime.getRuntime().availableProcessors());
@@ -33,9 +31,6 @@ public record PdfProcessingPolicy(
   public PdfProcessingPolicy {
     if (mode == null) {
       throw new IllegalArgumentException("mode must not be null");
-    }
-    if (maxDocumentBytes <= 0) {
-      throw new IllegalArgumentException("maxDocumentBytes must be > 0");
     }
     if (maxRenderPixels <= 0) {
       throw new IllegalArgumentException("maxRenderPixels must be > 0");
@@ -60,7 +55,6 @@ public record PdfProcessingPolicy(
   public static PdfProcessingPolicy defaultPolicy() {
     return new PdfProcessingPolicy(
         Mode.RECOVER,
-        DEFAULT_MAX_DOCUMENT_BYTES,
         DEFAULT_MAX_RENDER_PIXELS,
         DEFAULT_MAX_PARALLEL_THREADS,
         DEFAULT_FILE_BACKED_THRESHOLD,
@@ -72,7 +66,6 @@ public record PdfProcessingPolicy(
   public PdfProcessingPolicy withMode(Mode newMode) {
     return new PdfProcessingPolicy(
         newMode,
-        maxDocumentBytes,
         maxRenderPixels,
         maxParallelRenderThreads,
         fileBackedThreshold,

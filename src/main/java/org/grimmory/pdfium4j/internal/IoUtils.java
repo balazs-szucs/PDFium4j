@@ -31,7 +31,7 @@ public final class IoUtils {
   /** Securely creates a temporary file with owner-only permissions. */
   public static Path createTempFile(String prefix, String suffix) throws IOException {
     FileAttribute<?>[] attrs =
-        IS_POSIX ? new FileAttribute<?>[] {OWNER_ONLY_FILE} : new FileAttribute<?>[0];
+        IS_POSIX ? new FileAttribute<?>[] {OWNER_ONLY_FILE} : Generators.emptyFileAttributes();
     Path path = Files.createTempFile(prefix, suffix, attrs);
     if (!IS_POSIX) {
       enforceOwnerOnlyPermissions(path, false);
@@ -42,7 +42,7 @@ public final class IoUtils {
   /** Securely creates a temporary directory with owner-only permissions. */
   public static Path createTempDirectory(String prefix) throws IOException {
     FileAttribute<?>[] attrs =
-        IS_POSIX ? new FileAttribute<?>[] {OWNER_ONLY_DIR} : new FileAttribute<?>[0];
+        IS_POSIX ? new FileAttribute<?>[] {OWNER_ONLY_DIR} : Generators.emptyFileAttributes();
     Path path = Files.createTempDirectory(prefix, attrs);
     if (!IS_POSIX) {
       enforceOwnerOnlyPermissions(path, true);

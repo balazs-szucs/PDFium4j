@@ -28,6 +28,6 @@ public enum MetadataTag {
 
   /** The pre-encoded PDF metadata key bytes. */
   public byte[] pdfKeyBytes() {
-    return pdfKeyBytes;
+    return pdfKeyBytes.clone();
   }
 }

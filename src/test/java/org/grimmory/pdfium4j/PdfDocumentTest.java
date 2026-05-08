@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
+import org.grimmory.pdfium4j.internal.Generators;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
 import org.grimmory.pdfium4j.model.*;
 import org.junit.jupiter.api.Test;
@@ -631,7 +632,7 @@ class PdfDocumentTest {
   @Test
   @EnabledIf("pdfiumAvailable")
   void probeEmptyData() {
-    PdfProbeResult result = PdfDocument.probe(new byte[0]);
+    PdfProbeResult result = PdfDocument.probe(Generators.emptyByteArray());
     assertFalse(result.isValid());
     assertEquals(PdfProbeResult.Status.UNREADABLE, result.status());
   }

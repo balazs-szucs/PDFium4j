@@ -52,13 +52,11 @@ public class IntObjectCache<T> {
     }
   }
 
-  public synchronized T remove(int key) {
+  public synchronized void remove(int key) {
     Entry<T> entry = map.remove(key);
     if (entry != null) {
       currentBytes -= entry.size;
-      return entry.value;
     }
-    return null;
   }
 
   public synchronized void clear() {

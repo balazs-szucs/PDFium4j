@@ -16,13 +16,12 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 5, time = 1)
 @Fork(1)
 public class PdfBenchmark {
- 
-    private Path testPdf;
+
     private PdfDocument document;
  
     @Setup
     public void setup() throws IOException {
-        testPdf = Paths.get("../src/test/resources/minimal.pdf");
+        Path testPdf = Paths.get("../src/test/resources/minimal.pdf");
         document = PdfDocument.open(testPdf);
         document.indexText(); // Pre-index for search benchmarks
     }

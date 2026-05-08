@@ -1,5 +1,6 @@
 package org.grimmory.pdfium4j.internal;
 
+import edu.umd.cs.findbugs.annotations.NonNull;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.OutputStream;
 import java.lang.foreign.MemorySegment;
@@ -28,7 +29,7 @@ public final class SegmentOutputStream extends OutputStream {
   }
 
   @Override
-  public void write(byte[] b, int off, int len) {
+  public void write(@NonNull byte[] b, int off, int len) {
     if (len <= 0) return;
     ensureCapacity(len);
     MemorySegment.copy(b, off, segment, ValueLayout.JAVA_BYTE, pos, len);

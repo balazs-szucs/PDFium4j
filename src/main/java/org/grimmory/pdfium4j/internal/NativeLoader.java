@@ -201,8 +201,8 @@ public final class NativeLoader {
     extractResource(resource, dir, filename);
   }
 
-  private static Path extractLib(String resource, Path dir, String filename) throws IOException {
-    return extractResource(resource, dir, filename);
+  private static void extractLib(String resource, Path dir, String filename) throws IOException {
+    extractResource(resource, dir, filename);
   }
 
   @CheckForNull

@@ -26,7 +26,6 @@ class PdfOpenReadAllocationTest {
 
   private final NoAllocationAsserter asserter = new NoAllocationAsserter();
 
-  private Path probeSource;
   private PdfDocument.NoAllocationPathProbe openProbe;
   private PdfDocument metadataDoc;
 
@@ -46,7 +45,7 @@ class PdfOpenReadAllocationTest {
   void setUp() throws IOException {
     asserter.verifyAllocationTrackingAvailable();
 
-    probeSource = findCorpusPdf();
+    Path probeSource = findCorpusPdf();
     openProbe = PdfDocument.noAllocationPathProbe(probeSource);
 
     metadataDoc = PdfDocument.open(probeSource);

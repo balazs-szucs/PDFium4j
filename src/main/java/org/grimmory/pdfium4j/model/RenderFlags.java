@@ -44,10 +44,7 @@ public record RenderFlags(int value) {
     public RenderFlags build() {
       int flags = ViewBindings.FPDF_REVERSE_BYTE_ORDER; // always RGBA for Java
       if (annotations) flags |= ViewBindings.FPDF_ANNOT;
-      boolean lcdText = false;
-      if (lcdText) flags |= ViewBindings.FPDF_LCD_TEXT;
-      boolean grayscale = false;
-      if (grayscale) flags |= ViewBindings.FPDF_GRAYSCALE;
+
       if (printing) flags |= ViewBindings.FPDF_PRINTING;
       if (!antiAlias) {
         flags |= ViewBindings.FPDF_RENDER_NO_SMOOTHTEXT;

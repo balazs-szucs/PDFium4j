@@ -20,31 +20,34 @@ import java.util.Map;
  */
 public final class FfmHelper {
 
-  public static final Map<String, MemoryLayout> CANONICAL_LAYOUTS =
-      Linker.nativeLinker().canonicalLayouts();
+  private static final class LayoutHolder {
+    private static final Map<String, MemoryLayout> CANONICAL_LAYOUTS =
+        Linker.nativeLinker().canonicalLayouts();
+  }
 
   public static final ValueLayout.OfInt C_INT =
-      (ValueLayout.OfInt) CANONICAL_LAYOUTS.getOrDefault("int", ValueLayout.JAVA_INT);
+      (ValueLayout.OfInt) LayoutHolder.CANONICAL_LAYOUTS.getOrDefault("int", ValueLayout.JAVA_INT);
 
   public static final ValueLayout.OfLong C_LONG =
-      (ValueLayout.OfLong) CANONICAL_LAYOUTS.getOrDefault("long", ValueLayout.JAVA_LONG);
+      (ValueLayout.OfLong)
+          LayoutHolder.CANONICAL_LAYOUTS.getOrDefault("long", ValueLayout.JAVA_LONG);
 
   public static final ValueLayout.OfInt C_BOOL =
-      (ValueLayout.OfInt) CANONICAL_LAYOUTS.getOrDefault("int", ValueLayout.JAVA_INT);
+      (ValueLayout.OfInt) LayoutHolder.CANONICAL_LAYOUTS.getOrDefault("int", ValueLayout.JAVA_INT);
 
   public static final AddressLayout C_POINTER = ValueLayout.ADDRESS;
 
   /** Standard options for non-critical downcalls. */
-  public static final Linker.Option[] NO_OPTIONS = new Linker.Option[0];
+  static final Linker.Option[] NO_OPTIONS = Generators.noOptions();
 
   /**
    * Options for critical downcalls that do NOT access Java heap. Fastest for trivial native calls.
    */
-  public static final Linker.Option[] CRITICAL_OPTIONS =
+  static final Linker.Option[] CRITICAL_OPTIONS =
       new Linker.Option[] {Linker.Option.critical(false)};
 
   /** Options for critical downcalls that MAY access Java heap. Useful for certain optimizations. */
-  public static final Linker.Option[] HEAP_CRITICAL_OPTIONS =
+  static final Linker.Option[] HEAP_CRITICAL_OPTIONS =
       new Linker.Option[] {Linker.Option.critical(true)};
 
   private FfmHelper() {}

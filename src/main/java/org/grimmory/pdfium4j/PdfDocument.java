@@ -46,6 +46,7 @@ import org.grimmory.pdfium4j.internal.AttachmentBindings;
 import org.grimmory.pdfium4j.internal.DocBindings;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
+import org.grimmory.pdfium4j.internal.Generators;
 import org.grimmory.pdfium4j.internal.IntObjectCache;
 import org.grimmory.pdfium4j.internal.IoUtils;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
@@ -71,10 +72,13 @@ import org.grimmory.pdfium4j.util.PdfDateUtils;
 public final class PdfDocument implements AutoCloseable {
   private static final Logger LOGGER = Logger.getLogger(PdfDocument.class.getName());
 
-  private static final Map<Long, SeekableByteChannel> CHANNELS = new ConcurrentHashMap<>(16);
+  private static final class RegistryHolder {
+    private static final Map<Long, SeekableByteChannel> CHANNELS = new ConcurrentHashMap<>(16);
+  }
+
   private static final Cleaner CLEANER = Cleaner.create();
-  private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
-  private static final int[] EMPTY_INT_ARRAY = new int[0];
+  private static final byte[] EMPTY_BYTE_ARRAY = Generators.emptyByteArray();
+  private static final int[] EMPTY_INT_ARRAY = Generators.emptyIntArray();
 
   private static final ExecutorService PREFETCH_EXECUTOR =
       Executors.newFixedThreadPool(
@@ -103,6 +107,10 @@ public final class PdfDocument implements AutoCloseable {
             MethodHandles.insertArguments(DocBindings.FPDF_GetMetaText(), 1, keySeg);
       }
     }
+
+    static MemorySegment tagSegment(MetadataTag tag) {
+      return TAG_SEGMENTS.get(tag);
+    }
   }
 
   private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
@@ -128,7 +136,7 @@ public final class PdfDocument implements AutoCloseable {
   private final List<PdfPage> openPages = new ArrayList<>(8);
   private volatile boolean closed = false;
   private volatile boolean structurallyModified = false;
-  private MemorySegment sourceSegment = null;
+  private MemorySegment sourceSegment;
 
   MemorySegment handle() {
     return handle;
@@ -267,7 +275,7 @@ public final class PdfDocument implements AutoCloseable {
     public void run() {
       try {
         if (channelId > 0) {
-          SeekableByteChannel removed = CHANNELS.remove(channelId);
+          SeekableByteChannel removed = RegistryHolder.CHANNELS.remove(channelId);
           SeekableByteChannel current = sourceChannelRef.get();
           if (removed != null && removed != current) {
             try {
@@ -317,26 +325,12 @@ public final class PdfDocument implements AutoCloseable {
     PdfProcessingPolicy resolvedPolicy = resolvePolicy(policy);
     PdfiumLibrary.ensureInitialized();
     try {
-      long size = Files.size(path);
-      if (size > resolvedPolicy.maxDocumentBytes()) {
-        throw new PdfiumException(
-            "Document size ("
-                + size
-                + " bytes) exceeds policy limit ("
-                + resolvedPolicy.maxDocumentBytes()
-                + ")",
-            null);
+      return openFromNativePath(path, password, resolvedPolicy, null);
+    } catch (PdfCorruptException e) {
+      if (resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER) {
+        return openWithRepair(path, password, resolvedPolicy);
       }
-      try {
-        return openFromNativePath(path, password, resolvedPolicy, null);
-      } catch (PdfCorruptException e) {
-        if (resolvedPolicy.mode() == PdfProcessingPolicy.Mode.RECOVER) {
-          return openWithRepair(path, password, resolvedPolicy);
-        }
-        throw e;
-      }
-    } catch (IOException e) {
-      throw new PdfiumException("Failed to open file: " + path, e);
+      throw e;
     }
   }
 
@@ -474,15 +468,6 @@ public final class PdfDocument implements AutoCloseable {
     PdfProcessingPolicy resolvedPolicy = resolvePolicy(policy);
     if (data == null || data.length == 0)
       throw new IllegalArgumentException("data is null or empty");
-    if (data.length > resolvedPolicy.maxDocumentBytes()) {
-      throw new PdfiumException(
-          "Document size ("
-              + data.length
-              + " bytes) exceeds policy limit ("
-              + resolvedPolicy.maxDocumentBytes()
-              + ")",
-          null);
-    }
     PdfiumLibrary.ensureInitialized();
     Arena arena = Arena.ofShared();
     try {
@@ -1633,7 +1618,7 @@ public final class PdfDocument implements AutoCloseable {
       if (docSourceChannel != null) {
         docSourceChannel.close();
         docSourceChannel = null;
-        CHANNELS.remove(channelId);
+        RegistryHolder.CHANNELS.remove(channelId);
         state.updateSourceChannel(null);
         detachedSource = true;
       }
@@ -1641,7 +1626,7 @@ public final class PdfDocument implements AutoCloseable {
       temp = null;
       if (channelId > 0) {
         docSourceChannel = Files.newByteChannel(path, StandardOpenOption.READ);
-        CHANNELS.put(channelId, docSourceChannel);
+        RegistryHolder.CHANNELS.put(channelId, docSourceChannel);
         state.updateSourceChannel(docSourceChannel);
       }
     } catch (IOException e) {
@@ -1655,7 +1640,7 @@ public final class PdfDocument implements AutoCloseable {
     if (detachedSource && channelId > 0 && docSourceChannel == null) {
       try {
         docSourceChannel = Files.newByteChannel(path, StandardOpenOption.READ);
-        CHANNELS.put(channelId, docSourceChannel);
+        RegistryHolder.CHANNELS.put(channelId, docSourceChannel);
         state.updateSourceChannel(docSourceChannel);
       } catch (IOException restoreEx) {
         PdfiumLibrary.ignore(restoreEx);
@@ -2055,7 +2040,7 @@ public final class PdfDocument implements AutoCloseable {
   }
 
   private static MemorySegment metadataKeySegment(MetadataTag tag) {
-    MemorySegment pre = MetadataCache.TAG_SEGMENTS.get(tag);
+    MemorySegment pre = MetadataCache.tagSegment(tag);
     if (pre != null) return pre;
     return ScratchBuffer.getUtf8(tag.pdfKey());
   }

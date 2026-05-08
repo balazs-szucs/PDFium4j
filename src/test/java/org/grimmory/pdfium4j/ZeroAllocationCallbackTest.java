@@ -72,10 +72,7 @@ class ZeroAllocationCallbackTest {
       for (int i = 0; i < searchLimit; i++) {
         try (PdfPage page = doc.page(i)) {
           AtomicBoolean called = new AtomicBoolean(false);
-          page.withText(
-              (segment, length) -> {
-                called.set(true);
-              });
+          page.withText((segment, length) -> called.set(true));
           if (called.get()) {
             foundText = true;
             break;

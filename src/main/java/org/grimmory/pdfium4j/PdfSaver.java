@@ -36,6 +36,7 @@ import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.EditBindings;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
+import org.grimmory.pdfium4j.internal.ShimBindings;
 import org.grimmory.pdfium4j.internal.XmpUpdate;
 import org.grimmory.pdfium4j.model.MetadataTag;
 import org.grimmory.pdfium4j.model.PdfProcessingPolicy;
@@ -163,12 +164,9 @@ final class PdfSaver {
   // Byte constants for zero-allocation dictionary key scanning (replacing regex patterns).
   private static final byte[] FILTER_KEY = "/Filter".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] LENGTH_KEY = "/Length".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] FIRST_KEY = "/First".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] N_KEY = "/N".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] PREDICTOR_KEY = "/Predictor".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] COLUMNS_KEY = "/Columns".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] W_KEY = "/W".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] INDEX_KEY = "/Index".getBytes(StandardCharsets.ISO_8859_1);
 
   private static final byte[] DICT_START = "<<".getBytes(StandardCharsets.ISO_8859_1);
   private static final byte[] DICT_END = ">>".getBytes(StandardCharsets.ISO_8859_1);
@@ -241,10 +239,6 @@ final class PdfSaver {
   private static final ThreadLocal<long[]> XREF_ENTRY_BUF_TL =
       ThreadLocal.withInitial(() -> new long[3]);
   private static final ThreadLocal<long[]> RANGE_BUF = ThreadLocal.withInitial(() -> new long[2]);
-  private static final ThreadLocal<int[]> OBJ_STREAM_NUMS =
-      ThreadLocal.withInitial(() -> new int[1024]);
-  private static final ThreadLocal<int[]> OBJ_STREAM_OFFSETS =
-      ThreadLocal.withInitial(() -> new int[1024]);
 
   private static final ThreadLocal<long[][]> TRAILER_STACK =
       ThreadLocal.withInitial(
@@ -358,13 +352,15 @@ final class PdfSaver {
         try {
           writeIncrementalUpdate(params);
         } catch (PdfiumException e) {
-          if (!hasXmpUpdate && e.getCause() instanceof IOException) {
+          if (!hasXmpUpdate && isRecoverable(e)) {
+            applyMetadataToNative(params);
             saveNativeFullRewrite(params.docHandle(), params.out(), params.sourceFileVersion());
           } else {
             throw e;
           }
         }
       } else if (hasUpdate) {
+        applyMetadataToNative(params);
         saveNativeFullRewrite(params.docHandle(), params.out(), params.sourceFileVersion());
       } else {
         BasePdf base = getBaseSegment(params);
@@ -402,6 +398,28 @@ final class PdfSaver {
     ByteArrayOutputStream out = new ByteArrayOutputStream(data.length + 256);
     repair(MemorySegment.ofArray(data), out);
     return out.toByteArray();
+  }
+
+  private static void applyMetadataToNative(SaveParams params) {
+    if (params.pendingMetadata().isEmpty()) return;
+    for (var entry : params.pendingMetadata().entrySet()) {
+      try {
+        MemorySegment keySeg = ScratchBuffer.getUtf8(entry.getKey().pdfKey());
+        MemorySegment valSeg = ScratchBuffer.getUtf8(entry.getValue());
+        ShimBindings.pdfium4j_set_meta_utf8().invokeExact(params.docHandle(), keySeg, valSeg);
+      } catch (Throwable ignored) {
+        // Best effort for fallback
+      }
+    }
+  }
+
+  private static boolean isRecoverable(PdfiumException e) {
+    String msg = e.getMessage();
+    if (msg == null) return false;
+    return msg.contains("encrypted")
+        || msg.contains("incremental metadata save")
+        || msg.contains("IOException")
+        || e.getCause() instanceof IOException;
   }
 
   private static boolean nativeRepair(Path source, OutputStream out) {
@@ -706,16 +724,6 @@ final class PdfSaver {
     long valPos = skipAsciiWhitespace(pdf, keyPos + key.length, de);
     long ref = parseObjectRef(pdf, valPos, de);
     return ref != NULL_REF ? unpackNum(ref) : -1;
-  }
-
-  private static MemorySegment tryExtractIdSegAtRange(MemorySegment pdf, long ds, long de) {
-    long keyPos = findTopLevelKey(pdf, ds, de, ID_KEY);
-    if (keyPos < 0) return null;
-    long valPos = skipAsciiWhitespace(pdf, keyPos + ID_KEY.length, de);
-    if (valPos >= de || pdf.get(JAVA_BYTE, valPos) != '[') return null;
-    long endPos = indexOf(pdf, new byte[] {']'}, valPos);
-    if (endPos < 0 || endPos > de) return null;
-    return pdf.asSlice(valPos, endPos - valPos + 1);
   }
 
   private static boolean isCatalogAt(MemorySegment pdf, long headerPos) {
@@ -1813,7 +1821,6 @@ final class PdfSaver {
     return decodeTarget.internalBuffer();
   }
 
-  @CheckForNull
   private static boolean findXrefEntry(byte[] data, int dataLen, int objNum, long[] out)
       throws IOException {
     int[] widths = XREF_W_BUF.get();
@@ -1842,79 +1849,6 @@ final class PdfSaver {
       }
     }
     return false;
-  }
-
-  @CheckForNull
-  private static byte[] extractDictionaryFromObjectStream(
-      MemorySegment pdf, int targetObjNum, long objStreamNum, int objectIndex) throws IOException {
-    if (objStreamNum <= 0 || objStreamNum > Integer.MAX_VALUE || objectIndex < 0) {
-      return null;
-    }
-    long[] objStreamRange = RANGE_BUF.get();
-    if (!findObjectDictionaryRange(pdf, (int) objStreamNum, 0, objStreamRange)) {
-      return null;
-    }
-
-    long osDictStart = objStreamRange[0];
-    long osDictEnd = objStreamRange[1];
-    int objectCount = (int) scanRequiredIntAfterKey(pdf, osDictStart, osDictEnd, N_KEY, "/N");
-    int firstOffset =
-        (int) scanRequiredIntAfterKey(pdf, osDictStart, osDictEnd, FIRST_KEY, "/First");
-
-    ReusableByteArrayOutputStream decodeTarget = STREAM_DECODE_TARGET.get();
-    decodeTarget.reset();
-    decodeDirectStreamObject(pdf, osDictStart, osDictEnd, decodeTarget);
-    byte[] decodedStream = decodeTarget.internalBuffer();
-    int decodedLen = decodeTarget.size();
-
-    if (firstOffset < 0 || firstOffset > decodedLen || objectIndex >= objectCount) {
-      throw new IOException("Object stream header indexes are invalid");
-    }
-
-    MemorySegment decodedSeg = MemorySegment.ofArray(decodedStream).asSlice(0, decodedLen);
-    int[] objNumbers = OBJ_STREAM_NUMS.get();
-    int[] offsets = OBJ_STREAM_OFFSETS.get();
-    if (objNumbers.length < objectCount) {
-      objNumbers = new int[objectCount];
-      offsets = new int[objectCount];
-      OBJ_STREAM_NUMS.set(objNumbers);
-      OBJ_STREAM_OFFSETS.set(offsets);
-    }
-    parseObjectStreamHeader(decodedSeg, firstOffset, objectCount, objNumbers, offsets);
-
-    int resolvedIndex = objectIndex;
-    if (objNumbers[resolvedIndex] != targetObjNum) {
-      resolvedIndex = -1;
-      for (int i = 0; i < objNumbers.length; i++) {
-        if (objNumbers[i] == targetObjNum) {
-          resolvedIndex = i;
-          break;
-        }
-      }
-      if (resolvedIndex < 0) {
-        return null;
-      }
-    }
-
-    int bodyStart = firstOffset + offsets[resolvedIndex];
-    int bodyEnd = decodedStream.length;
-    if (resolvedIndex + 1 < offsets.length) {
-      bodyEnd = firstOffset + offsets[resolvedIndex + 1];
-    }
-    if (bodyStart < 0 || bodyEnd <= bodyStart || bodyEnd > decodedStream.length) {
-      throw new IOException("Object stream object offsets are invalid");
-    }
-
-    MemorySegment objectSeg = decodedSeg.asSlice(bodyStart, bodyEnd - bodyStart);
-    long dictStart = indexOf(objectSeg, DICT_START, 0);
-    if (dictStart < 0) {
-      return null;
-    }
-    long dictEnd = findDictionaryEnd(objectSeg, dictStart);
-    if (dictEnd <= dictStart) {
-      return null;
-    }
-    return objectSeg.asSlice(dictStart, dictEnd - dictStart).toArray(JAVA_BYTE);
   }
 
   private static void decodeDirectStreamObject(
@@ -2149,17 +2083,6 @@ final class PdfSaver {
     return parsePositiveLong(seg, valStart, valEnd);
   }
 
-  /** Like scanIntAfterKey but throws if the key is missing or the value is invalid. */
-  private static long scanRequiredIntAfterKey(
-      MemorySegment seg, long dictStart, long dictEnd, byte[] key, String keyName)
-      throws IOException {
-    long value = scanIntAfterKey(seg, dictStart, dictEnd, key);
-    if (value < 0 || value > Integer.MAX_VALUE) {
-      throw new IOException("Missing or invalid " + keyName + " entry");
-    }
-    return value;
-  }
-
   /**
    * Scans /W array from a dictionary MemorySegment. Zero-allocation replacement for
    * parseRequiredTriple(String, W_ARRAY_PATTERN, "/W").
@@ -2180,48 +2103,6 @@ final class PdfSaver {
       out[i] = parsePositiveInt(seg, pos, numEnd);
       pos = numEnd;
     }
-  }
-
-  /**
-   * Scans /Index array from a dictionary MemorySegment. Zero-allocation replacement for
-   * parseIndexPairs(String, int).
-   */
-  private static int scanIndexPairs(
-      MemorySegment seg, long dictStart, long dictEnd, int defaultSize, int[] out)
-      throws IOException {
-    long idxPos = findTopLevelKey(seg, dictStart, dictEnd, INDEX_KEY);
-    if (idxPos < 0) {
-      out[0] = 0;
-      out[1] = defaultSize;
-      out[2] = -1;
-      return 2;
-    }
-    long pos = skipAsciiWhitespace(seg, idxPos + INDEX_KEY.length, dictEnd);
-    if (pos >= dictEnd || seg.get(JAVA_BYTE, pos) != '[') {
-      out[0] = 0;
-      out[1] = defaultSize;
-      out[2] = -1;
-      return 2;
-    }
-    pos++; // skip '['
-    int count = 0;
-    while (pos < dictEnd && count < out.length - 1) {
-      pos = skipAsciiWhitespace(seg, pos, dictEnd);
-      if (pos >= dictEnd) break;
-      byte b = seg.get(JAVA_BYTE, pos);
-      if (b == ']') break;
-      long numEnd = scanDigits(seg, pos, dictEnd);
-      if (numEnd <= pos) break;
-      out[count++] = parsePositiveInt(seg, pos, numEnd);
-      pos = numEnd;
-    }
-    if ((count & 1) != 0) {
-      throw new IOException("/Index array must contain an even number of integers");
-    }
-    if (count < out.length) {
-      out[count] = -1; // Sentinel
-    }
-    return count;
   }
 
   /**
@@ -2271,12 +2152,6 @@ final class PdfSaver {
       idx = lastIndexOf(pdf, OBJ_KEYWORD, idx - 1);
     }
     return -1;
-  }
-
-  private static int determineNextObjectNumber(MemorySegment pdf, int trailerSize) {
-    int maxDirectObjectNumber = findMaxObjectNumber(pdf);
-    int next = Math.max(trailerSize, maxDirectObjectNumber + 1);
-    return next > 0 ? next : trailerSize;
   }
 
   private static long parseObjectHeaderRef(MemorySegment seg, long objKeywordPos) {
@@ -2346,7 +2221,8 @@ final class PdfSaver {
     inflater.reset();
     inflater.setInput(raw, 0, len);
     try {
-      while (!inflater.finished()) {
+      final boolean isFinished = inflater.finished();
+      while (!isFinished) {
         int read = inflater.inflate(chunk);
         if (read > 0) {
           out.write(chunk, 0, read);
@@ -2360,7 +2236,7 @@ final class PdfSaver {
         }
         throw new IOException("Failed to inflate Flate stream");
       }
-      if (!inflater.finished()) {
+      if (!isFinished) {
         throw new IOException("Flate stream ended before inflater reached stream end");
       }
     } catch (DataFormatException e) {
@@ -2374,17 +2250,6 @@ final class PdfSaver {
     if (keyPos < 0) return false;
     long valPos = skipAsciiWhitespace(seg, keyPos + PdfSaver.TYPE_KEY.length, dictEndExclusive);
     return matchesNameTokenAt(seg, valPos, value, dictEndExclusive);
-  }
-
-  private static MemorySegment tryExtractIdSegAt(MemorySegment pdf, long idKeyPos, long limit) {
-    // ID is usually followed by [ <hex> <hex> ]
-    long valPos = skipAsciiWhitespace(pdf, idKeyPos + ID_KEY.length, limit);
-    if (valPos >= limit || pdf.get(JAVA_BYTE, valPos) != '[') return null;
-
-    long endPos = indexOf(pdf, new byte[] {']'}, valPos);
-    if (endPos < 0) return null;
-
-    return pdf.asSlice(valPos, endPos + 1 - valPos);
   }
 
   private static long findTopLevelKey(
@@ -2480,7 +2345,8 @@ final class PdfSaver {
 
     int pos = 2;
     int digits = 0;
-    while (pos < value.length() && digits < 14) {
+    final int valueLength = value.length();
+    while (pos < valueLength && digits < 14) {
       char c = value.charAt(pos);
       if (c < '0' || c > '9') {
         break;
@@ -2491,13 +2357,13 @@ final class PdfSaver {
     if (digits < 4 || (digits & 1) != 0 || digits > 14) {
       return false;
     }
-    if (pos == value.length()) {
+    if (pos == valueLength) {
       return true;
     }
 
     char tz = value.charAt(pos);
     if (tz == 'Z') {
-      return pos + 1 == value.length();
+      return pos + 1 == valueLength;
     }
     if (tz != '+' && tz != '-') {
       return false;
@@ -2505,7 +2371,7 @@ final class PdfSaver {
 
     pos++;
     int tzHourStart = pos;
-    while (pos < value.length() && pos - tzHourStart < 2) {
+    while (pos < valueLength && pos - tzHourStart < 2) {
       char c = value.charAt(pos);
       if (c < '0' || c > '9') {
         break;
@@ -2515,18 +2381,18 @@ final class PdfSaver {
     if (pos - tzHourStart != 2) {
       return false;
     }
-    if (pos == value.length()) {
+    if (pos == valueLength) {
       return true;
     }
     if (value.charAt(pos) == '\'') {
       pos++;
-      if (pos == value.length()) {
+      if (pos == valueLength) {
         return false;
       }
     }
 
     int tzMinuteStart = pos;
-    while (pos < value.length() && pos - tzMinuteStart < 2) {
+    while (pos < valueLength && pos - tzMinuteStart < 2) {
       char c = value.charAt(pos);
       if (c < '0' || c > '9') {
         break;
@@ -2536,10 +2402,10 @@ final class PdfSaver {
     if (pos - tzMinuteStart != 2) {
       return false;
     }
-    if (pos < value.length() && value.charAt(pos) == '\'') {
+    if (pos < valueLength && value.charAt(pos) == '\'') {
       pos++;
     }
-    return pos == value.length();
+    return pos == valueLength;
   }
 
   private static long findLastStartxrefValue(MemorySegment tail) {
@@ -2697,7 +2563,6 @@ final class PdfSaver {
     };
   }
 
-  @CheckForNull
   private static boolean findObjectDictionaryRange(
       MemorySegment pdf, int objNum, int genNum, long[] rangeOut) {
     byte[] marker = OBJ_KEYWORD;
@@ -2761,32 +2626,6 @@ final class PdfSaver {
       }
     }
     return value;
-  }
-
-  private static void parseObjectStreamHeader(
-      MemorySegment decodedSeg, int firstOffset, int objectCount, int[] objNumbers, int[] offsets)
-      throws IOException {
-    long pos = 0;
-    for (int i = 0; i < objectCount; i++) {
-      pos = skipAsciiWhitespace(decodedSeg, pos, firstOffset);
-      long objEnd = scanDigits(decodedSeg, pos, firstOffset);
-      if (objEnd <= pos) {
-        throw new IOException("Object stream header is truncated");
-      }
-      int objNumber = parsePositiveInt(decodedSeg, pos, objEnd);
-      pos = skipAsciiWhitespace(decodedSeg, objEnd, firstOffset);
-      long offsetEnd = scanDigits(decodedSeg, pos, firstOffset);
-      if (offsetEnd <= pos) {
-        throw new IOException("Object stream header is truncated");
-      }
-      int offset = parsePositiveInt(decodedSeg, pos, offsetEnd);
-      if (objNumber < 0 || offset < 0) {
-        throw new IOException("Object stream header contains invalid object references");
-      }
-      objNumbers[i] = objNumber;
-      offsets[i] = offset;
-      pos = offsetEnd;
-    }
   }
 
   private static boolean isAsciiDigit(MemorySegment seg, long idx) {
