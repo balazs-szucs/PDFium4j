@@ -114,10 +114,15 @@ class PdfOpenReadAllocationTest {
 
   private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
+    Path corpusPdf =
+        projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
       // Fallback for different test execution environments
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
+      corpusPdf =
+          projectRoot
+              .resolve("..")
+              .resolve("corpus")
+              .resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     if (!Files.exists(corpusPdf)) {
       throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);

@@ -34,7 +34,7 @@ public class PdfRepairAllocationTest {
 
     Path corpusPdf = findCorpusPdf();
     byte[] data = Files.readAllBytes(corpusPdf);
-    
+
     // Truncate just enough to break the startxref (usually last ~10 bytes)
     int truncatedLen = data.length - 10;
     corruptPdf = arena.allocate(truncatedLen);
@@ -83,9 +83,14 @@ public class PdfRepairAllocationTest {
 
   private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
+    Path corpusPdf =
+        projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
+      corpusPdf =
+          projectRoot
+              .resolve("..")
+              .resolve("corpus")
+              .resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     return corpusPdf;
   }

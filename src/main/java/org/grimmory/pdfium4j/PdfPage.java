@@ -60,7 +60,7 @@ public final class PdfPage implements AutoCloseable {
   private final Runnable onModified;
 
   @SuppressWarnings("PMD.UnusedPrivateField")
-  private static int refCount = 1;
+  private volatile int refCount = 1;
 
   private volatile boolean closedByUser = false;
 
@@ -176,8 +176,8 @@ public final class PdfPage implements AutoCloseable {
         throw new PdfiumRenderException("FPDFBitmap_CreateEx failed");
       }
 
-      BitmapBindings.FPDFBitmap_FillRect().invokeExact(
-          bitmap, 0, 0, w, h, (long) (background & 0xFFFFFFFFL));
+      BitmapBindings.FPDFBitmap_FillRect()
+          .invokeExact(bitmap, 0, 0, w, h, (long) (background & 0xFFFFFFFFL));
 
       ViewBindings.FPDF_RenderPageBitmap().invokeExact(bitmap, handle, 0, 0, w, h, 0, flags);
     } catch (Throwable t) {
@@ -401,7 +401,8 @@ public final class PdfPage implements AutoCloseable {
     int w = (int) BitmapBindings.FPDFBitmap_GetWidth().invokeExact(bitmap);
     int h = (int) BitmapBindings.FPDFBitmap_GetHeight().invokeExact(bitmap);
 
-    MemorySegment buffer = (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer().invokeExact(bitmap);
+    MemorySegment buffer =
+        (MemorySegment) BitmapBindings.FPDFBitmap_GetBuffer().invokeExact(bitmap);
     int stride = (int) BitmapBindings.FPDFBitmap_GetStride().invokeExact(bitmap);
     byte[] rgba;
     if (stride == w * 4) {
@@ -452,8 +453,8 @@ public final class PdfPage implements AutoCloseable {
             MemorySegment buffer = ScratchBuffer.get(24L * charCount);
             int actual =
                 (int)
-                    ShimBindings.pdfium4j_text_get_chars_with_bounds().invokeExact(
-                        textPage, 0, charCount, buffer);
+                    ShimBindings.pdfium4j_text_get_chars_with_bounds()
+                        .invokeExact(textPage, 0, charCount, buffer);
 
             for (int i = 0; i < actual; i++) {
               long offset = i * 24L;
@@ -474,8 +475,9 @@ public final class PdfPage implements AutoCloseable {
     int count = charCount();
     if (count <= 0) return List.of();
     List<TextCharInfo> result = new ArrayList<>(count);
-    withTextWithBounds((charCode, left, bottom, right, top, fontSize) -> 
-        result.add(new TextCharInfo(charCode, left, bottom, right, top, fontSize)));
+    withTextWithBounds(
+        (charCode, left, bottom, right, top, fontSize) ->
+            result.add(new TextCharInfo(charCode, left, bottom, right, top, fontSize)));
     return List.copyOf(result);
   }
 
@@ -552,8 +554,8 @@ public final class PdfPage implements AutoCloseable {
 
       long needed =
           (long)
-              AnnotBindings.FPDFAnnot_GetStringValue().invokeExact(
-                  annot, keySeg, MemorySegment.NULL, 0L);
+              AnnotBindings.FPDFAnnot_GetStringValue()
+                  .invokeExact(annot, keySeg, MemorySegment.NULL, 0L);
       if (needed <= 2) return Optional.empty();
 
       MemorySegment buf = ScratchBuffer.get(needed);
@@ -605,7 +607,8 @@ public final class PdfPage implements AutoCloseable {
       int total = (int) EditBindings.FPDFPage_CountObjects().invokeExact(handle);
       int count = 0;
       for (int i = 0; i < total; i++) {
-        MemorySegment obj = (MemorySegment) EditBindings.FPDFPage_GetObject().invokeExact(handle, i);
+        MemorySegment obj =
+            (MemorySegment) EditBindings.FPDFPage_GetObject().invokeExact(handle, i);
         if (!FfmHelper.isNull(obj)) {
           int type = (int) EditBindings.FPDFPageObj_GetType().invokeExact(obj);
           if (type == EditBindings.FPDF_PAGEOBJ_IMAGE) {
@@ -630,7 +633,8 @@ public final class PdfPage implements AutoCloseable {
       int imageIndex = 0;
 
       for (int i = 0; i < total; i++) {
-        MemorySegment obj = (MemorySegment) EditBindings.FPDFPage_GetObject().invokeExact(handle, i);
+        MemorySegment obj =
+            (MemorySegment) EditBindings.FPDFPage_GetObject().invokeExact(handle, i);
         if (FfmHelper.isNull(obj)) continue;
 
         int type = (int) EditBindings.FPDFPageObj_GetType().invokeExact(obj);
@@ -638,7 +642,8 @@ public final class PdfPage implements AutoCloseable {
 
         try (var _ = ScratchBuffer.acquireScope()) {
           MemorySegment meta = ScratchBuffer.get(EditBindings.IMAGE_METADATA_LAYOUT.byteSize());
-          int ok = (int) EditBindings.FPDFImageObj_GetImageMetadata().invokeExact(obj, handle, meta);
+          int ok =
+              (int) EditBindings.FPDFImageObj_GetImageMetadata().invokeExact(obj, handle, meta);
           if (ok != 0) {
             int w = meta.get(JAVA_INT, 0);
             int h = meta.get(JAVA_INT, 4);
@@ -664,7 +669,8 @@ public final class PdfPage implements AutoCloseable {
     try (var _ = ScratchBuffer.acquireScope()) {
       int charCount =
           (int)
-              TextBindings.FPDFLink_GetURL().invokeExact(pageLink, linkIndex, MemorySegment.NULL, 0);
+              TextBindings.FPDFLink_GetURL()
+                  .invokeExact(pageLink, linkIndex, MemorySegment.NULL, 0);
       if (charCount <= 1) return "";
 
       MemorySegment buf = ScratchBuffer.get((long) charCount * 2);
@@ -687,8 +693,8 @@ public final class PdfPage implements AutoCloseable {
 
       int ok =
           (int)
-              TextBindings.FPDFLink_GetRect().invokeExact(
-                  pageLink, linkIndex, 0, left, top, right, bottom);
+              TextBindings.FPDFLink_GetRect()
+                  .invokeExact(pageLink, linkIndex, 0, left, top, right, bottom);
       if (ok != 0) {
         return new PdfAnnotation.Rect(
             (float) left.get(JAVA_DOUBLE, 0),

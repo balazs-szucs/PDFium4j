@@ -113,7 +113,8 @@ class ZeroAllocationCallbackTest {
     Path projectRoot = Path.of("").toAbsolutePath();
     Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/996_Don Quixote.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/996_Don Quixote.pdf");
+      corpusPdf =
+          projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/996_Don Quixote.pdf");
     }
     if (!Files.exists(corpusPdf)) {
       return SAMPLE_PDF;

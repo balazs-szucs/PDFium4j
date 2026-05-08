@@ -31,7 +31,8 @@ final class NoAllocationAsserter {
     long delta = allocatedBytesAfter - allocatedBytesBefore;
     testThread = null;
     if (delta > tolerance) {
-      System.out.println("ALLOCATION FAILURE: Observed " + delta + " bytes (tolerance " + tolerance + ")");
+      System.out.println(
+          "ALLOCATION FAILURE: Observed " + delta + " bytes (tolerance " + tolerance + ")");
       fail(
           "Expected zero thread allocations (tolerance: "
               + tolerance

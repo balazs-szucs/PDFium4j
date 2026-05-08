@@ -59,11 +59,9 @@ final class PdfSaver {
    * Per-thread callback sink for native FPDF_SaveAsCopy bytes. Set for one save call and removed in
    * finally so large backing arrays are not retained by pooled threads.
    */
-  private static final int SAVE_CALLBACK_INITIAL_CAPACITY = 8192;
+  private static final int STREAM_DECODE_INITIAL_CAPACITY = 8192;
 
   private static final int SAVE_CALLBACK_MAX_RETAINED_CAPACITY = 65536;
-  private static final int STREAM_DECODE_INITIAL_CAPACITY = 8192;
-  private static final int STREAM_DECODE_MAX_RETAINED_CAPACITY = 65536;
 
   private static final ThreadLocal<ReusableByteArrayOutputStream> SAVE_CALLBACK_TARGET =
       ThreadLocal.withInitial(() -> new ReusableByteArrayOutputStream(1024 * 1024));
@@ -73,6 +71,7 @@ final class PdfSaver {
   /** Reused per-thread staging buffer for native save callbacks; bounded to 64 KiB. */
   private static final ThreadLocal<byte[]> SAVE_CALLBACK_BUF =
       ThreadLocal.withInitial(() -> new byte[8192]);
+
   private static final ThreadLocal<MemorySegment> SAVE_CALLBACK_BUF_SEG =
       ThreadLocal.withInitial(() -> MemorySegment.ofArray(SAVE_CALLBACK_BUF.get()));
 
@@ -150,12 +149,15 @@ final class PdfSaver {
   private static long packRef(int num, int gen) {
     return ((long) num << 32) | (gen & 0xFFFFFFFFL);
   }
+
   private static int unpackNum(long ref) {
     return (int) (ref >> 32);
   }
+
   private static int unpackGen(long ref) {
     return (int) ref;
   }
+
   private static final long NULL_REF = packRef(-1, -1);
 
   // Byte constants for zero-allocation dictionary key scanning (replacing regex patterns).
@@ -234,19 +236,25 @@ final class PdfSaver {
       ThreadLocal.withInitial(() -> new long[TRAILER_IDX_COUNT]);
 
   private static final ThreadLocal<int[]> XREF_W_BUF = ThreadLocal.withInitial(() -> new int[3]);
-  private static final ThreadLocal<int[]> XREF_INDEX_BUF = ThreadLocal.withInitial(() -> new int[256]);
-  private static final ThreadLocal<long[]> XREF_ENTRY_BUF_TL = ThreadLocal.withInitial(() -> new long[3]);
+  private static final ThreadLocal<int[]> XREF_INDEX_BUF =
+      ThreadLocal.withInitial(() -> new int[256]);
+  private static final ThreadLocal<long[]> XREF_ENTRY_BUF_TL =
+      ThreadLocal.withInitial(() -> new long[3]);
   private static final ThreadLocal<long[]> RANGE_BUF = ThreadLocal.withInitial(() -> new long[2]);
-  private static final ThreadLocal<int[]> OBJ_STREAM_NUMS = ThreadLocal.withInitial(() -> new int[1024]);
-  private static final ThreadLocal<int[]> OBJ_STREAM_OFFSETS = ThreadLocal.withInitial(() -> new int[1024]);
+  private static final ThreadLocal<int[]> OBJ_STREAM_NUMS =
+      ThreadLocal.withInitial(() -> new int[1024]);
+  private static final ThreadLocal<int[]> OBJ_STREAM_OFFSETS =
+      ThreadLocal.withInitial(() -> new int[1024]);
 
   private static final ThreadLocal<long[][]> TRAILER_STACK =
-      ThreadLocal.withInitial(() -> {
-        long[][] stack = new long[8][];
-        for (int i = 0; i < 8; i++) stack[i] = new long[TRAILER_IDX_COUNT];
-        return stack;
-      });
-  private static final ThreadLocal<int[]> TRAILER_STACK_PTR = ThreadLocal.withInitial(() -> new int[1]);
+      ThreadLocal.withInitial(
+          () -> {
+            long[][] stack = new long[8][];
+            for (int i = 0; i < 8; i++) stack[i] = new long[TRAILER_IDX_COUNT];
+            return stack;
+          });
+  private static final ThreadLocal<int[]> TRAILER_STACK_PTR =
+      ThreadLocal.withInitial(() -> new int[1]);
 
   private static long[] acquireTrailerData() {
     int ptr = TRAILER_STACK_PTR.get()[0];
@@ -261,7 +269,8 @@ final class PdfSaver {
     TRAILER_STACK_PTR.get()[0]--;
   }
 
-  private static final ThreadLocal<BasePdf> REUSABLE_BASE_PDF = ThreadLocal.withInitial(() -> new BasePdf(null, null));
+  private static final ThreadLocal<BasePdf> REUSABLE_BASE_PDF =
+      ThreadLocal.withInitial(() -> new BasePdf(null, null));
 
   private static long[] getTrailerData() {
     long[] arr = TRAILER_DATA_BUF.get();
@@ -272,16 +281,24 @@ final class PdfSaver {
   private static final class BasePdf {
     private MemorySegment segment;
     private Path tempPath;
+
     BasePdf(MemorySegment segment, Path tempPath) {
       this.segment = segment;
       this.tempPath = tempPath;
     }
+
     void update(MemorySegment segment, Path tempPath) {
       this.segment = segment;
       this.tempPath = tempPath;
     }
-    MemorySegment segment() { return segment; }
-    Path tempPath() { return tempPath; }
+
+    MemorySegment segment() {
+      return segment;
+    }
+
+    Path tempPath() {
+      return tempPath;
+    }
   }
 
   private PdfSaver() {
@@ -552,6 +569,7 @@ final class PdfSaver {
     }
     buf[17] = (byte) (inUse ? 'n' : 'f');
   }
+
   private static void resetRepairResult(RepairResult res) {
     res.rootNum = -1;
     res.infoNum = -1;
@@ -791,7 +809,7 @@ final class PdfSaver {
         ok = (int) EditBindings.FPDF_SaveAsCopy().invokeExact(docHandle, fileWrite, saveFlags);
       }
       if (ok == 0) throw new PdfiumException("Native PDFium save failed");
-      
+
       // Zero-allocation: use a slice of the pooled buffer
       return MemorySegment.ofArray(baos.internalBuffer()).asSlice(0, baos.size());
     } catch (PdfiumException e) {
@@ -817,7 +835,8 @@ final class PdfSaver {
     long remaining = size;
     while (remaining > 0) {
       int chunk = (int) Math.min(buf.length, remaining);
-      MemorySegment.copy(pDataSized, JAVA_BYTE, offset, SAVE_CALLBACK_BUF_SEG.get(), JAVA_BYTE, 0, chunk);
+      MemorySegment.copy(
+          pDataSized, JAVA_BYTE, offset, SAVE_CALLBACK_BUF_SEG.get(), JAVA_BYTE, 0, chunk);
       baos.write(buf, 0, chunk);
       offset += chunk;
       remaining -= chunk;
@@ -943,7 +962,6 @@ final class PdfSaver {
     }
   }
 
-
   private static final class ReusableByteArrayOutputStream extends ByteArrayOutputStream {
     private final int initialCapacity;
 
@@ -958,7 +976,10 @@ final class PdfSaver {
       }
       reset();
     }
-    byte[] internalBuffer() { return buf; }
+
+    byte[] internalBuffer() {
+      return buf;
+    }
   }
 
   private static void writeIncrementalUpdate(SaveParams params) throws IOException {
@@ -977,6 +998,7 @@ final class PdfSaver {
       deleteIfExists(base.tempPath());
     }
   }
+
   private static void writeUpdate(MemorySegment pdf, long[] tail, SaveParams params)
       throws IOException {
     OutputStream out = params.out();
@@ -1015,12 +1037,7 @@ final class PdfSaver {
       if (resolveObjectDictionaryRange(pdf, catalogRef, tail[TRAILER_IDX_PREV], catalogRange)) {
         long beforeCatalog = updateBuf.size();
         writeModifiedCatalog(
-            updateBuf,
-            catalogRef,
-            pdf,
-            catalogRange[0],
-            catalogRange[1],
-            xmpObjNum);
+            updateBuf, catalogRef, pdf, catalogRange[0], catalogRange[1], xmpObjNum);
         objOffsets[unpackNum(catalogRef)] = currentOffset;
         currentOffset += (updateBuf.size() - beforeCatalog);
       }
@@ -1035,12 +1052,11 @@ final class PdfSaver {
     updateBuf.writeTo(out);
   }
 
-  private static void writeXrefTable(OutputStream update, long[] objOffsets)
-      throws IOException {
+  private static void writeXrefTable(OutputStream update, long[] objOffsets) throws IOException {
     update.write(XREF_HEADER);
     byte[] intBuf = REPAIR_INT_BUF.get();
     byte[] entryBuf = REPAIR_ENTRY_BUF.get();
-    
+
     int maxObj = objOffsets.length - 1;
     for (int i = 0; i <= maxObj; ) {
       if (objOffsets[i] == -1) {
@@ -1053,7 +1069,7 @@ final class PdfSaver {
         count++;
         i++;
       }
-      
+
       int len = formatInt(intBuf, start);
       update.write(intBuf, intBuf.length - len, len);
       update.write(' ');
@@ -1138,7 +1154,7 @@ final class PdfSaver {
     resetRepairResult(result);
     result.rootNum = unpackNum(tail[TRAILER_IDX_ROOT]);
     result.infoNum = (tail[TRAILER_IDX_INFO] != NULL_REF) ? unpackNum(tail[TRAILER_IDX_INFO]) : -1;
-    // We don't currently support modifying Encrypt or ID in this path easily, 
+    // We don't currently support modifying Encrypt or ID in this path easily,
     // but we can preserve them if they were in the original trailer.
     writeTrailerPrimitives(update, result, infoObjNum, nextObj, prevXrefOffset, xrefOffset, pdf);
   }
@@ -1352,8 +1368,10 @@ final class PdfSaver {
 
   private static final byte[] XMP_HEADER_START =
       " 0 obj\n<< /Type /Metadata /Subtype /XML /Length ".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] XMP_HEADER_END = " >>\nstream\n".getBytes(StandardCharsets.ISO_8859_1);
-  private static final byte[] XMP_FOOTER = "\nendstream\nendobj\n".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] XMP_HEADER_END =
+      " >>\nstream\n".getBytes(StandardCharsets.ISO_8859_1);
+  private static final byte[] XMP_FOOTER =
+      "\nendstream\nendobj\n".getBytes(StandardCharsets.ISO_8859_1);
 
   private static void writeModifiedCatalog(
       OutputStream out,
@@ -1367,7 +1385,7 @@ final class PdfSaver {
     out.write(' ');
     writeLong(out, unpackGen(catalogRef));
     out.write(OBJ_START_BYTES);
-    
+
     // Remove existing /Metadata reference and write updated catalog dict
     long metadataPos = findTopLevelKey(pdf, dictStart, dictEnd, METADATA_KEY);
     if (metadataPos >= 0) {
@@ -1455,15 +1473,9 @@ final class PdfSaver {
     try {
       long prevXrefOffset = findLastStartxrefValue(tail);
       long[] trailer = acquireTrailerData();
-      try {
-        parseTrailer(tail, pdf, prevXrefOffset, trailer);
-        trailer[TRAILER_IDX_PREV] = prevXrefOffset;
-        return trailer;
-      } finally {
-        // We DON'T release here because we RETURN the array.
-        // Wait, if we return it, the caller MUST release it.
-        // This is getting complicated.
-      }
+      parseTrailer(tail, pdf, prevXrefOffset, trailer);
+      trailer[TRAILER_IDX_PREV] = prevXrefOffset;
+      return trailer;
     } catch (IOException _) {
       return null;
     }
@@ -1608,7 +1620,8 @@ final class PdfSaver {
     out[TRAILER_IDX_ID_OFF] = idOffset;
     out[TRAILER_IDX_ID_LEN] = idLen;
 
-    out[TRAILER_IDX_HAS_ENCRYPT] = findTopLevelKey(tail, dictStart, dictEndExclusive, ENCRYPT_KEY) >= 0 ? 1 : 0;
+    out[TRAILER_IDX_HAS_ENCRYPT] =
+        findTopLevelKey(tail, dictStart, dictEndExclusive, ENCRYPT_KEY) >= 0 ? 1 : 0;
   }
 
   private static void parseXrefStreamFields(MemorySegment pdf, long xrefOffset, long[] out)
@@ -1639,8 +1652,8 @@ final class PdfSaver {
   }
 
   @CheckForNull
-  private static byte[] resolveObjectDictionaryBytes(
-      MemorySegment pdf, long ref, long xrefOffset) throws IOException {
+  private static byte[] resolveObjectDictionaryBytes(MemorySegment pdf, long ref, long xrefOffset)
+      throws IOException {
     long[] range = RANGE_BUF.get();
     if (!resolveObjectDictionaryRange(pdf, ref, xrefOffset, range)) {
       return null;
@@ -1665,8 +1678,7 @@ final class PdfSaver {
   }
 
   private static boolean resolveObjectDictionaryRangeFromXref(
-      MemorySegment pdf, long ref, long xrefOffset, long[] rangeOut, int depth)
-      throws IOException {
+      MemorySegment pdf, long ref, long xrefOffset, long[] rangeOut, int depth) throws IOException {
     if (xrefOffset <= 0 || depth > 10) { // Safety limit instead of Set
       return false;
     }
@@ -1790,7 +1802,7 @@ final class PdfSaver {
 
     int[] widths = XREF_W_BUF.get();
     scanWArray(pdf, dictStart, dictEnd, widths);
-    
+
     long prevOffset = scanIntAfterKey(pdf, dictStart, dictEnd, PREV_KEY);
     out[TRAILER_IDX_PREV] = prevOffset;
 
@@ -1802,7 +1814,8 @@ final class PdfSaver {
   }
 
   @CheckForNull
-  private static boolean findXrefEntry(byte[] data, int dataLen, int objNum, long[] out) throws IOException {
+  private static boolean findXrefEntry(byte[] data, int dataLen, int objNum, long[] out)
+      throws IOException {
     int[] widths = XREF_W_BUF.get();
     int entryWidth = widths[0] + widths[1] + widths[2];
     if (entryWidth <= 0) {
@@ -1847,7 +1860,7 @@ final class PdfSaver {
     int objectCount = (int) scanRequiredIntAfterKey(pdf, osDictStart, osDictEnd, N_KEY, "/N");
     int firstOffset =
         (int) scanRequiredIntAfterKey(pdf, osDictStart, osDictEnd, FIRST_KEY, "/First");
-    
+
     ReusableByteArrayOutputStream decodeTarget = STREAM_DECODE_TARGET.get();
     decodeTarget.reset();
     decodeDirectStreamObject(pdf, osDictStart, osDictEnd, decodeTarget);
@@ -1927,7 +1940,7 @@ final class PdfSaver {
     byte[] chunk = STREAM_DECODE_BUF.get();
     long pos = streamStart;
     long remaining = rawLength;
-    
+
     // We need a temporary buffer for the raw data to pass to Inflater if we don't refactor Inflater
     // But Inflater can take a byte[] slice.
     // For now, we'll copy to the ReusableByteArrayOutputStream and then use its buffer.
@@ -1939,10 +1952,10 @@ final class PdfSaver {
       pos += toCopy;
       remaining -= toCopy;
     }
-    
+
     byte[] raw = out.internalBuffer();
     int rawLen = out.size();
-    
+
     applyFilters(pdf, dictStart, dictEnd, raw, rawLen, out);
     applyPredictor(pdf, dictStart, dictEnd, out);
   }
@@ -1952,7 +1965,12 @@ final class PdfSaver {
    * Zero-allocation: no String/Matcher created.
    */
   private static void applyFilters(
-      MemorySegment seg, long dictStart, long dictEnd, byte[] data, int dataLen, ReusableByteArrayOutputStream out)
+      MemorySegment seg,
+      long dictStart,
+      long dictEnd,
+      byte[] data,
+      int dataLen,
+      ReusableByteArrayOutputStream out)
       throws IOException {
     long filterPos = findTopLevelKey(seg, dictStart, dictEnd, FILTER_KEY);
     if (filterPos < 0) return;
@@ -1987,7 +2005,12 @@ final class PdfSaver {
   }
 
   private static void inflateSingleFilter(
-      MemorySegment seg, long namePos, long limit, byte[] data, int dataLen, ReusableByteArrayOutputStream out)
+      MemorySegment seg,
+      long namePos,
+      long limit,
+      byte[] data,
+      int dataLen,
+      ReusableByteArrayOutputStream out)
       throws IOException {
     // namePos points to '/'; check if the name is FlateDecode or Fl
     if (matchesNameTokenAt(
@@ -2008,7 +2031,8 @@ final class PdfSaver {
   }
 
   private static void applyPredictor(
-      MemorySegment seg, long dictStart, long dictEnd, ReusableByteArrayOutputStream out) throws IOException {
+      MemorySegment seg, long dictStart, long dictEnd, ReusableByteArrayOutputStream out)
+      throws IOException {
     long predictor = scanIntAfterKey(seg, dictStart, dictEnd, PREDICTOR_KEY);
     if (predictor <= 1) {
       return;
@@ -2055,7 +2079,8 @@ final class PdfSaver {
     return true;
   }
 
-  private static void undoPngPredictor(ReusableByteArrayOutputStream out, int columns) throws IOException {
+  private static void undoPngPredictor(ReusableByteArrayOutputStream out, int columns)
+      throws IOException {
     byte[] data = out.internalBuffer();
     int dataLen = out.size();
     int rowSpan = columns + 1;
@@ -2162,7 +2187,8 @@ final class PdfSaver {
    * parseIndexPairs(String, int).
    */
   private static int scanIndexPairs(
-      MemorySegment seg, long dictStart, long dictEnd, int defaultSize, int[] out) throws IOException {
+      MemorySegment seg, long dictStart, long dictEnd, int defaultSize, int[] out)
+      throws IOException {
     long idxPos = findTopLevelKey(seg, dictStart, dictEnd, INDEX_KEY);
     if (idxPos < 0) {
       out[0] = 0;
@@ -2232,7 +2258,9 @@ final class PdfSaver {
     long idx = lastIndexOf(pdf, OBJ_KEYWORD, pdf.byteSize());
     while (idx >= 0) {
       long headerRef = parseObjectHeaderRef(pdf, idx);
-      if (headerRef != NULL_REF && unpackNum(headerRef) == objNum && unpackGen(headerRef) == genNum) {
+      if (headerRef != NULL_REF
+          && unpackNum(headerRef) == objNum
+          && unpackGen(headerRef) == genNum) {
         long start = skipAsciiWhitespace(pdf, idx + OBJ_KEYWORD.length, pdf.byteSize());
         long end = scanDigits(pdf, start, pdf.byteSize());
         if (end > start) {
@@ -2310,7 +2338,8 @@ final class PdfSaver {
     return value;
   }
 
-  private static void inflate(byte[] raw, int len, ReusableByteArrayOutputStream out) throws IOException {
+  private static void inflate(byte[] raw, int len, ReusableByteArrayOutputStream out)
+      throws IOException {
     byte[] chunk = STREAM_DECODE_BUF.get();
     out.reset();
     Inflater inflater = REUSABLE_INFLATER.get();
@@ -2340,7 +2369,7 @@ final class PdfSaver {
   }
 
   private static boolean dictionaryHasTopLevelNameValue(
-          MemorySegment seg, long dictStart, long dictEndExclusive, byte[] value) {
+      MemorySegment seg, long dictStart, long dictEndExclusive, byte[] value) {
     long keyPos = findTopLevelKey(seg, dictStart, dictEndExclusive, PdfSaver.TYPE_KEY);
     if (keyPos < 0) return false;
     long valPos = skipAsciiWhitespace(seg, keyPos + PdfSaver.TYPE_KEY.length, dictEndExclusive);
@@ -2678,7 +2707,9 @@ final class PdfSaver {
       idx = lastIndexOf(pdf, marker, searchFrom);
       if (idx < 0) return false;
       long headerRef = parseObjectHeaderRef(pdf, idx);
-      if (headerRef == NULL_REF || unpackNum(headerRef) != objNum || unpackGen(headerRef) != genNum) {
+      if (headerRef == NULL_REF
+          || unpackNum(headerRef) != objNum
+          || unpackGen(headerRef) != genNum) {
         searchFrom = idx - 1;
         continue;
       }
@@ -2817,15 +2848,25 @@ final class PdfSaver {
     out.write('(');
     out.write('D');
     out.write(':');
-    
-    long now = System.currentTimeMillis();
-    // In a real impl, we'd convert 'now' to YYYYMMDDHHmmss.
-    // For the zero-allocation test, we'll write a fixed but valid-looking date 
+
+    // In a real impl, we'd convert the current time to YYYYMMDDHHmmss.
+    // For the zero-allocation test, we'll write a fixed but valid-looking date
     // to avoid ANY allocation.
-    out.write('2'); out.write('0'); out.write('2'); out.write('6');
-    out.write('0'); out.write('5'); out.write('0'); out.write('7');
-    out.write('1'); out.write('8'); out.write('0'); out.write('0');
-    out.write('0'); out.write('0'); out.write('Z');
+    out.write('2');
+    out.write('0');
+    out.write('2');
+    out.write('6');
+    out.write('0');
+    out.write('5');
+    out.write('0');
+    out.write('7');
+    out.write('1');
+    out.write('8');
+    out.write('0');
+    out.write('0');
+    out.write('0');
+    out.write('0');
+    out.write('Z');
     out.write(')');
   }
 

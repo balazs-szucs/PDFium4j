@@ -413,7 +413,7 @@ public final class PdfDocument implements AutoCloseable {
           new PdfDocument(
               doc,
               docArena,
-                  path,
+              path,
               tempFile,
               null,
               policy,
@@ -425,7 +425,7 @@ public final class PdfDocument implements AutoCloseable {
       } catch (IOException e) {
         PdfiumLibrary.ignore(e);
       }
-      
+
       if (policy.mode() == PdfProcessingPolicy.Mode.RECOVER
           && !pdfDoc.hasValidCrossReferenceTable()) {
         pdfDoc.close();
@@ -524,7 +524,8 @@ public final class PdfDocument implements AutoCloseable {
 
       MemorySegment docHandle =
           (MemorySegment)
-              ViewBindings.FPDF_LoadMemDocument64().invokeExact(segment, segment.byteSize(), pwdSeg);
+              ViewBindings.FPDF_LoadMemDocument64()
+                  .invokeExact(segment, segment.byteSize(), pwdSeg);
 
       if (FfmHelper.isNull(docHandle)) {
         int err = (int) (long) ViewBindings.FPDF_GetLastError().invokeExact();
@@ -534,7 +535,7 @@ public final class PdfDocument implements AutoCloseable {
       return new PdfDocument(
           docHandle,
           arena,
-              null,
+          null,
           null,
           sourceBytes,
           resolvedPolicy,
@@ -574,6 +575,7 @@ public final class PdfDocument implements AutoCloseable {
 
     PdfPage cached = pageCache.get(index);
     if (cached != null && !cached.isClosed()) {
+      cached.acquire();
       triggerPrefetch(index);
       return cached;
     }
@@ -679,7 +681,8 @@ public final class PdfDocument implements AutoCloseable {
     ensureOpen();
     try (var _ = ScratchBuffer.acquireScope()) {
       int needed =
-          (int) ShimBindings.pdfium4j_page_label().invokeExact(handle, index, MemorySegment.NULL, 0);
+          (int)
+              ShimBindings.pdfium4j_page_label().invokeExact(handle, index, MemorySegment.NULL, 0);
       if (needed <= 1) return Optional.empty();
       MemorySegment buf = ScratchBuffer.get(needed);
       int copied = (int) ShimBindings.pdfium4j_page_label().invokeExact(handle, index, buf, needed);
@@ -927,8 +930,9 @@ public final class PdfDocument implements AutoCloseable {
     try {
       long needed =
           (long)
-              DocBindings.FPDF_GetMetaText().invokeExact(
-                  handle, metadataKeySegment(MetadataTag.TITLE), MemorySegment.NULL, 0L);
+              DocBindings.FPDF_GetMetaText()
+                  .invokeExact(
+                      handle, metadataKeySegment(MetadataTag.TITLE), MemorySegment.NULL, 0L);
       return needed <= 0 ? 0 : Math.toIntExact(needed);
     } catch (Throwable t) {
       throw new PdfiumException("Failed to inspect metadata length for " + MetadataTag.TITLE, t);
@@ -950,8 +954,8 @@ public final class PdfDocument implements AutoCloseable {
     try {
       long copied =
           (long)
-              DocBindings.FPDF_GetMetaText().invokeExact(
-                  handle, metadataKeySegment(MetadataTag.TITLE), buffer, capacity);
+              DocBindings.FPDF_GetMetaText()
+                  .invokeExact(handle, metadataKeySegment(MetadataTag.TITLE), buffer, capacity);
       if (copied <= 0) {
         return 0;
       }
@@ -1010,15 +1014,15 @@ public final class PdfDocument implements AutoCloseable {
     try (var _ = ScratchBuffer.acquireScope()) {
       long needed =
           (long)
-              DocBindings.FPDF_GetMetaText().invokeExact(
-                  handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
+              DocBindings.FPDF_GetMetaText()
+                  .invokeExact(handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
       if (needed <= 2) return;
 
       MemorySegment buf = ScratchBuffer.get(needed);
       long copied =
           (long)
-              DocBindings.FPDF_GetMetaText().invokeExact(
-                  handle, metadataKeySegment(tag), buf, needed);
+              DocBindings.FPDF_GetMetaText()
+                  .invokeExact(handle, metadataKeySegment(tag), buf, needed);
       long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
       if (byteLen > 0) {
         consumer.accept(buf, byteLen);
@@ -1053,8 +1057,8 @@ public final class PdfDocument implements AutoCloseable {
     try {
       long needed =
           (long)
-              DocBindings.FPDF_GetMetaText().invokeExact(
-                  handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
+              DocBindings.FPDF_GetMetaText()
+                  .invokeExact(handle, metadataKeySegment(tag), MemorySegment.NULL, 0L);
       if (needed <= 2) return InputStream.nullInputStream();
 
       ScratchBuffer.acquire();
@@ -1062,8 +1066,8 @@ public final class PdfDocument implements AutoCloseable {
         MemorySegment buf = ScratchBuffer.get(needed);
         long copied =
             (long)
-                DocBindings.FPDF_GetMetaText().invokeExact(
-                    handle, metadataKeySegment(tag), buf, needed);
+                DocBindings.FPDF_GetMetaText()
+                    .invokeExact(handle, metadataKeySegment(tag), buf, needed);
         long byteLen = FfmHelper.normalizeWideByteLength(buf, copied, needed);
         if (byteLen <= 0) return InputStream.nullInputStream();
         return ScratchBuffer.wrap(buf, byteLen);
@@ -1379,8 +1383,8 @@ public final class PdfDocument implements AutoCloseable {
       MemorySegment keySeg = ScratchBuffer.getUtf8(customKey);
       int needed =
           (int)
-              ShimBindings.pdfium4j_get_meta_utf8().invokeExact(
-                  handle, keySeg, MemorySegment.NULL, 0);
+              ShimBindings.pdfium4j_get_meta_utf8()
+                  .invokeExact(handle, keySeg, MemorySegment.NULL, 0);
       if (needed <= 1) return Optional.empty();
 
       MemorySegment valSeg = ScratchBuffer.get(needed);
@@ -1477,7 +1481,8 @@ public final class PdfDocument implements AutoCloseable {
           (int) ShimBindings.pdfium4j_get_xmp_metadata().invokeExact(handle, MemorySegment.NULL, 0);
       if (needed > 0) {
         MemorySegment buf = ScratchBuffer.get(needed);
-        int copied = (int) ShimBindings.pdfium4j_get_xmp_metadata().invokeExact(handle, buf, needed);
+        int copied =
+            (int) ShimBindings.pdfium4j_get_xmp_metadata().invokeExact(handle, buf, needed);
         if (copied > 0) return buf.asSlice(0, Math.min(copied, needed)).toArray(JAVA_BYTE);
       }
     } catch (Throwable e) {
@@ -1559,8 +1564,8 @@ public final class PdfDocument implements AutoCloseable {
     try {
       MemorySegment p =
           (MemorySegment)
-              EditBindings.FPDFPage_New().invokeExact(
-                  handle, index, (double) size.width(), (double) size.height());
+              EditBindings.FPDFPage_New()
+                  .invokeExact(handle, index, (double) size.width(), (double) size.height());
       if (FfmHelper.isNull(p)) throwLastError("Failed to insert page");
       ViewBindings.FPDF_ClosePage().invokeExact(p);
       markStructurallyModified();
@@ -1811,7 +1816,8 @@ public final class PdfDocument implements AutoCloseable {
       try {
         long needed =
             (long)
-                SignatureBindings.FPDFSignatureObj_GetTime().invokeExact(sig, MemorySegment.NULL, 0L);
+                SignatureBindings.FPDFSignatureObj_GetTime()
+                    .invokeExact(sig, MemorySegment.NULL, 0L);
         if (needed <= 0) return Optional.empty();
         MemorySegment buf = ScratchBuffer.get(needed);
         SignatureBindings.FPDFSignatureObj_GetTime().invokeExact(sig, buf, needed);
@@ -1829,8 +1835,8 @@ public final class PdfDocument implements AutoCloseable {
 
   private static long getAttachmentFileSize(MemorySegment attachment) throws Throwable {
     return (long)
-        AttachmentBindings.FPDFAttachment_GetFile().invokeExact(
-            attachment, MemorySegment.NULL, 0L, MemorySegment.NULL);
+        AttachmentBindings.FPDFAttachment_GetFile()
+            .invokeExact(attachment, MemorySegment.NULL, 0L, MemorySegment.NULL);
   }
 
   private static Optional<String> readAttachmentString(MemorySegment handle, MethodHandle getter) {
@@ -1852,14 +1858,14 @@ public final class PdfDocument implements AutoCloseable {
       try {
         long needed =
             (long)
-                AttachmentBindings.FPDFAttachment_GetStringValue().invokeExact(
-                    handle, keySeg, MemorySegment.NULL, 0L);
+                AttachmentBindings.FPDFAttachment_GetStringValue()
+                    .invokeExact(handle, keySeg, MemorySegment.NULL, 0L);
         if (needed <= 2) return Optional.empty();
         MemorySegment buf = ScratchBuffer.get(needed);
         long copied =
             (long)
-                AttachmentBindings.FPDFAttachment_GetStringValue().invokeExact(
-                    handle, keySeg, buf, needed);
+                AttachmentBindings.FPDFAttachment_GetStringValue()
+                    .invokeExact(handle, keySeg, buf, needed);
         return Optional.of(FfmHelper.fromWideString(buf, (long) copied));
       } catch (Throwable t) {
         return Optional.empty();

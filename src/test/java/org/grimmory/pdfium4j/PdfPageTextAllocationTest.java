@@ -87,9 +87,14 @@ class PdfPageTextAllocationTest {
 
   private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/103_Around the World in Eighty Days.pdf");
+    Path corpusPdf =
+        projectRoot.resolve("corpus").resolve("gutenberg/103_Around the World in Eighty Days.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/103_Around the World in Eighty Days.pdf");
+      corpusPdf =
+          projectRoot
+              .resolve("..")
+              .resolve("corpus")
+              .resolve("gutenberg/103_Around the World in Eighty Days.pdf");
     }
     if (!Files.exists(corpusPdf)) {
       throw new IllegalStateException("Corpus PDF not found at: " + corpusPdf);

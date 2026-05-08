@@ -1,10 +1,10 @@
 package org.grimmory.pdfium4j;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandle;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.lang.invoke.MethodHandle;
 import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.internal.FfmHelper;
 import org.grimmory.pdfium4j.internal.ScratchBuffer;
@@ -57,7 +57,8 @@ final class StructureTreeReader {
         readUtf8(elementHandle, ShimBindings.pdfium4j_struct_element_get_alt_text());
     Optional<String> actualText =
         readUtf8(elementHandle, ShimBindings.pdfium4j_struct_element_get_actual_text());
-    Optional<String> lang = readUtf8(elementHandle, ShimBindings.pdfium4j_struct_element_get_lang());
+    Optional<String> lang =
+        readUtf8(elementHandle, ShimBindings.pdfium4j_struct_element_get_lang());
 
     int attributeCount =
         (int) ShimBindings.pdfium4j_struct_element_get_attribute_count().invokeExact(elementHandle);
@@ -74,17 +75,20 @@ final class StructureTreeReader {
       if (!FfmHelper.isNull(childHandle)) {
         children.add(readElement(childHandle));
       } else {
-        int mcid = (int) ShimBindings.pdfium4j_struct_element_get_mcid().invokeExact(elementHandle, i);
+        int mcid =
+            (int) ShimBindings.pdfium4j_struct_element_get_mcid().invokeExact(elementHandle, i);
         if (mcid != -1) {
           mcids.add(mcid);
         }
       }
     }
 
-    return new PdfStructureElement(type, title, altText, actualText, lang, children, mcids, attributeCount);
+    return new PdfStructureElement(
+        type, title, altText, actualText, lang, children, mcids, attributeCount);
   }
 
-  private static Optional<String> readUtf8(MemorySegment elementHandle, MethodHandle getter) throws Throwable {
+  private static Optional<String> readUtf8(MemorySegment elementHandle, MethodHandle getter)
+      throws Throwable {
     try (var _ = ScratchBuffer.acquireScope()) {
       int needed = (int) getter.invokeExact(elementHandle, MemorySegment.NULL, 0);
       if (needed <= 1) return Optional.empty();

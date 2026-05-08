@@ -68,21 +68,26 @@ public class PdfSaveAllocationTest {
 
     ByteArrayOutputStream bos = new ByteArrayOutputStream(1024 * 1024);
     for (int i = 0; i < 10; i++) {
-        bos.reset();
-        asserter.startRecording();
-        doc.save(bos);
-        // Iteration 0 might see one-time JVM noise
-        long tolerance = (i == 0) ? 160_000 : STEADY_STATE_TOLERANCE;
-        asserter.assertNoAllocations(tolerance);
+      bos.reset();
+      asserter.startRecording();
+      doc.save(bos);
+      // Iteration 0 might see one-time JVM noise
+      long tolerance = (i == 0) ? 160_000 : STEADY_STATE_TOLERANCE;
+      asserter.assertNoAllocations(tolerance);
     }
     assertTrue(bos.size() > 0, "Native save should stream bytes to the sink");
   }
 
   private static Path findCorpusPdf() {
     Path projectRoot = Path.of("").toAbsolutePath();
-    Path corpusPdf = projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
+    Path corpusPdf =
+        projectRoot.resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     if (!Files.exists(corpusPdf)) {
-      corpusPdf = projectRoot.resolve("..").resolve("corpus").resolve("gutenberg/1063_The Cask of Amontillado.pdf");
+      corpusPdf =
+          projectRoot
+              .resolve("..")
+              .resolve("corpus")
+              .resolve("gutenberg/1063_The Cask of Amontillado.pdf");
     }
     return corpusPdf;
   }

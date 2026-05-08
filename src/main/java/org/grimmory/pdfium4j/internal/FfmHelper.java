@@ -37,7 +37,9 @@ public final class FfmHelper {
   /** Standard options for non-critical downcalls. */
   public static final Linker.Option[] NO_OPTIONS = new Linker.Option[0];
 
-  /** Options for critical downcalls that do NOT access Java heap. Fastest for trivial native calls. */
+  /**
+   * Options for critical downcalls that do NOT access Java heap. Fastest for trivial native calls.
+   */
   public static final Linker.Option[] CRITICAL_OPTIONS =
       new Linker.Option[] {Linker.Option.critical(false)};
 

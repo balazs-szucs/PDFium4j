@@ -50,8 +50,7 @@ class CorpusNoAllocationTest {
           page.renderThumbnailTo(renderBuffer, 256);
         }
 
-        try (PdfDocument.NoAllocationPathProbe probe =
-            PdfDocument.noAllocationPathProbe(path)) {
+        try (PdfDocument.NoAllocationPathProbe probe = PdfDocument.noAllocationPathProbe(path)) {
           for (int i = 0; i < WARMUP_ITERATIONS_PER_FILE; i++) {
             probe.inspect(output, trailerBuffer);
           }
@@ -75,8 +74,7 @@ class CorpusNoAllocationTest {
 
     for (Path path : testFiles) {
       // 1. Path Probe
-      try (PdfDocument.NoAllocationPathProbe probe =
-          PdfDocument.noAllocationPathProbe(path)) {
+      try (PdfDocument.NoAllocationPathProbe probe = PdfDocument.noAllocationPathProbe(path)) {
         asserter.startRecording();
         probe.inspect(output, trailerBuffer);
         asserter.assertNoAllocations(STEADY_STATE_TOLERANCE); // Small tolerance for TLAB noise
