@@ -126,10 +126,10 @@ class CorpusMetadataRoundTripTest {
       }
 
       // 2. Validate Structural Integrity (No Corruption)
-      boolean originalHasQpdfErrors = false;
       if (isCommandAvailable("qpdf", "--version")) {
         CommandResult origQpdfRes = runCommand(List.of("qpdf", "--check", sourcePdf.toString()));
-        originalHasQpdfErrors = (origQpdfRes.exitCode() != 0 && origQpdfRes.exitCode() != 3);
+        boolean originalHasQpdfErrors =
+            (origQpdfRes.exitCode() != 0 && origQpdfRes.exitCode() != 3);
 
         CommandResult qpdfRes = runCommand(List.of("qpdf", "--check", modifiedPdf.toString()));
         if (!originalHasQpdfErrors) {
@@ -159,10 +159,11 @@ class CorpusMetadataRoundTripTest {
       // 4. Verify Custom Keys with PDFBox (Fallback Verification)
       boolean originalLoadableByPdfBox = true;
       try {
-        try (PDDocument ignored = Loader.loadPDF(sourcePdf.toFile())) {
-          // Check if originally loadable
+        try (PDDocument ignoredDoc = Loader.loadPDF(sourcePdf.toFile())) {
+          assertNotNull(ignoredDoc);
         }
-      } catch (Throwable _) {
+      } catch (Throwable ignored) {
+        PdfiumLibrary.ignore(ignored);
         originalLoadableByPdfBox = false;
       }
 
@@ -193,7 +194,7 @@ class CorpusMetadataRoundTripTest {
     } finally {
       try (Stream<Path> walk = Files.walk(tempDir)) {
         walk.sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
-      } catch (IOException _) {
+      } catch (IOException ignored) {
         InternalLogger.warn("Cleanup of temporary directory failed (ignored)");
       }
     }
@@ -202,7 +203,7 @@ class CorpusMetadataRoundTripTest {
   private static boolean isCommandAvailable(String command, String arg) {
     try {
       return runCommand(List.of(command, arg)).exitCode() <= 1;
-    } catch (Exception _) {
+    } catch (Exception ignored) {
       return false;
     }
   }

@@ -255,15 +255,15 @@ final class PdfDocumentOpener {
           if (pdfDoc != null) {
             try {
               pdfDoc.close();
-            } catch (Throwable _) {
-              // ignore
+            } catch (Throwable ignored) {
+              PdfiumLibrary.ignore(ignored);
             }
           }
           if (temp != null) {
             try {
               Files.deleteIfExists(temp);
-            } catch (Throwable _) {
-              // ignore
+            } catch (Throwable ignored) {
+              PdfiumLibrary.ignore(ignored);
             }
           }
           if (t instanceof PdfCorruptException pce) throw pce;
