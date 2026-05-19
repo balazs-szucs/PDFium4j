@@ -3,7 +3,9 @@ package org.grimmory.pdfium4j;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
+import org.grimmory.pdfium4j.model.BitmapSlab;
 import org.grimmory.pdfium4j.model.RenderFlags;
+import org.grimmory.pdfium4j.model.RenderProfile;
 import org.grimmory.pdfium4j.util.AllocationTestUtils;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -21,6 +23,7 @@ class PdfRenderAllocationTest {
   private PdfPage page;
   private Arena arena;
   private MemorySegment renderBuffer;
+  private BitmapSlab slab;
 
   /** Allocation tolerance for JVM/JIT noise. Reduced for Java 25 FFM. */
   private static final long STEADY_STATE_TOLERANCE = 128;
@@ -36,11 +39,27 @@ class PdfRenderAllocationTest {
 
     // Allocate a buffer large enough for thumbnail rendering
     renderBuffer = arena.allocate(1024 * 1024 * 4);
+    slab = new BitmapSlab();
 
     // Warmup
     for (int i = 0; i < WARMUP_ITERATIONS; i++) {
       page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
       page.renderThumbnailTo(renderBuffer, 256);
+      page.renderViewportTo(
+          renderBuffer,
+          256,
+          256,
+          256 * 4,
+          0f,
+          0f,
+          128f,
+          128f,
+          144,
+          RenderFlags.forProfile(RenderProfile.VIEWER),
+          0xFFFFFFFF);
+      page.renderProgressiveTo(
+          renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF, 3000);
+      page.renderToSlab(slab, 96, RenderFlags.DEFAULT, 0xFFFFFFFF);
     }
   }
 
@@ -48,6 +67,7 @@ class PdfRenderAllocationTest {
   void tearDown() {
     if (page != null) page.close();
     if (doc != null) doc.close();
+    if (slab != null) slab.close();
     if (arena != null) arena.close();
   }
 
@@ -64,6 +84,42 @@ class PdfRenderAllocationTest {
   void renderToSegmentDoesNotAllocateAfterWarmup() {
     asserter.startRecording();
     page.renderTo(renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF);
+    asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void renderViewportToSegmentDoesNotAllocateAfterWarmup() {
+    asserter.startRecording();
+    page.renderViewportTo(
+        renderBuffer,
+        256,
+        256,
+        256 * 4,
+        0f,
+        0f,
+        128f,
+        128f,
+        144,
+        RenderFlags.forProfile(RenderProfile.VIEWER),
+        0xFFFFFFFF);
+    asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void renderProgressiveToSegmentDoesNotAllocateAfterWarmup() {
+    asserter.startRecording();
+    page.renderProgressiveTo(
+        renderBuffer, 256, 256, 256 * 4, RenderFlags.DEFAULT.value(), 0xFFFFFFFF, 3000);
+    asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void renderToSlabDoesNotAllocateAfterWarmup() {
+    asserter.startRecording();
+    page.renderToSlab(slab, 96, RenderFlags.DEFAULT, 0xFFFFFFFF);
     asserter.assertNoAllocations(STEADY_STATE_TOLERANCE);
   }
 

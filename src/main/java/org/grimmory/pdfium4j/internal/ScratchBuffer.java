@@ -8,6 +8,7 @@ import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 
 /**
  * A thread-local scratch buffer for temporary native allocations.
@@ -31,7 +32,6 @@ public final class ScratchBuffer {
   private static final long WARN_THRESHOLD =
       Long.getLong("pdfium4j.scratch.warnThreshold", 32L * 1024L * 1024L);
 
-  private static final ScopedValue<State> STATE = ScopedValue.newInstance();
   private static final ThreadLocal<State> BRIDGE = new ThreadLocal<>();
 
   private ScratchBuffer() {}
@@ -156,12 +156,11 @@ public final class ScratchBuffer {
    * @param action the action to run
    */
   public static void withScratch(Runnable action) {
-    State s = new State();
-    s.useCount = 1;
+    acquire();
     try {
-      ScopedValue.where(STATE, s).run(action);
+      action.run();
     } finally {
-      s.close();
+      release();
     }
   }
 
@@ -173,22 +172,17 @@ public final class ScratchBuffer {
    * @return the task result
    * @throws Exception if the task fails
    */
-  public static <T> T callWithScratch(java.util.concurrent.Callable<T> action) throws Exception {
-    State s = new State();
-    s.useCount = 1;
+  public static <T> T callWithScratch(Callable<T> action) throws Exception {
+    acquire();
     try {
-      return ScopedValue.where(STATE, s).call(() -> action.call());
+      return action.call();
     } finally {
-      s.close();
+      release();
     }
   }
 
   /** Clear all thread-local buffers and close their arenas. */
   public static void purge() {
-    if (STATE.isBound()) {
-      InternalLogger.warn("ScratchBuffer.purge() called inside an active scope; ignoring");
-      return;
-    }
     State s = BRIDGE.get();
     if (s != null) {
       s.useCount = 0;
@@ -218,15 +212,11 @@ public final class ScratchBuffer {
   }
 
   static long currentCapacity() {
-    if (STATE.isBound()) return STATE.get().segment.byteSize();
     State s = BRIDGE.get();
     return s == null ? 0 : s.segment.byteSize();
   }
 
   private static State getOrCreateState() {
-    if (STATE.isBound()) {
-      return STATE.get();
-    }
     State s = BRIDGE.get();
     if (s == null) {
       s = new State();

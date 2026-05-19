@@ -1,5 +1,7 @@
 package org.grimmory.pdfium4j.internal;
 
+import static java.lang.foreign.ValueLayout.JAVA_DOUBLE;
+import static org.grimmory.pdfium4j.internal.FfmHelper.C_BOOL;
 import static org.grimmory.pdfium4j.internal.FfmHelper.C_INT;
 import static org.grimmory.pdfium4j.internal.FfmHelper.C_LONG;
 import static org.grimmory.pdfium4j.internal.FfmHelper.C_POINTER;
@@ -161,4 +163,213 @@ public final class EditBindings {
           C_INT.withName("bits_per_pixel"),
           C_INT.withName("colorspace"),
           C_INT.withName("marked_content_id"));
+
+  private static final StableValue<MethodHandle> FPDFPageObj_NewImageObj_V = StableValue.of();
+
+  public static MethodHandle fpdfPageObjNewImageObj() {
+    return FPDFPageObj_NewImageObj_V.orElseSet(
+        () -> find("FPDFPageObj_NewImageObj", FunctionDescriptor.of(C_POINTER, C_POINTER), false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFImageObj_SetBitmap_V = StableValue.of();
+
+  public static MethodHandle fpdfImageObjSetBitmap() {
+    return FPDFImageObj_SetBitmap_V.orElseSet(
+        () ->
+            find(
+                "FPDFImageObj_SetBitmap",
+                FunctionDescriptor.of(C_INT, C_POINTER, C_INT, C_POINTER, C_POINTER),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFImageObj_SetMatrix_V = StableValue.of();
+
+  public static MethodHandle fpdfImageObjSetMatrix() {
+    return FPDFImageObj_SetMatrix_V.orElseSet(
+        () ->
+            find(
+                "FPDFImageObj_SetMatrix",
+                FunctionDescriptor.of(
+                    C_INT,
+                    C_POINTER,
+                    JAVA_DOUBLE,
+                    JAVA_DOUBLE,
+                    JAVA_DOUBLE,
+                    JAVA_DOUBLE,
+                    JAVA_DOUBLE,
+                    JAVA_DOUBLE),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFImageObj_LoadJpegFileInline_V =
+      StableValue.of();
+
+  public static MethodHandle fpdfImageObjLoadJpegFileInline() {
+    return FPDFImageObj_LoadJpegFileInline_V.orElseSet(
+        () ->
+            find(
+                "FPDFImageObj_LoadJpegFileInline",
+                FunctionDescriptor.of(C_INT, C_POINTER, C_INT, C_POINTER, C_POINTER),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_Flatten_V = StableValue.of();
+
+  public static MethodHandle fpdfPageFlatten() {
+    return FPDFPage_Flatten_V.orElseSet(
+        () -> find("FPDFPage_Flatten", FunctionDescriptor.of(C_INT, C_POINTER, C_INT), false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_GetMediaBox_V = StableValue.of();
+
+  public static MethodHandle fpdfPageGetMediaBox() {
+    return FPDFPage_GetMediaBox_V.orElseSet(
+        () ->
+            find(
+                "FPDFPage_GetMediaBox",
+                FunctionDescriptor.of(
+                    C_BOOL, C_POINTER, C_POINTER, C_POINTER, C_POINTER, C_POINTER),
+                true));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_SetMediaBox_V = StableValue.of();
+
+  public static MethodHandle fpdfPageSetMediaBox() {
+    return FPDFPage_SetMediaBox_V.orElseSet(
+        () ->
+            find(
+                "FPDFPage_SetMediaBox",
+                FunctionDescriptor.ofVoid(
+                    C_POINTER,
+                    ValueLayout.JAVA_FLOAT,
+                    ValueLayout.JAVA_FLOAT,
+                    ValueLayout.JAVA_FLOAT,
+                    ValueLayout.JAVA_FLOAT),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_GetCropBox_V = StableValue.of();
+
+  public static MethodHandle fpdfPageGetCropBox() {
+    return FPDFPage_GetCropBox_V.orElseSet(
+        () ->
+            find(
+                "FPDFPage_GetCropBox",
+                FunctionDescriptor.of(
+                    C_BOOL, C_POINTER, C_POINTER, C_POINTER, C_POINTER, C_POINTER),
+                true));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_SetCropBox_V = StableValue.of();
+
+  public static MethodHandle fpdfPageSetCropBox() {
+    return FPDFPage_SetCropBox_V.orElseSet(
+        () ->
+            find(
+                "FPDFPage_SetCropBox",
+                FunctionDescriptor.ofVoid(
+                    C_POINTER,
+                    ValueLayout.JAVA_FLOAT,
+                    ValueLayout.JAVA_FLOAT,
+                    ValueLayout.JAVA_FLOAT,
+                    ValueLayout.JAVA_FLOAT),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPageObj_CreateNewPath_V = StableValue.of();
+
+  public static MethodHandle fpdfPageObjCreateNewPath() {
+    return FPDFPageObj_CreateNewPath_V.orElseSet(
+        () ->
+            find(
+                "FPDFPageObj_CreateNewPath",
+                FunctionDescriptor.of(C_POINTER, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPath_LineTo_V = StableValue.of();
+
+  public static MethodHandle fpdfPathLineTo() {
+    return FPDFPath_LineTo_V.orElseSet(
+        () ->
+            find(
+                "FPDFPath_LineTo",
+                FunctionDescriptor.of(
+                    C_BOOL, C_POINTER, ValueLayout.JAVA_FLOAT, ValueLayout.JAVA_FLOAT),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPath_ClosePath_V = StableValue.of();
+
+  public static MethodHandle fpdfPathClosePath() {
+    return FPDFPath_ClosePath_V.orElseSet(
+        () -> find("FPDFPath_Close", FunctionDescriptor.of(C_BOOL, C_POINTER), false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPath_SetDrawMode_V = StableValue.of();
+
+  public static MethodHandle fpdfPathSetDrawMode() {
+    return FPDFPath_SetDrawMode_V.orElseSet(
+        () ->
+            find(
+                "FPDFPath_SetDrawMode",
+                FunctionDescriptor.of(C_BOOL, C_POINTER, C_INT, C_BOOL),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPath_SetFillColor_V = StableValue.of();
+
+  public static MethodHandle fpdfPathSetFillColor() {
+    return FPDFPath_SetFillColor_V.orElseSet(
+        () ->
+            find(
+                "FPDFPageObj_SetFillColor",
+                FunctionDescriptor.of(C_BOOL, C_POINTER, C_INT, C_INT, C_INT, C_INT),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_InsertObject_V = StableValue.of();
+
+  public static MethodHandle fpdfPageInsertObject() {
+    return FPDFPage_InsertObject_V.orElseSet(
+        () ->
+            find("FPDFPage_InsertObject", FunctionDescriptor.ofVoid(C_POINTER, C_POINTER), false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_GenerateContent_V = StableValue.of();
+
+  public static MethodHandle fpdfPageGenerateContent() {
+    return FPDFPage_GenerateContent_V.orElseSet(
+        () -> find("FPDFPage_GenerateContent", FunctionDescriptor.of(C_BOOL, C_POINTER), false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPageObj_GetBounds_V = StableValue.of();
+
+  public static MethodHandle fpdfPageObjGetBounds() {
+    return FPDFPageObj_GetBounds_V.orElseSet(
+        () ->
+            find(
+                "FPDFPageObj_GetBounds",
+                FunctionDescriptor.of(
+                    C_BOOL, C_POINTER, C_POINTER, C_POINTER, C_POINTER, C_POINTER),
+                true));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPage_RemoveObject_V = StableValue.of();
+
+  public static MethodHandle fpdfPageRemoveObject() {
+    return FPDFPage_RemoveObject_V.orElseSet(
+        () ->
+            find(
+                "FPDFPage_RemoveObject",
+                FunctionDescriptor.of(C_BOOL, C_POINTER, C_POINTER),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDFPageObj_Destroy_V = StableValue.of();
+
+  public static MethodHandle fpdfPageObjDestroy() {
+    return FPDFPageObj_Destroy_V.orElseSet(
+        () -> find("FPDFPageObj_Destroy", FunctionDescriptor.ofVoid(C_POINTER), false));
+  }
 }

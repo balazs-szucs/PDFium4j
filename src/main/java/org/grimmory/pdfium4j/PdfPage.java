@@ -6,14 +6,22 @@ import static java.lang.foreign.ValueLayout.JAVA_FLOAT;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import org.grimmory.pdfium4j.exception.PdfiumException;
 import org.grimmory.pdfium4j.exception.PdfiumRenderException;
@@ -27,13 +35,16 @@ import org.grimmory.pdfium4j.internal.TextBindings;
 import org.grimmory.pdfium4j.internal.ThumbnailBindings;
 import org.grimmory.pdfium4j.internal.ViewBindings;
 import org.grimmory.pdfium4j.model.AnnotationType;
+import org.grimmory.pdfium4j.model.BitmapSlab;
 import org.grimmory.pdfium4j.model.EmbeddedImage;
 import org.grimmory.pdfium4j.model.NativeBitmap;
+import org.grimmory.pdfium4j.model.PageBox;
 import org.grimmory.pdfium4j.model.PageSize;
 import org.grimmory.pdfium4j.model.PdfAnnotation;
 import org.grimmory.pdfium4j.model.PdfLink;
 import org.grimmory.pdfium4j.model.PdfStructureElement;
 import org.grimmory.pdfium4j.model.RenderFlags;
+import org.grimmory.pdfium4j.model.RenderProfile;
 import org.grimmory.pdfium4j.model.RenderResult;
 import org.grimmory.pdfium4j.model.TextCharInfo;
 
@@ -42,27 +53,68 @@ public final class PdfPage implements AutoCloseable {
 
   private static final int OPAQUE_WHITE = 0xFFFFFFFF;
   private static final int BYTES_PER_PIXEL = 4; // RGBA
+  private static final int DEFAULT_PROGRESSIVE_SLICE_MICROS = 3800;
 
   private static final VarHandle REF_COUNT;
+  private static final MemorySegment PAUSE_CALLBACK_STUB;
+
+  private static final StructLayout PAUSE_STATE_LAYOUT =
+      MemoryLayout.structLayout(
+          ValueLayout.JAVA_LONG.withName("deadlineNanos"),
+          ValueLayout.JAVA_INT.withName("cancelled"),
+          MemoryLayout.paddingLayout(4));
+
+  private static final VarHandle VH_DEADLINE =
+      PAUSE_STATE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("deadlineNanos"));
+  private static final VarHandle VH_CANCELLED =
+      PAUSE_STATE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("cancelled"));
+
+  private static final MethodHandle MH_BITMAP_CREATE_EX = BitmapBindings.fpdfBitmapCreateEx();
+  private static final MethodHandle MH_BITMAP_FILL_RECT = BitmapBindings.fpdfBitmapFillRect();
+  private static final MethodHandle MH_RENDER_PAGE_BITMAP = ViewBindings.fpdfRenderPageBitmap();
+  private static final MethodHandle MH_RENDER_PAGE_WITH_MATRIX =
+      ViewBindings.fpdfRenderPageBitmapWithMatrix();
+  private static final MethodHandle MH_BITMAP_DESTROY = BitmapBindings.fpdfBitmapDestroy();
+  private static final MethodHandle MH_RENDER_PAGE_START = ViewBindings.fpdfRenderPageBitmapStart();
+  private static final MethodHandle MH_RENDER_PAGE_CONTINUE = ViewBindings.fpdfRenderPageContinue();
+  private static final MethodHandle MH_RENDER_PAGE_CLOSE = ViewBindings.fpdfRenderPageClose();
 
   static {
     try {
       REF_COUNT = MethodHandles.lookup().findVarHandle(PdfPage.class, "refCount", int.class);
+      MethodHandle pauseMh =
+          MethodHandles.lookup()
+              .findStatic(
+                  PdfPage.class,
+                  "needToPauseNow",
+                  MethodType.methodType(int.class, MemorySegment.class));
+      PAUSE_CALLBACK_STUB =
+          FfmHelper.LINKER.upcallStub(
+              pauseMh, FunctionDescriptor.of(FfmHelper.C_INT, FfmHelper.C_POINTER), Arena.global());
     } catch (ReflectiveOperationException e) {
       throw new ExceptionInInitializerError(e);
     }
   }
 
+  private static int needToPauseNow(MemorySegment pauseStruct) {
+    MemorySegment userPtr = (MemorySegment) ViewBindings.IFSDK_PAUSE_USER.get(pauseStruct, 0L);
+    if (FfmHelper.isNull(userPtr)) return 0;
+    MemorySegment state = userPtr.reinterpret(PAUSE_STATE_LAYOUT.byteSize());
+    if ((int) VH_CANCELLED.get(state, 0L) != 0) {
+      return 1;
+    }
+    return System.nanoTime() >= (long) VH_DEADLINE.get(state, 0L) ? 1 : 0;
+  }
+
   private final MemorySegment handle;
+  private final MemorySegment docHandle;
   private final Thread ownerThread;
   private final long maxRenderPixels;
   private final Consumer<PdfPage> onClose;
   private final Runnable onModified;
 
   @SuppressWarnings("PMD.UnusedPrivateField") // accessed via VarHandle REF_COUNT
-  private int refCount = 1;
-
-  private volatile boolean closedByUser = false;
+  private volatile int refCount = 1;
 
   private volatile boolean closed = false;
 
@@ -90,11 +142,13 @@ public final class PdfPage implements AutoCloseable {
 
   PdfPage(
       MemorySegment handle,
+      MemorySegment docHandle,
       Thread ownerThread,
       long maxRenderPixels,
       Consumer<PdfPage> onClose,
       Runnable onModified) {
     this.handle = handle.reinterpret(ValueLayout.ADDRESS.byteSize());
+    this.docHandle = docHandle;
     this.ownerThread = ownerThread;
     this.maxRenderPixels = maxRenderPixels;
     this.onClose = onClose;
@@ -121,6 +175,36 @@ public final class PdfPage implements AutoCloseable {
 
   public RenderResult render(int dpi, RenderFlags flags) {
     return render(dpi, flags, OPAQUE_WHITE);
+  }
+
+  public RenderResult render(int dpi, RenderProfile profile) {
+    return render(dpi, RenderFlags.forProfile(profile), OPAQUE_WHITE);
+  }
+
+  public RenderResult render(int dpi, RenderProfile profile, int background) {
+    return render(dpi, RenderFlags.forProfile(profile), background);
+  }
+
+  public CompletableFuture<RenderResult> renderAsync(int dpi, RenderFlags flags) {
+    try {
+      return CompletableFuture.completedFuture(render(dpi, flags));
+    } catch (Throwable t) {
+      return CompletableFuture.failedFuture(t);
+    }
+  }
+
+  public CompletableFuture<RenderResult> renderAsync(
+      int dpi, RenderFlags flags, Executor executor) {
+    return CompletableFuture.supplyAsync(() -> render(dpi, flags), executor);
+  }
+
+  public CompletableFuture<RenderResult> renderAsync(int dpi, RenderProfile profile) {
+    return renderAsync(dpi, RenderFlags.forProfile(profile));
+  }
+
+  public CompletableFuture<RenderResult> renderAsync(
+      int dpi, RenderProfile profile, Executor executor) {
+    return renderAsync(dpi, RenderFlags.forProfile(profile), executor);
   }
 
   public RenderResult render(int dpi, RenderFlags flags, int background) {
@@ -158,6 +242,39 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
+  public NativeBitmap renderNative(int dpi, RenderProfile profile) {
+    return renderNative(dpi, RenderFlags.forProfile(profile));
+  }
+
+  public CompletableFuture<NativeBitmap> renderNativeAsync(int dpi, RenderFlags flags) {
+    try {
+      return CompletableFuture.completedFuture(renderNative(dpi, flags));
+    } catch (Throwable t) {
+      return CompletableFuture.failedFuture(t);
+    }
+  }
+
+  public CompletableFuture<NativeBitmap> renderNativeAsync(
+      int dpi, RenderFlags flags, Executor executor) {
+    return CompletableFuture.supplyAsync(() -> renderNative(dpi, flags), executor);
+  }
+
+  public void renderToSlab(BitmapSlab slab, int dpi, RenderFlags flags, int background) {
+    ensureOpen();
+    if (slab == null) {
+      throw new IllegalArgumentException("slab must not be null");
+    }
+    PageSize pageSize = size();
+    int w = pageSize.widthPixels(dpi);
+    int h = pageSize.heightPixels(dpi);
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    ensureRenderBudget(w, h);
+    MemorySegment dest = slab.resizeRgba(w, h);
+    renderTo(dest, w, h, slab.stride(), flags.value(), background);
+  }
+
   public void renderTo(MemorySegment dest, int w, int h, int stride, int flags, int background) {
     ensureOpen();
     if (w <= 0 || h <= 0) return;
@@ -178,26 +295,292 @@ public final class PdfPage implements AutoCloseable {
     MemorySegment bitmap = MemorySegment.NULL;
     try {
       // BGRA format = 4
-      bitmap =
-          (MemorySegment) BitmapBindings.fpdfBitmapCreateEx().invokeExact(w, h, 4, dest, stride);
+      bitmap = (MemorySegment) MH_BITMAP_CREATE_EX.invokeExact(w, h, 4, dest, stride);
       if (FfmHelper.isNull(bitmap)) {
         throw new PdfiumRenderException("fpdfbitmapCreateEx failed");
       }
 
-      BitmapBindings.fpdfBitmapFillRect().invokeExact(bitmap, 0, 0, w, h, (long) background);
+      MH_BITMAP_FILL_RECT.invokeExact(bitmap, 0, 0, w, h, (long) background);
 
-      ViewBindings.fpdfRenderPageBitmap().invokeExact(bitmap, handle, 0, 0, w, h, 0, flags);
+      MH_RENDER_PAGE_BITMAP.invokeExact(bitmap, handle, 0, 0, w, h, 0, flags);
     } catch (Throwable t) {
       throw new PdfiumRenderException("Failed to render page to segment", t);
     } finally {
       if (!FfmHelper.isNull(bitmap)) {
         try {
-          BitmapBindings.fpdfBitmapDestroy().invokeExact(bitmap);
+          MH_BITMAP_DESTROY.invokeExact(bitmap);
         } catch (Throwable e) {
           PdfiumLibrary.ignore(e);
         }
       }
     }
+  }
+
+  /**
+   * Renders the page directly into a {@link ByteBuffer} using the specified DPI.
+   *
+   * @param target the target ByteBuffer (must be direct or backed by an array)
+   * @param dpi target rendering resolution (DPI)
+   */
+  public void renderToBuffer(ByteBuffer target, int dpi) {
+    renderToBuffer(target, dpi, RenderFlags.DEFAULT);
+  }
+
+  /**
+   * Renders the page directly into a {@link ByteBuffer} using the specified DPI and flags.
+   *
+   * @param target the target ByteBuffer
+   * @param dpi target rendering resolution
+   * @param flags rendering flags
+   */
+  public void renderToBuffer(ByteBuffer target, int dpi, RenderFlags flags) {
+    renderToBuffer(target, dpi, flags, OPAQUE_WHITE);
+  }
+
+  /**
+   * Renders the page directly into a {@link ByteBuffer} using the specified DPI, flags, and
+   * background color.
+   *
+   * @param target the target ByteBuffer
+   * @param dpi target rendering resolution
+   * @param flags rendering flags
+   * @param background background color ARGB
+   */
+  public void renderToBuffer(ByteBuffer target, int dpi, RenderFlags flags, int background) {
+    ensureOpen();
+    PageSize pageSize = size();
+    int w = pageSize.widthPixels(dpi);
+    int h = pageSize.heightPixels(dpi);
+    if (w <= 0 || h <= 0) return;
+    ensureRenderBudget(w, h);
+    int stride = w * BYTES_PER_PIXEL;
+    renderToBuffer(target, w, h, stride, flags, background);
+  }
+
+  /**
+   * Renders the page directly into a {@link ByteBuffer} with explicit dimensions.
+   *
+   * @param target the target ByteBuffer
+   * @param w target width in pixels
+   * @param h target height in pixels
+   * @param stride stride in bytes
+   * @param flags rendering flags
+   * @param background background color ARGB
+   */
+  public void renderToBuffer(
+      ByteBuffer target, int w, int h, int stride, RenderFlags flags, int background) {
+    ensureOpen();
+    if (target == null) {
+      throw new IllegalArgumentException("target buffer must not be null");
+    }
+    MemorySegment segment = MemorySegment.ofBuffer(target);
+    renderTo(segment, w, h, stride, flags.value(), background);
+  }
+
+  public RenderResult renderViewport(
+      float viewX,
+      float viewY,
+      float viewWidth,
+      float viewHeight,
+      int dpi,
+      RenderFlags flags,
+      int background) {
+    ensureOpen();
+    if (viewWidth <= 0 || viewHeight <= 0) {
+      throw new IllegalArgumentException("Viewport width and height must be positive");
+    }
+    float scale = dpi / 72.0f;
+    int w = Math.max(1, Math.round(viewWidth * scale));
+    int h = Math.max(1, Math.round(viewHeight * scale));
+    ensureRenderBudget(w, h);
+
+    int stride = Math.multiplyExact(w, BYTES_PER_PIXEL);
+    try (var _ = ScratchBuffer.acquireScope()) {
+      MemorySegment dest = ScratchBuffer.get(Math.multiplyExact((long) stride, (long) h));
+      renderViewportTo(
+          dest, w, h, stride, viewX, viewY, viewWidth, viewHeight, dpi, flags, background);
+      return new RenderResult(w, h, dest.toArray(JAVA_BYTE));
+    } catch (PdfiumException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumRenderException("Failed to render viewport", t);
+    }
+  }
+
+  public RenderResult renderViewport(
+      float viewX, float viewY, float viewWidth, float viewHeight, int dpi, RenderFlags flags) {
+    return renderViewport(viewX, viewY, viewWidth, viewHeight, dpi, flags, OPAQUE_WHITE);
+  }
+
+  public void renderViewportTo(
+      MemorySegment dest,
+      int bitmapWidth,
+      int bitmapHeight,
+      int stride,
+      float viewX,
+      float viewY,
+      float viewWidth,
+      float viewHeight,
+      int dpi,
+      RenderFlags flags,
+      int background) {
+    ensureOpen();
+    if (bitmapWidth <= 0 || bitmapHeight <= 0) {
+      throw new IllegalArgumentException("bitmapWidth and bitmapHeight must be positive");
+    }
+    if (viewWidth <= 0 || viewHeight <= 0) {
+      throw new IllegalArgumentException("Viewport width and height must be positive");
+    }
+    if (ViewBindings.fpdfRenderPageBitmapWithMatrix() == null) {
+      throw new UnsupportedOperationException("FPDF_RenderPageBitmapWithMatrix is unavailable");
+    }
+
+    int minStride = Math.multiplyExact(bitmapWidth, BYTES_PER_PIXEL);
+    if (stride < minStride) {
+      throw new IllegalArgumentException(
+          "stride must be >= width * " + BYTES_PER_PIXEL + ", got: " + stride);
+    }
+    long requiredSize = (long) stride * bitmapHeight;
+    if (dest.byteSize() < requiredSize) {
+      throw new IllegalArgumentException(
+          "Destination segment too small: expected %d bytes, got %d"
+              .formatted(requiredSize, dest.byteSize()));
+    }
+
+    MemorySegment bitmap = MemorySegment.NULL;
+    try (var _ = ScratchBuffer.acquireScope()) {
+      bitmap =
+          (MemorySegment)
+              MH_BITMAP_CREATE_EX.invokeExact(bitmapWidth, bitmapHeight, 4, dest, stride);
+      if (FfmHelper.isNull(bitmap)) {
+        throw new PdfiumRenderException("fpdfbitmapCreateEx failed");
+      }
+      MH_BITMAP_FILL_RECT.invokeExact(bitmap, 0, 0, bitmapWidth, bitmapHeight, (long) background);
+
+      float scale = dpi / 72.0f;
+      MemorySegment matrix = ScratchBuffer.get(ViewBindings.FS_MATRIX_LAYOUT.byteSize());
+      matrix.set(JAVA_FLOAT, 0, scale);
+      matrix.set(JAVA_FLOAT, 4, 0.0f);
+      matrix.set(JAVA_FLOAT, 8, 0.0f);
+      matrix.set(JAVA_FLOAT, 12, -scale);
+      matrix.set(JAVA_FLOAT, 16, -viewX * scale);
+      matrix.set(JAVA_FLOAT, 20, (viewY + viewHeight) * scale);
+
+      MemorySegment clip = ScratchBuffer.get(ViewBindings.FS_RECTF_LAYOUT.byteSize());
+      clip.set(JAVA_FLOAT, 0, 0.0f);
+      clip.set(JAVA_FLOAT, 4, 0.0f);
+      clip.set(JAVA_FLOAT, 8, (float) bitmapWidth);
+      clip.set(JAVA_FLOAT, 12, (float) bitmapHeight);
+
+      MH_RENDER_PAGE_WITH_MATRIX.invokeExact(bitmap, handle, matrix, clip, flags.value());
+    } catch (Throwable t) {
+      throw new PdfiumRenderException("Failed to render viewport to segment", t);
+    } finally {
+      if (!FfmHelper.isNull(bitmap)) {
+        try {
+          MH_BITMAP_DESTROY.invokeExact(bitmap);
+        } catch (Throwable e) {
+          PdfiumLibrary.ignore(e);
+        }
+      }
+    }
+  }
+
+  public void renderProgressiveTo(
+      MemorySegment dest, int w, int h, int stride, int flags, int background, int sliceMicros) {
+    ensureOpen();
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    if (ViewBindings.fpdfRenderPageBitmapStart() == null
+        || ViewBindings.fpdfRenderPageContinue() == null
+        || ViewBindings.fpdfRenderPageClose() == null) {
+      throw new UnsupportedOperationException("Progressive PDFium render API is unavailable");
+    }
+
+    int minStride = Math.multiplyExact(w, BYTES_PER_PIXEL);
+    if (stride < minStride) {
+      throw new IllegalArgumentException(
+          "stride must be >= width * " + BYTES_PER_PIXEL + ", got: " + stride);
+    }
+    long requiredSize = (long) stride * h;
+    if (dest.byteSize() < requiredSize) {
+      throw new IllegalArgumentException(
+          "Destination segment too small: expected %d bytes, got %d"
+              .formatted(requiredSize, dest.byteSize()));
+    }
+
+    int effectiveSliceMicros = sliceMicros > 0 ? sliceMicros : DEFAULT_PROGRESSIVE_SLICE_MICROS;
+
+    MemorySegment bitmap = MemorySegment.NULL;
+    try (Arena stateArena = Arena.ofConfined();
+        var _ = ScratchBuffer.acquireScope()) {
+      MemorySegment state = stateArena.allocate(PAUSE_STATE_LAYOUT);
+      MemorySegment pause = ScratchBuffer.get(ViewBindings.IFSDK_PAUSE_LAYOUT.byteSize());
+
+      ViewBindings.IFSDK_PAUSE_VERSION.set(pause, 0L, 1);
+      ViewBindings.IFSDK_PAUSE_CALLBACK.set(pause, 0L, PAUSE_CALLBACK_STUB);
+      ViewBindings.IFSDK_PAUSE_USER.set(pause, 0L, state);
+
+      bitmap = (MemorySegment) MH_BITMAP_CREATE_EX.invokeExact(w, h, 4, dest, stride);
+      if (FfmHelper.isNull(bitmap)) {
+        throw new PdfiumRenderException("fpdfbitmapCreateEx failed");
+      }
+      MH_BITMAP_FILL_RECT.invokeExact(bitmap, 0, 0, w, h, (long) background);
+
+      VH_CANCELLED.set(state, 0L, 0);
+      VH_DEADLINE.set(state, 0L, System.nanoTime() + (long) effectiveSliceMicros * 1000L);
+
+      int status =
+          (int) MH_RENDER_PAGE_START.invokeExact(bitmap, handle, 0, 0, w, h, 0, flags, pause);
+
+      while (status == ViewBindings.FPDF_RENDER_TOBECONTINUED) {
+        VH_DEADLINE.set(state, 0L, System.nanoTime() + (long) effectiveSliceMicros * 1000L);
+        status = (int) MH_RENDER_PAGE_CONTINUE.invokeExact(handle, pause);
+      }
+
+      if (status == ViewBindings.FPDF_RENDER_FAILED) {
+        throw new PdfiumRenderException("Progressive render failed");
+      }
+    } catch (PdfiumException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw new PdfiumRenderException("Failed progressive render", t);
+    } finally {
+      try {
+        if (MH_RENDER_PAGE_CLOSE != null) {
+          MH_RENDER_PAGE_CLOSE.invokeExact(handle);
+        }
+      } catch (Throwable e) {
+        PdfiumLibrary.ignore(e);
+      }
+      if (!FfmHelper.isNull(bitmap)) {
+        try {
+          MH_BITMAP_DESTROY.invokeExact(bitmap);
+        } catch (Throwable e) {
+          PdfiumLibrary.ignore(e);
+        }
+      }
+    }
+  }
+
+  public void renderProgressiveTo(
+      MemorySegment dest, int w, int h, int stride, RenderFlags flags, int background) {
+    renderProgressiveTo(
+        dest, w, h, stride, flags.value(), background, DEFAULT_PROGRESSIVE_SLICE_MICROS);
+  }
+
+  public CompletableFuture<Void> renderProgressiveToAsync(
+      MemorySegment dest,
+      int w,
+      int h,
+      int stride,
+      int flags,
+      int background,
+      int sliceMicros,
+      Executor executor) {
+    return CompletableFuture.runAsync(
+        () -> renderProgressiveTo(dest, w, h, stride, flags, background, sliceMicros), executor);
   }
 
   public String extractText() {
@@ -309,6 +692,10 @@ public final class PdfPage implements AutoCloseable {
     return renderBounded(dpi, maxWidth, maxHeight, RenderFlags.DEFAULT);
   }
 
+  public RenderResult renderBounded(int dpi, int maxWidth, int maxHeight, RenderProfile profile) {
+    return renderBounded(dpi, maxWidth, maxHeight, RenderFlags.forProfile(profile));
+  }
+
   public RenderResult renderBounded(int dpi, int maxWidth, int maxHeight, RenderFlags flags) {
     ensureOpen();
     if (maxWidth <= 0 || maxHeight <= 0) {
@@ -338,6 +725,10 @@ public final class PdfPage implements AutoCloseable {
 
   public RenderResult renderSafe(int dpi, long maxMemoryBytes) {
     return renderSafe(dpi, maxMemoryBytes, RenderFlags.DEFAULT);
+  }
+
+  public RenderResult renderSafe(int dpi, long maxMemoryBytes, RenderProfile profile) {
+    return renderSafe(dpi, maxMemoryBytes, RenderFlags.forProfile(profile));
   }
 
   public RenderResult renderSafe(int dpi, long maxMemoryBytes, RenderFlags flags) {
@@ -382,7 +773,7 @@ public final class PdfPage implements AutoCloseable {
       }
     }
 
-    RenderFlags thumbnailFlags = RenderFlags.builder().annotations(false).antiAlias(true).build();
+    RenderFlags thumbnailFlags = RenderFlags.forProfile(RenderProfile.THUMBNAIL);
     return renderBounded(150, maxDimension, maxDimension, thumbnailFlags);
   }
 
@@ -401,7 +792,7 @@ public final class PdfPage implements AutoCloseable {
       h = Math.max(1, (int) Math.round(h * scale));
     }
 
-    int flags = RenderFlags.builder().annotations(false).antiAlias(true).build().value();
+    int flags = RenderFlags.forProfile(RenderProfile.THUMBNAIL).value();
     renderTo(dest, w, h, w * 4, flags, OPAQUE_WHITE);
   }
 
@@ -837,13 +1228,11 @@ public final class PdfPage implements AutoCloseable {
   @Override
   public synchronized void close() {
     ensureThreadConfinement();
-    if (closedByUser) return;
-    closedByUser = true;
     release();
   }
 
   private void ensureOpen() {
-    if (closedByUser || closed) throw new IllegalStateException("PdfPage is already closed");
+    if (closed) throw new IllegalStateException("PdfPage is already closed");
     ensureThreadConfinement();
   }
 
@@ -879,6 +1268,329 @@ public final class PdfPage implements AutoCloseable {
     }
   }
 
+  /**
+   * Flattens all annotations and form fields in this page.
+   *
+   * @param interactiveFields whether to flatten form fields (true) or annotations only (false)
+   * @return true if successful
+   */
+  public boolean flatten(boolean interactiveFields) {
+    ensureOpen();
+    try {
+      int flag = interactiveFields ? 2 : 1;
+      int result = (int) EditBindings.fpdfPageFlatten().invokeExact(handle, flag);
+      if (result > 0) {
+        onModified.run();
+        return true;
+      }
+      return false;
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to flatten page", t);
+    }
+  }
+
+  /**
+   * Flattens the entire page into a single uneditable raster image layer. This permanently replaces
+   * all scalable vectors, text, and annotations with a flat bitmap.
+   *
+   * @param scaleFactor the resolution scale multiplier (e.g. 2.0f for 144 DPI equivalent)
+   */
+  public void flattenToImage(float scaleFactor) {
+    ensureOpen();
+    try {
+      int width = (int) Math.ceil(size().width() * scaleFactor);
+      int height = (int) Math.ceil(size().height() * scaleFactor);
+
+      MemorySegment bitmap =
+          (MemorySegment) MH_BITMAP_CREATE_EX.invokeExact(width, height, 4, MemorySegment.NULL, 0);
+      if (FfmHelper.isNull(bitmap)) {
+        throw new PdfiumException("Failed to allocate bitmap for flattenToImage");
+      }
+
+      try {
+        MH_BITMAP_FILL_RECT.invokeExact(bitmap, 0, 0, width, height, 0xFFFFFFFFL);
+
+        MH_RENDER_PAGE_BITMAP.invokeExact(
+            bitmap, handle, 0, 0, width, height, 0, 1 /* FPDF_ANNOT */);
+
+        int count = (int) EditBindings.fpdfPageCountObjects().invokeExact(handle);
+        for (int i = count - 1; i >= 0; i--) {
+          MemorySegment obj =
+              (MemorySegment) EditBindings.fpdfPageGetObject().invokeExact(handle, i);
+          if (!FfmHelper.isNull(obj)) {
+            int removed = (int) EditBindings.fpdfPageRemoveObject().invokeExact(handle, obj);
+            if (removed != 0) {
+              EditBindings.fpdfPageObjDestroy().invokeExact(obj);
+            }
+          }
+        }
+
+        MemorySegment imageObj =
+            (MemorySegment) EditBindings.fpdfPageObjNewImageObj().invokeExact(docHandle);
+        if (FfmHelper.isNull(imageObj)) {
+          throw new PdfiumException("Failed to create new image object");
+        }
+
+        int setBitmap =
+            (int)
+                EditBindings.fpdfImageObjSetBitmap()
+                    .invokeExact(MemorySegment.NULL, 0, imageObj, bitmap);
+        if (setBitmap == 0) {
+          throw new PdfiumException("Failed to set bitmap into image object");
+        }
+
+        int setMatrix =
+            (int)
+                EditBindings.fpdfImageObjSetMatrix()
+                    .invokeExact(
+                        imageObj,
+                        (double) size().width(),
+                        0.0,
+                        0.0,
+                        (double) size().height(),
+                        0.0,
+                        0.0);
+        if (setMatrix == 0) {
+          throw new PdfiumException("Failed to set image matrix");
+        }
+
+        EditBindings.fpdfPageInsertObject().invokeExact(handle, imageObj);
+
+        int generated = (int) EditBindings.fpdfPageGenerateContent().invokeExact(handle);
+        if (generated == 0) {
+          throw new PdfiumException("Failed to regenerate page content");
+        }
+
+        onModified.run();
+      } finally {
+        MH_BITMAP_DESTROY.invokeExact(bitmap);
+      }
+    } catch (Throwable t) {
+      if (t instanceof PdfiumException pe) throw pe;
+      throw new PdfiumException("Failed to flatten page to image layer", t);
+    }
+  }
+
+  /**
+   * Inserts a raw BGRA pixel array into the page as a single image layer, stretched to the page
+   * bounds. This is useful for high-performance Image-to-PDF conversion.
+   *
+   * @param bgraData the raw BGRA pixel data
+   * @param imgWidth the pixel width of the image
+   * @param imgHeight the pixel height of the image
+   */
+  public void insertImage(byte[] bgraData, int imgWidth, int imgHeight) {
+    ensureOpen();
+    try {
+      MemorySegment bitmap =
+          (MemorySegment)
+              MH_BITMAP_CREATE_EX.invokeExact(imgWidth, imgHeight, 4, MemorySegment.NULL, 0);
+      if (FfmHelper.isNull(bitmap)) {
+        throw new PdfiumException("Failed to allocate bitmap for insertImage");
+      }
+
+      try {
+        MemorySegment buffer =
+            (MemorySegment) BitmapBindings.fpdfBitmapGetBuffer().invokeExact(bitmap);
+        buffer = buffer.reinterpret(bgraData.length);
+        MemorySegment.copy(bgraData, 0, buffer, JAVA_BYTE, 0, bgraData.length);
+
+        MemorySegment imageObj =
+            (MemorySegment) EditBindings.fpdfPageObjNewImageObj().invokeExact(docHandle);
+        if (FfmHelper.isNull(imageObj)) {
+          throw new PdfiumException("Failed to create new image object");
+        }
+
+        int setBitmap =
+            (int)
+                EditBindings.fpdfImageObjSetBitmap()
+                    .invokeExact(MemorySegment.NULL, 0, imageObj, bitmap);
+        if (setBitmap == 0) {
+          throw new PdfiumException("Failed to set bitmap into image object");
+        }
+
+        int setMatrix =
+            (int)
+                EditBindings.fpdfImageObjSetMatrix()
+                    .invokeExact(
+                        imageObj,
+                        (double) size().width(),
+                        0.0,
+                        0.0,
+                        (double) size().height(),
+                        0.0,
+                        0.0);
+        if (setMatrix == 0) {
+          throw new PdfiumException("Failed to set image matrix");
+        }
+
+        EditBindings.fpdfPageInsertObject().invokeExact(handle, imageObj);
+        int generated = (int) EditBindings.fpdfPageGenerateContent().invokeExact(handle);
+        if (generated == 0) {
+          throw new PdfiumException("Failed to regenerate page content");
+        }
+
+        onModified.run();
+      } finally {
+        MH_BITMAP_DESTROY.invokeExact(bitmap);
+      }
+    } catch (Throwable t) {
+      if (t instanceof PdfiumException pe) throw pe;
+      throw new PdfiumException("Failed to insert image", t);
+    }
+  }
+
+  /** Gets the CropBox page boundary box. */
+  public PageBox getCropBox() {
+    return getPageBox("CropBox");
+  }
+
+  /** Sets the CropBox page boundary box. */
+  public void setCropBox(float left, float bottom, float right, float top) {
+    setPageBox("CropBox", left, bottom, right, top);
+  }
+
+  /** Gets the MediaBox page boundary box. */
+  public PageBox getMediaBox() {
+    return getPageBox("MediaBox");
+  }
+
+  /** Sets the MediaBox page boundary box. */
+  public void setMediaBox(float left, float bottom, float right, float top) {
+    setPageBox("MediaBox", left, bottom, right, top);
+  }
+
+  private PageBox getPageBox(String type) {
+    ensureOpen();
+    try (var _ = ScratchBuffer.acquireScope()) {
+      MemorySegment base = ScratchBuffer.get(4 * JAVA_FLOAT.byteSize());
+      MemorySegment left = base.asSlice(0, JAVA_FLOAT.byteSize());
+      MemorySegment bottom = base.asSlice(4, JAVA_FLOAT.byteSize());
+      MemorySegment right = base.asSlice(8, JAVA_FLOAT.byteSize());
+      MemorySegment top = base.asSlice(12, JAVA_FLOAT.byteSize());
+
+      MethodHandle getter =
+          switch (type) {
+            case "MediaBox" -> EditBindings.fpdfPageGetMediaBox();
+            case "CropBox" -> EditBindings.fpdfPageGetCropBox();
+            default -> throw new IllegalArgumentException("Unknown box type: " + type);
+          };
+
+      int ok = (int) getter.invokeExact(handle, left, bottom, right, top);
+      if (ok == 0) {
+        // Fall back to size if box not set/fails
+        PageSize pageSize = size();
+        return new PageBox(0, 0, pageSize.width(), pageSize.height());
+      }
+      return new PageBox(
+          left.get(JAVA_FLOAT, 0),
+          bottom.get(JAVA_FLOAT, 0),
+          right.get(JAVA_FLOAT, 0),
+          top.get(JAVA_FLOAT, 0));
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to get " + type, t);
+    }
+  }
+
+  private void setPageBox(String type, float left, float bottom, float right, float top) {
+    ensureOpen();
+    try {
+      MethodHandle setter =
+          switch (type) {
+            case "MediaBox" -> EditBindings.fpdfPageSetMediaBox();
+            case "CropBox" -> EditBindings.fpdfPageSetCropBox();
+            default -> throw new IllegalArgumentException("Unknown box type: " + type);
+          };
+      setter.invokeExact(handle, left, bottom, right, top);
+      cachedSize = null; // Clear cached size since it might have changed
+      onModified.run();
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to set " + type, t);
+    }
+  }
+
+  /**
+   * Redacts the specified rectangular area. Any page objects intersecting this area will be
+   * permanently removed from the page, and a solid black rectangle will be drawn over it.
+   */
+  public void redact(float left, float bottom, float right, float top) {
+    redact(left, bottom, right, top, 0, 0, 0, 255);
+  }
+
+  /**
+   * Redacts the specified rectangular area. Any page objects intersecting this area will be
+   * permanently removed from the page, and a solid rectangle of the specified RGBA color will be
+   * drawn over it.
+   */
+  @SuppressWarnings("PMD.UnusedLocalVariable")
+  public void redact(float left, float bottom, float right, float top, int r, int g, int b, int a) {
+    ensureOpen();
+    try {
+      // 1. Remove intersecting objects
+      int count = (int) EditBindings.fpdfPageCountObjects().invokeExact(handle);
+      try (Arena arena = Arena.ofConfined()) {
+        MemorySegment objLeft = arena.allocate(JAVA_FLOAT);
+        MemorySegment objBottom = arena.allocate(JAVA_FLOAT);
+        MemorySegment objRight = arena.allocate(JAVA_FLOAT);
+        MemorySegment objTop = arena.allocate(JAVA_FLOAT);
+
+        for (int i = count - 1; i >= 0; i--) {
+          MemorySegment obj =
+              (MemorySegment) EditBindings.fpdfPageGetObject().invokeExact(handle, i);
+          if (FfmHelper.isNull(obj)) continue;
+
+          int ok =
+              (int)
+                  EditBindings.fpdfPageObjGetBounds()
+                      .invokeExact(obj, objLeft, objBottom, objRight, objTop);
+          if (ok > 0) {
+            float oLeft = objLeft.get(JAVA_FLOAT, 0);
+            float oBottom = objBottom.get(JAVA_FLOAT, 0);
+            float oRight = objRight.get(JAVA_FLOAT, 0);
+            float oTop = objTop.get(JAVA_FLOAT, 0);
+
+            // Simple intersection check
+            if (oLeft < right && oRight > left && oBottom < top && oTop > bottom) {
+              int removed = (int) EditBindings.fpdfPageRemoveObject().invokeExact(handle, obj);
+              if (removed > 0) {
+                EditBindings.fpdfPageObjDestroy().invokeExact(obj);
+              }
+            }
+          }
+        }
+      }
+
+      // 2. Draw cover rectangle path
+      MemorySegment path =
+          (MemorySegment) EditBindings.fpdfPageObjCreateNewPath().invokeExact(left, bottom);
+      if (FfmHelper.isNull(path)) {
+        throw new PdfiumException("Failed to create redaction path object");
+      }
+
+      int _ = (int) EditBindings.fpdfPathLineTo().invokeExact(path, right, bottom);
+      int _ = (int) EditBindings.fpdfPathLineTo().invokeExact(path, right, top);
+      int _ = (int) EditBindings.fpdfPathLineTo().invokeExact(path, left, top);
+      int _ = (int) EditBindings.fpdfPathClosePath().invokeExact(path);
+      int _ =
+          (int)
+              EditBindings.fpdfPathSetDrawMode()
+                  .invokeExact(path, 1, 0); // fillmode = 1, stroke = 0
+      int _ = (int) EditBindings.fpdfPathSetFillColor().invokeExact(path, r, g, b, a);
+
+      EditBindings.fpdfPageInsertObject().invokeExact(handle, path);
+
+      // 3. Regenerate page content
+      int generated = (int) EditBindings.fpdfPageGenerateContent().invokeExact(handle);
+      if (generated == 0) {
+        throw new PdfiumException("Failed to generate content after redaction");
+      }
+
+      onModified.run();
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to redact page area", t);
+    }
+  }
+
   private void closeCachedTextPage() {
     if (!FfmHelper.isNull(cachedTextPage)) {
       try {
@@ -888,6 +1600,54 @@ public final class PdfPage implements AutoCloseable {
       } finally {
         cachedTextPage = MemorySegment.NULL;
       }
+    }
+  }
+
+  /**
+   * Programmatically creates a new annotation on this page.
+   *
+   * @param type the type of the annotation (e.g. AnnotationType.HIGHLIGHT or AnnotationType.LINK)
+   * @param left left edge coordinate
+   * @param bottom bottom edge coordinate
+   * @param right right edge coordinate
+   * @param top top edge coordinate
+   * @param contents optional annotation content description
+   */
+  public void createAnnotation(
+      AnnotationType type, float left, float bottom, float right, float top, String contents) {
+    ensureOpen();
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment annot =
+          (MemorySegment) AnnotBindings.fpdfPageCreateAnnot().invokeExact(handle, type.code());
+      if (FfmHelper.isNull(annot)) {
+        throw new PdfiumException("Failed to create annotation of type: " + type);
+      }
+      try {
+        // Set Rect bounds
+        MemorySegment rectSeg = arena.allocate(AnnotBindings.FS_RECTF_LAYOUT);
+        rectSeg.set(JAVA_FLOAT, 0, left);
+        rectSeg.set(JAVA_FLOAT, 4, top);
+        rectSeg.set(JAVA_FLOAT, 8, right);
+        rectSeg.set(JAVA_FLOAT, 12, bottom);
+
+        int rectOk = (int) AnnotBindings.fpdfAnnotSetRect().invokeExact(annot, rectSeg);
+        if (rectOk == 0) {
+          throw new PdfiumException("Failed to set annotation rectangle bounds");
+        }
+
+        // Set Contents
+        if (contents != null) {
+          MemorySegment keyProbe = FfmHelper.toWideString(arena, "Contents");
+          MemorySegment valProbe = FfmHelper.toWideString(arena, contents);
+          int _ =
+              (int) AnnotBindings.fpdfAnnotSetStringValue().invokeExact(annot, keyProbe, valProbe);
+        }
+        onModified.run();
+      } finally {
+        AnnotBindings.fpdfPageCloseAnnot().invokeExact(annot);
+      }
+    } catch (Throwable t) {
+      throw new PdfiumException("Failed to create annotation on page", t);
     }
   }
 }

@@ -42,6 +42,33 @@ class PdfDocumentTest {
     }
   }
 
+  private static BufferedImage toBufferedImage(RenderResult result) {
+    long expectedBytes = (long) result.width() * result.height() * 4;
+    if (result.rgba().length < expectedBytes) {
+      throw new IllegalStateException(
+          "RGBA buffer too small: expected "
+              + expectedBytes
+              + " bytes for "
+              + result.width()
+              + "x"
+              + result.height()
+              + ", got "
+              + result.rgba().length);
+    }
+    BufferedImage img =
+        new BufferedImage(result.width(), result.height(), BufferedImage.TYPE_INT_ARGB);
+    int[] pixels = new int[result.width() * result.height()];
+    for (int i = 0; i < pixels.length; i++) {
+      int r = result.rgba()[i * 4] & 0xFF;
+      int g = result.rgba()[i * 4 + 1] & 0xFF;
+      int b = result.rgba()[i * 4 + 2] & 0xFF;
+      int a = result.rgba()[i * 4 + 3] & 0xFF;
+      pixels[i] = (a << 24) | (r << 16) | (g << 8) | b;
+    }
+    img.setRGB(0, 0, result.width(), result.height(), pixels, 0, result.width());
+    return img;
+  }
+
   @Test
   @EnabledIf("pdfiumAvailable")
   void openFromPath() throws IOException {
@@ -92,7 +119,7 @@ class PdfDocumentTest {
       assertNotNull(result.rgba());
       assertEquals(result.width() * result.height() * 4, result.rgba().length);
 
-      BufferedImage image = result.toBufferedImage();
+      BufferedImage image = toBufferedImage(result);
       assertEquals(result.width(), image.getWidth());
       assertEquals(result.height(), image.getHeight());
     }
@@ -1570,10 +1597,9 @@ class PdfDocumentTest {
     assertTrue(lenMatcher.find(), "XMP stream /Length should be present in dict");
     int declaredLength = Integer.parseInt(lenMatcher.group(1));
     assertTrue(declaredLength > 0, "XMP stream /Length should be positive");
-    int metaIdx = dictStart;
 
     // Find actual stream content between "stream\n" and "\nendstream"
-    int streamKeyword = savedText.indexOf("stream\n", metaIdx);
+    int streamKeyword = savedText.indexOf("stream\n", dictStart);
     assertTrue(streamKeyword > 0, "stream keyword should follow XMP object");
     int streamStart = streamKeyword + "stream\n".length();
     // Search for endstream in raw bytes from streamStart
@@ -1891,6 +1917,265 @@ class PdfDocumentTest {
 
     try (PdfDocument doc = PdfDocument.open(saved)) {
       assertEquals("From Bytes Title", doc.metadata(MetadataTag.TITLE).orElse(""));
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void testMergeDocuments(@TempDir Path tempDir) throws IOException {
+    Path testPdf1 = getTestPdf();
+    Path testPdf2 = getTestPdf();
+    if (testPdf1 == null || testPdf2 == null) return;
+
+    Path mergedPath = tempDir.resolve("merged.pdf");
+    try (PdfDocument doc1 = PdfDocument.open(testPdf1);
+        PdfDocument doc2 = PdfDocument.open(testPdf2)) {
+      int initialCount = doc1.pageCount();
+      doc1.importAllPages(doc2);
+      assertEquals(initialCount + doc2.pageCount(), doc1.pageCount());
+      doc1.save(mergedPath);
+    }
+
+    try (PdfDocument merged = PdfDocument.open(mergedPath)) {
+      assertTrue(merged.pageCount() > 1);
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void testPageCropAndBox(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path croppedPath = tempDir.resolve("cropped.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      try (PdfPage page = doc.page(0)) {
+        PageBox originalBox = page.getMediaBox();
+        assertNotNull(originalBox);
+        page.setCropBox(10.0f, 10.0f, 300.0f, 400.0f);
+
+        PageBox cropBox = page.getCropBox();
+        assertEquals(10.0f, cropBox.left(), 0.01);
+        assertEquals(10.0f, cropBox.bottom(), 0.01);
+        assertEquals(300.0f, cropBox.right(), 0.01);
+        assertEquals(400.0f, cropBox.top(), 0.01);
+      }
+      doc.save(croppedPath);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(croppedPath)) {
+      try (PdfPage page = doc.page(0)) {
+        PageBox cropBox = page.getCropBox();
+        assertEquals(10.0f, cropBox.left(), 0.01);
+        assertEquals(10.0f, cropBox.bottom(), 0.01);
+        assertEquals(300.0f, cropBox.right(), 0.01);
+        assertEquals(400.0f, cropBox.top(), 0.01);
+      }
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void testPageFlatteningAndRedaction(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path editPath = tempDir.resolve("edited.pdf");
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      try (PdfPage page = doc.page(0)) {
+        // Redact a small portion
+        page.redact(10.0f, 10.0f, 50.0f, 50.0f);
+
+        // Flatten annotations/form fields (for page usage display)
+        assertTrue(page.flatten(true));
+      }
+      doc.save(editPath);
+    }
+
+    try (PdfDocument doc = PdfDocument.open(editPath)) {
+      assertEquals(1, doc.pageCount());
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void testLinearization(@TempDir Path tempDir) throws IOException {
+    Path testPdf = getTestPdf();
+    if (testPdf == null) return;
+
+    Path nonLinearizedPath = tempDir.resolve("non-linearized.pdf");
+    Path linearizedPath = tempDir.resolve("linearized.pdf");
+
+    // Save normally (non-linearized)
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setLinearize(false);
+      doc.save(nonLinearizedPath);
+    }
+
+    // Save with linearization
+    try (PdfDocument doc = PdfDocument.open(testPdf)) {
+      doc.setLinearize(true);
+      assertTrue(doc.isLinearize());
+      doc.save(linearizedPath);
+    }
+
+    // Verify non-linearized does not have /Linearized early in the file
+    byte[] nonLinearizedBytes = Files.readAllBytes(nonLinearizedPath);
+    String nonLinearizedHead =
+        new String(
+            nonLinearizedBytes,
+            0,
+            Math.min(1024, nonLinearizedBytes.length),
+            java.nio.charset.StandardCharsets.UTF_8);
+    assertFalse(nonLinearizedHead.contains("/Linearized"));
+
+    // Verify linearized has /Linearized early in the file
+    byte[] linearizedBytes = Files.readAllBytes(linearizedPath);
+    String linearizedHead =
+        new String(
+            linearizedBytes,
+            0,
+            Math.min(1024, linearizedBytes.length),
+            java.nio.charset.StandardCharsets.UTF_8);
+    assertTrue(linearizedHead.contains("/Linearized"));
+  }
+
+  private static byte[] minimal3PagePdf() {
+    String pdf =
+        """
+        %PDF-1.4
+        1 0 obj
+        << /Type /Catalog /Pages 2 0 R >>
+        endobj
+        2 0 obj
+        << /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>
+        endobj
+        3 0 obj
+        << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+        endobj
+        4 0 obj
+        << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+        endobj
+        5 0 obj
+        << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>
+        endobj
+        xref
+        0 6
+        0000000000 65535 f\r
+        0000000009 00000 n\r
+        0000000058 00000 n\r
+        0000000120 00000 n\r
+        0000000187 00000 n\r
+        0000000254 00000 n\r
+        trailer
+        << /Size 6 /Root 1 0 R >>
+        startxref
+        321
+        %%EOF
+        """;
+    return pdf.getBytes(StandardCharsets.UTF_8);
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void testSetBookmarksAndReadBack(@TempDir Path tempDir) throws IOException {
+    Path pdfPath = tempDir.resolve("bookmarks-test.pdf");
+    Files.write(pdfPath, minimal3PagePdf());
+
+    List<Bookmark> original =
+        List.of(
+            new Bookmark("Chapter 1", 0, List.of()),
+            new Bookmark("Chapter 2", 1, List.of(new Bookmark("Section 2.1", 2, List.of()))));
+
+    PdfBookmarkEditor.setBookmarks(pdfPath, original);
+
+    try (PdfDocument doc = PdfDocument.open(pdfPath)) {
+      List<Bookmark> read = doc.bookmarks();
+      assertEquals(3, read.size(), "Hierarchical bookmarks should be flattened DFS on save");
+
+      assertEquals("Chapter 1", read.get(0).title());
+      assertEquals(0, read.get(0).pageIndex());
+      assertTrue(read.get(0).children().isEmpty());
+
+      assertEquals("Chapter 2", read.get(1).title());
+      assertEquals(1, read.get(1).pageIndex());
+      assertTrue(read.get(1).children().isEmpty());
+
+      assertEquals("Section 2.1", read.get(2).title());
+      assertEquals(2, read.get(2).pageIndex());
+      assertTrue(read.get(2).children().isEmpty());
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void testMergeFilesWithBookmarks(@TempDir Path tempDir) throws IOException {
+    Path src1 = tempDir.resolve("src1.pdf");
+    Path src2 = tempDir.resolve("src2.pdf");
+    Path dst = tempDir.resolve("merged.pdf");
+
+    Files.write(src1, minimal3PagePdf());
+    Files.write(src2, minimal3PagePdf());
+
+    List<Bookmark> bm1 =
+        List.of(new Bookmark("Doc 1 Root", 0, List.of(new Bookmark("Doc 1 Child", 1, List.of()))));
+    List<Bookmark> bm2 =
+        List.of(new Bookmark("Doc 2 Root", 0, List.of(new Bookmark("Doc 2 Child", 2, List.of()))));
+
+    PdfBookmarkEditor.setBookmarks(src1, bm1);
+    PdfBookmarkEditor.setBookmarks(src2, bm2);
+
+    PdfMerge.mergeFilesWithBookmarks(List.of(src1, src2), dst);
+
+    try (PdfDocument doc = PdfDocument.open(dst)) {
+      assertEquals(6, doc.pageCount());
+      List<Bookmark> read = doc.bookmarks();
+      assertEquals(
+          4, read.size(), "Should contain all non-external bookmarks flattened in DFS order");
+
+      // First document bookmarks (no offset translation needed)
+      assertEquals("Doc 1 Root", read.get(0).title());
+      assertEquals(0, read.get(0).pageIndex());
+      assertEquals("Doc 1 Child", read.get(1).title());
+      assertEquals(1, read.get(1).pageIndex());
+
+      // Second document bookmarks (offset should be +3 pages)
+      assertEquals("Doc 2 Root", read.get(2).title());
+      assertEquals(3, read.get(2).pageIndex());
+      assertEquals("Doc 2 Child", read.get(3).title());
+      assertEquals(5, read.get(3).pageIndex());
+    }
+  }
+
+  @Test
+  @EnabledIf("pdfiumAvailable")
+  void testMergeWithBookmarksInMemory(@TempDir Path tempDir) throws IOException {
+    Path src1 = tempDir.resolve("mem1.pdf");
+    Path src2 = tempDir.resolve("mem2.pdf");
+
+    Files.write(src1, minimal3PagePdf());
+    Files.write(src2, minimal3PagePdf());
+
+    List<Bookmark> bm1 = List.of(new Bookmark("Mem 1", 0, List.of()));
+    List<Bookmark> bm2 = List.of(new Bookmark("Mem 2", 1, List.of()));
+
+    PdfBookmarkEditor.setBookmarks(src1, bm1);
+    PdfBookmarkEditor.setBookmarks(src2, bm2);
+
+    try (PdfDocument doc1 = PdfDocument.open(src1);
+        PdfDocument doc2 = PdfDocument.open(src2)) {
+      byte[] mergedBytes = PdfMerge.mergeWithBookmarks(List.of(doc1, doc2));
+      try (PdfDocument merged = PdfDocument.open(mergedBytes)) {
+        assertEquals(6, merged.pageCount());
+        List<Bookmark> read = merged.bookmarks();
+        assertEquals(2, read.size());
+
+        assertEquals("Mem 1", read.get(0).title());
+        assertEquals(0, read.get(0).pageIndex());
+
+        assertEquals("Mem 2", read.get(1).title());
+        assertEquals(4, read.get(1).pageIndex()); // 1 + 3 offset
+      }
     }
   }
 }

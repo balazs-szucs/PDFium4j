@@ -183,7 +183,6 @@ public final class PdfDocumentFallbackMeta {
 
   private static int processEscape(byte[] raw, int nextIdx, ByteArrayOutputStream out) {
     byte next = raw[nextIdx];
-    int currentIdx = nextIdx;
     switch (next) {
       case 'n' -> out.write('\n');
       case 'r' -> out.write('\r');
@@ -193,13 +192,13 @@ public final class PdfDocumentFallbackMeta {
       case '(', ')', '\\' -> out.write(next);
       default -> {
         if (next >= '0' && next <= '7') {
-          return processOctalEscape(raw, currentIdx, out);
+          return processOctalEscape(raw, nextIdx, out);
         }
         // Unknown escape, treat as literal (PDF spec behavior)
         out.write(next);
       }
     }
-    return currentIdx + 1;
+    return nextIdx + 1;
   }
 
   private static int processOctalEscape(byte[] raw, int startIdx, ByteArrayOutputStream out) {

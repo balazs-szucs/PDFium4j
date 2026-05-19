@@ -492,7 +492,7 @@ public final class XmpMetadataWriter {
     return colonIdx >= 0 ? key.substring(colonIdx + 1) : key;
   }
 
-  private void validate(XmpMetadata metadata) {
+  private static void validate(XmpMetadata metadata) {
     // We no longer throw during validation of custom fields; instead we skip invalid ones during
     // write.
     metadata

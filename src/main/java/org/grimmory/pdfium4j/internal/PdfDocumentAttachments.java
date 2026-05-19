@@ -1,10 +1,14 @@
 package org.grimmory.pdfium4j.internal;
 
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.invoke.MethodHandle;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.grimmory.pdfium4j.PdfiumLibrary;
 import org.grimmory.pdfium4j.exception.PdfiumException;
@@ -105,6 +109,47 @@ public final class PdfDocumentAttachments {
       } catch (Throwable _) {
         return Optional.empty();
       }
+    }
+  }
+
+  public static void addAttachment(
+      MemorySegment docHandle, String name, byte[] data, Map<String, String> metadata) {
+    MethodHandle addAttachment = AttachmentBindings.fpdfDocAddAttachment();
+    MethodHandle setFile = AttachmentBindings.fpdfAttachmentSetFile();
+    MethodHandle setMetadata = AttachmentBindings.fpdfAttachmentSetStringValue();
+
+    if (addAttachment == null || setFile == null) {
+      throw new UnsupportedOperationException(
+          "Attachment editing is not supported by the loaded PDFium library");
+    }
+
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment nameSeg = FfmHelper.toWideString(arena, name);
+      MemorySegment attachment = (MemorySegment) addAttachment.invokeExact(docHandle, nameSeg);
+      if (FfmHelper.isNull(attachment)) {
+        throw new PdfiumException("Failed to add attachment: " + name);
+      }
+
+      MemorySegment dataSeg = arena.allocateFrom(JAVA_BYTE, data);
+      int ok = (int) setFile.invokeExact(attachment, docHandle, dataSeg, (long) data.length);
+      if (ok == 0) {
+        throw new PdfiumException("Failed to set attachment file data for: " + name);
+      }
+
+      if (metadata != null && setMetadata != null) {
+        for (Map.Entry<String, String> entry : metadata.entrySet()) {
+          MemorySegment keySeg = arena.allocateFrom(entry.getKey());
+          MemorySegment valSeg = FfmHelper.toWideString(arena, entry.getValue());
+          int success = (int) setMetadata.invokeExact(attachment, keySeg, valSeg);
+          if (success == 0) {
+            // Log a warning if a specific metadata key could not be set.
+            InternalLogger.warn("Failed to set attachment metadata key: " + entry.getKey());
+          }
+        }
+      }
+    } catch (Throwable t) {
+      if (t instanceof PdfiumException pe) throw pe;
+      throw new PdfiumException("Failed to add attachment: " + name, t);
     }
   }
 }

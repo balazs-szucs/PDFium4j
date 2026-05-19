@@ -45,9 +45,7 @@ public final class NoAllocationPathProbe implements AutoCloseable {
               ? 1
               : (int) ViewBindings.fpdfDocumentHasValidCrossReferenceTable().invokeExact(doc);
       output[2] = readTrailerEndsInto(doc, trailerBuffer);
-    } catch (PdfiumException e) {
-      throw e;
-    } catch (Error e) {
+    } catch (PdfiumException | Error e) {
       throw e;
     } catch (Throwable t) {
       throw new PdfiumException("Failed to inspect document without allocations", t);

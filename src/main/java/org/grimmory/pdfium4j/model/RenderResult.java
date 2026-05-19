@@ -1,17 +1,14 @@
 package org.grimmory.pdfium4j.model;
 
-import java.awt.Graphics2D;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import javax.imageio.IIOImage;
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import javax.imageio.stream.ImageOutputStream;
+import org.grimmory.pdfium4j.internal.FfmHelper;
+import org.grimmory.pdfium4j.internal.ShimBindings;
 
 /**
  * Result of rendering a PDF page: raw pixel data plus dimensions.
@@ -24,6 +21,7 @@ import javax.imageio.stream.ImageOutputStream;
  * @param rgba raw RGBA pixel data (4 bytes per pixel). <b>Warning:</b> This array is mutable. For a
  *     read-only view, use {@link #asReadOnlyBuffer()}.
  */
+@SuppressWarnings("PMD.EmptyCatchBlock")
 public record RenderResult(int width, int height, byte[] rgba) {
 
   public RenderResult {
@@ -75,37 +73,6 @@ public record RenderResult(int width, int height, byte[] rgba) {
   }
 
   /**
-   * Convert to a {@link BufferedImage} for use with ImageIO or Graphics2D.
-   *
-   * @throws IllegalStateException if the rgba array length doesn't match dimensions
-   */
-  public BufferedImage toBufferedImage() {
-    long expectedBytes = (long) width * height * 4;
-    if (rgba.length < expectedBytes) {
-      throw new IllegalStateException(
-          "RGBA buffer too small: expected "
-              + expectedBytes
-              + " bytes for "
-              + width
-              + "x"
-              + height
-              + ", got "
-              + rgba.length);
-    }
-    BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-    int[] pixels = new int[width * height];
-    for (int i = 0; i < pixels.length; i++) {
-      int r = rgba[i * 4] & 0xFF;
-      int g = rgba[i * 4 + 1] & 0xFF;
-      int b = rgba[i * 4 + 2] & 0xFF;
-      int a = rgba[i * 4 + 3] & 0xFF;
-      pixels[i] = (a << 24) | (r << 16) | (g << 8) | b;
-    }
-    img.setRGB(0, 0, width, height, pixels, 0, width);
-    return img;
-  }
-
-  /**
    * Encode this render result as JPEG bytes with the specified quality.
    *
    * @param quality JPEG quality from 0.0 (worst) to 1.0 (best)
@@ -117,36 +84,39 @@ public record RenderResult(int width, int height, byte[] rgba) {
       throw new IllegalArgumentException(
           "JPEG quality must be between 0.0 and 1.0, got: " + quality);
     }
-    BufferedImage img = toBufferedImage();
-    try {
-      // Convert ARGB to RGB (JPEG doesn't support alpha)
-      BufferedImage rgb = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-      Graphics2D g = rgb.createGraphics();
-      try {
-        g.drawImage(img, 0, 0, null);
-      } finally {
-        g.dispose();
-      }
-      img.flush();
+    int qualityInt = Math.round(quality * 100f);
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment bgraSegment = arena.allocateFrom(ValueLayout.JAVA_BYTE, rgba);
+      MemorySegment outBytesPtr = arena.allocate(FfmHelper.C_POINTER);
+      MemorySegment outLenPtr = arena.allocate(FfmHelper.C_SIZE_T);
 
-      ImageWriter writer = ImageIO.getImageWritersByFormatName("JPEG").next();
-      try {
-        ImageWriteParam param = writer.getDefaultWriteParam();
-        param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-        param.setCompressionQuality(quality);
+      int stride = width * 4;
+      int rc =
+          (int)
+              ShimBindings.pdfium4jEncodeJpeg()
+                  .invokeExact(
+                      bgraSegment, width, height, stride, qualityInt, 0, outBytesPtr, outLenPtr);
 
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ImageOutputStream ios = ImageIO.createImageOutputStream(baos)) {
-          writer.setOutput(ios);
-          writer.write(null, new IIOImage(rgb, null, null), param);
-        }
-        return baos.toByteArray();
-      } finally {
-        writer.dispose();
-        rgb.flush();
+      if (rc != 0) {
+        throw new IOException("Failed to encode JPEG natively, error: " + rc);
       }
-    } catch (IOException e) {
-      throw new UncheckedIOException("Failed to encode JPEG", e);
+
+      MemorySegment outBytes = outBytesPtr.get(FfmHelper.C_POINTER, 0);
+      long len = outLenPtr.get(ValueLayout.JAVA_LONG, 0);
+
+      byte[] result = new byte[(int) len];
+      MemorySegment.copy(outBytes.reinterpret(len), ValueLayout.JAVA_BYTE, 0, result, 0, (int) len);
+
+      try {
+        ShimBindings.pdfium4jFreeBuffer().invokeExact(outBytes);
+      } catch (Throwable t) {
+        // Ignore
+      }
+      return result;
+    } catch (Throwable t) {
+      throw new UncheckedIOException(
+          "Failed to encode JPEG natively",
+          t instanceof IOException ? (IOException) t : new IOException(t));
     }
   }
 
@@ -167,15 +137,37 @@ public record RenderResult(int width, int height, byte[] rgba) {
    * @throws UncheckedIOException if encoding fails
    */
   public byte[] toPngBytes() {
-    BufferedImage img = toBufferedImage();
-    try {
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      ImageIO.write(img, "PNG", baos);
-      return baos.toByteArray();
-    } catch (IOException e) {
-      throw new UncheckedIOException("Failed to encode PNG", e);
-    } finally {
-      img.flush();
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment bgraSegment = arena.allocateFrom(ValueLayout.JAVA_BYTE, rgba);
+      MemorySegment outBytesPtr = arena.allocate(FfmHelper.C_POINTER);
+      MemorySegment outLenPtr = arena.allocate(FfmHelper.C_SIZE_T);
+
+      int stride = width * 4;
+      int rc =
+          (int)
+              ShimBindings.pdfium4jEncodePng()
+                  .invokeExact(bgraSegment, width, height, stride, 9, 0, 1, outBytesPtr, outLenPtr);
+
+      if (rc != 0) {
+        throw new IOException("Failed to encode PNG natively, error: " + rc);
+      }
+
+      MemorySegment outBytes = outBytesPtr.get(FfmHelper.C_POINTER, 0);
+      long len = outLenPtr.get(ValueLayout.JAVA_LONG, 0);
+
+      byte[] result = new byte[(int) len];
+      MemorySegment.copy(outBytes.reinterpret(len), ValueLayout.JAVA_BYTE, 0, result, 0, (int) len);
+
+      try {
+        ShimBindings.pdfium4jFreeBuffer().invokeExact(outBytes);
+      } catch (Throwable t) {
+        // Ignore
+      }
+      return result;
+    } catch (Throwable t) {
+      throw new UncheckedIOException(
+          "Failed to encode PNG natively",
+          t instanceof IOException ? (IOException) t : new IOException(t));
     }
   }
 }

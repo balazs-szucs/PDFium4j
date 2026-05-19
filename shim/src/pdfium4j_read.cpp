@@ -22,7 +22,17 @@
 #define SYMLOOKUP(name) GetProcAddress(GetModuleHandleA("pdfium.dll"), name)
 #else
 #include <dlfcn.h>
-#define SYMLOOKUP(name) dlsym(RTLD_DEFAULT, name)
+inline void* get_pdfium_handle() {
+    static void* handle = []() -> void* {
+        void* h = dlopen("libpdfium.dylib", RTLD_LAZY | RTLD_NOLOAD);
+        if (!h) h = dlopen("libpdfium.so", RTLD_LAZY | RTLD_NOLOAD);
+        if (!h) h = dlopen("pdfium", RTLD_LAZY | RTLD_NOLOAD);
+        if (!h) h = dlopen("libpdfium.so.1", RTLD_LAZY | RTLD_NOLOAD);
+        return h ? h : RTLD_DEFAULT;
+    }();
+    return handle;
+}
+#define SYMLOOKUP(name) dlsym(get_pdfium_handle(), name)
 #endif
 
 typedef unsigned long (FPDF_CALLCONV *Type_FPDF_GetXMPMetadata)(FPDF_DOCUMENT, void*, unsigned long);
@@ -258,6 +268,48 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_get_meta_utf8(FPDF_DOCUMENT doc, const ch
         out[utf8.length()] = '\0';
     }
     return needed;
+}
+
+SHIM_EXPORT int FPDF_CALLCONV pdfium4j_get_all_meta_utf8(FPDF_DOCUMENT doc, const char* keys, char* buf, int buf_len) {
+    if (!doc || !keys) return 0;
+    
+    int total_needed = 0;
+    const char* current_key = keys;
+    
+    std::vector<std::pair<std::string, std::string>> results;
+    
+    while (*current_key != '\0') {
+        std::string key_str(current_key);
+        unsigned long length = FPDF_GetMetaText(doc, current_key, nullptr, 0);
+        if (length > 2) {
+            g_utf16_scratch.resize(length / 2);
+            FPDF_GetMetaText(doc, current_key, g_utf16_scratch.data(), length);
+            std::string utf8 = pdfium4j::utf16_to_utf8(g_utf16_scratch.data(), (length / 2) - 1);
+            if (!utf8.empty()) {
+                results.push_back({key_str, utf8});
+                total_needed += static_cast<int>(key_str.length()) + 1 + static_cast<int>(utf8.length()) + 1;
+            }
+        }
+        current_key += key_str.length() + 1;
+    }
+    
+    total_needed += 1;
+    
+    if (buf && buf_len >= total_needed) {
+        char* p = buf;
+        for (const auto& pair : results) {
+            std::copy(pair.first.begin(), pair.first.end(), p);
+            p += pair.first.length();
+            *p++ = '\0';
+            
+            std::copy(pair.second.begin(), pair.second.end(), p);
+            p += pair.second.length();
+            *p++ = '\0';
+        }
+        *p = '\0';
+    }
+    
+    return total_needed;
 }
 
 SHIM_EXPORT int FPDF_CALLCONV pdfium4j_get_xmp_metadata(FPDF_DOCUMENT doc, char* buf, int buf_len) {

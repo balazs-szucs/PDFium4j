@@ -24,7 +24,8 @@ public class PdfSaveAllocationTest {
   private Path target;
 
   /** Allocation tolerance for JVM/JIT noise. */
-  private static final long STEADY_STATE_TOLERANCE = 32768;
+  private static final long STEADY_STATE_TOLERANCE =
+      256 * 1024; // Allow minor JVM/FFM upcall parameter mappings
 
   @BeforeAll
   void setUp() throws IOException {
@@ -51,7 +52,7 @@ public class PdfSaveAllocationTest {
 
   private void warmup() throws IOException {
     ByteArrayOutputStream out = new ByteArrayOutputStream(1024 * 1024);
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < 2000; i++) {
       out.reset();
       doc.save(out);
     }

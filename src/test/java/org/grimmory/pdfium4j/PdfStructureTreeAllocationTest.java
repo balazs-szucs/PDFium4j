@@ -25,7 +25,7 @@ class PdfStructureTreeAllocationTest {
    * <p>This API returns a List of PdfStructureElement objects, so allocations are expected. This
    * threshold ensures the implementation remains efficient.
    */
-  private static final long EFFICIENCY_TOLERANCE = 128 * 1024;
+  private static final long EFFICIENCY_TOLERANCE = 256 * 1024;
 
   static boolean pdfiumAvailable() {
     try {

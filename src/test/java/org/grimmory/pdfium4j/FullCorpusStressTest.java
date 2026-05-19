@@ -154,7 +154,7 @@ class FullCorpusStressTest {
     }
   }
 
-  private void validateWithExternalTools(Path pdf, String expectedTitle) throws Exception {
+  private static void validateWithExternalTools(Path pdf, String expectedTitle) throws Exception {
     // qpdf --check
     Process qpdf = new ProcessBuilder("qpdf", "--check", pdf.toString()).start();
     if (qpdf.waitFor() != 0) {

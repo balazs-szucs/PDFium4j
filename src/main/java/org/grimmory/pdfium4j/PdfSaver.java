@@ -16,7 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import org.grimmory.pdfium4j.internal.ShimBindings;
 import org.grimmory.pdfium4j.internal.XmpUpdate;
 import org.grimmory.pdfium4j.model.MetadataTag;
@@ -25,6 +24,7 @@ import org.grimmory.pdfium4j.model.XmpMetadata;
 /** Handles saving PDF documents via QPDF. */
 final class PdfSaver {
   private static final XmpMetadataWriter XMP_WRITER = new XmpMetadataWriter();
+  private static final ThreadLocal<WriteContext> CURRENT_WRITE_CTX = new ThreadLocal<>();
 
   static {
     try {
@@ -42,6 +42,7 @@ final class PdfSaver {
   }
 
   /** Parameters for saving a PDF document. */
+  /** Parameters for saving a PDF document. */
   record SaveParams(
       MemorySegment docHandle,
       Map<MetadataTag, String> pendingMetadata,
@@ -53,7 +54,8 @@ final class PdfSaver {
       Path targetPath,
       byte[] sourceBytes,
       MemorySegment sourceSegment,
-      OutputStream out) {}
+      OutputStream out,
+      boolean linearize) {}
 
   @FunctionalInterface
   interface MetadataProvider {
@@ -72,7 +74,8 @@ final class PdfSaver {
           params.targetPath().toString(),
           params.pendingXmp(),
           params.pendingMetadata(),
-          params.pendingCustomMetadata());
+          params.pendingCustomMetadata(),
+          params.linearize());
     } else if (params.out() != null) {
       // Stream-based save (no temp files if we have bytes/segment)
       if (params.sourceBytes() != null) {
@@ -83,7 +86,8 @@ final class PdfSaver {
               params.out(),
               params.pendingXmp(),
               params.pendingMetadata(),
-              params.pendingCustomMetadata());
+              params.pendingCustomMetadata(),
+              params.linearize());
         }
       } else if (params.sourceSegment() != MemorySegment.NULL) {
         saveFromMemory(
@@ -91,7 +95,8 @@ final class PdfSaver {
             params.out(),
             params.pendingXmp(),
             params.pendingMetadata(),
-            params.pendingCustomMetadata());
+            params.pendingCustomMetadata(),
+            params.linearize());
       } else if (params.sourcePath() != null) {
         // Map file to memory to avoid temp copy
         try (Arena arena = Arena.ofConfined();
@@ -102,7 +107,8 @@ final class PdfSaver {
               params.out(),
               params.pendingXmp(),
               params.pendingMetadata(),
-              params.pendingCustomMetadata());
+              params.pendingCustomMetadata(),
+              params.linearize());
         }
       }
     }
@@ -113,15 +119,17 @@ final class PdfSaver {
       OutputStream out,
       XmpUpdate xmp,
       Map<MetadataTag, String> metadata,
-      Map<String, String> customMetadata)
+      Map<String, String> customMetadata,
+      boolean linearize)
       throws IOException {
-    try (Arena arena = Arena.ofConfined()) {
+    try (Arena arena = Arena.ofConfined();
+        WriteContext writeContext = new WriteContext(out)) {
       XmpResult xmpRes = prepareXmp(arena, xmp);
       MetaResult metaRes = prepareMetadataPairs(arena, metadata, customMetadata);
 
-      var writeContext = new WriteContext(out);
       MemorySegment callback = ShimBindings.writeBlockCallback();
 
+      CURRENT_WRITE_CTX.set(writeContext);
       int rc;
       try {
         rc =
@@ -131,13 +139,16 @@ final class PdfSaver {
                         src,
                         src.byteSize(),
                         callback,
-                        writeContext.pointer(),
+                        MemorySegment.NULL,
                         xmpRes.segment(),
                         xmpRes.length(),
                         metaRes.segment(),
-                        metaRes.count());
+                        metaRes.count(),
+                        linearize ? 1 : 0);
       } catch (Throwable t) {
         throw new IOException("Native save failed", t);
+      } finally {
+        CURRENT_WRITE_CTX.remove();
       }
 
       if (rc != 0) {
@@ -153,7 +164,8 @@ final class PdfSaver {
       String dst,
       XmpUpdate xmp,
       Map<MetadataTag, String> metadata,
-      Map<String, String> customMetadata)
+      Map<String, String> customMetadata,
+      boolean linearize)
       throws IOException {
     try (Arena arena = Arena.ofConfined()) {
       XmpResult xmpRes = prepareXmp(arena, xmp);
@@ -171,7 +183,8 @@ final class PdfSaver {
                           xmpRes.segment(),
                           xmpRes.length(),
                           metaRes.segment(),
-                          metaRes.count());
+                          metaRes.count(),
+                          linearize ? 1 : 0);
         } else if (srcBytes != null) {
           MemorySegment dataSeg = arena.allocateFrom(JAVA_BYTE, srcBytes);
           rc =
@@ -184,7 +197,8 @@ final class PdfSaver {
                           xmpRes.segment(),
                           xmpRes.length(),
                           metaRes.segment(),
-                          metaRes.count());
+                          metaRes.count(),
+                          linearize ? 1 : 0);
         } else if (srcSeg != MemorySegment.NULL) {
           rc =
               (int)
@@ -196,7 +210,8 @@ final class PdfSaver {
                           xmpRes.segment(),
                           xmpRes.length(),
                           metaRes.segment(),
-                          metaRes.count());
+                          metaRes.count(),
+                          linearize ? 1 : 0);
         } else {
           throw new IOException("No source provided for native save");
         }
@@ -254,19 +269,16 @@ final class PdfSaver {
     return new MetaResult(metaPairs, totalMetaSize);
   }
 
-  private static final class WriteContext {
+  private static final class WriteContext implements AutoCloseable {
     private final OutputStream out;
-    private final MemorySegment pointer;
 
     WriteContext(OutputStream out) {
       this.out = out;
-      // Using identity hash code as a unique identifier for this context
-      this.pointer = MemorySegment.ofAddress(System.identityHashCode(this));
-      RegistryHolder.CONTEXTS.put(this.pointer.address(), this);
     }
 
-    MemorySegment pointer() {
-      return pointer;
+    @Override
+    public void close() {
+      // Cleanup handled in saveFromMemory finally block
     }
 
     private static final ThreadLocal<byte[]> SCRATCH =
@@ -286,13 +298,9 @@ final class PdfSaver {
     }
   }
 
-  private static final class RegistryHolder {
-    static final Map<Long, WriteContext> CONTEXTS = new ConcurrentHashMap<>();
-  }
-
   @SuppressWarnings("unused")
   private static int writeBlockCallback(MemorySegment pThis, MemorySegment pData, long size) {
-    WriteContext ctx = RegistryHolder.CONTEXTS.get(pThis.address());
+    WriteContext ctx = CURRENT_WRITE_CTX.get();
     if (ctx == null) return 0;
     try {
       ctx.write(pData, size);

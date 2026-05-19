@@ -13,4 +13,12 @@ public record Bookmark(String title, int pageIndex, List<Bookmark> children) {
   public Bookmark {
     children = children != null ? List.copyOf(children) : List.of();
   }
+
+  /**
+   * Returns true if the bookmark's destination points to a valid internal page (pageIndex >= 0).
+   * URI / LAUNCH / REMOTE_GOTO bookmarks point to external destinations and have pageIndex < 0.
+   */
+  public boolean isInternal() {
+    return pageIndex >= 0;
+  }
 }

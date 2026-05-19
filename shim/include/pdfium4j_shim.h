@@ -7,6 +7,7 @@
 #include <fpdf_structtree.h>
 #include <fpdf_text.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #if defined(_WIN32)
     #ifdef PDFIUM4J_SHIM_IMPLEMENTATION
@@ -30,6 +31,56 @@ typedef struct {
     float top;
     float fontSize;
 } pdfium4j_char_info_t;
+
+typedef struct {
+    int mode;                 // 0=RASTER, 1=LOGICAL, 2=BOTH
+    int dpi;
+    float scale;
+    int encoding;             // 0=JPEG, 1=JPEG2000, 2=PNG, 3=JBIG2, 4=FLATE
+    int jpegQuality;
+    int pngCompressionLevel;
+    int grayscale;            // bool
+    int alphaMaskEnabled;     // bool
+
+    int renderAnnotations;    // bool
+    int renderForms;          // bool
+    int renderLCDText;        // bool
+    int noNativeText;         // bool
+    int printingMode;         // bool
+    int reverseByteOrder;     // bool
+
+    int pageFrom;
+    int pageTo;
+
+    int linearize;            // bool
+    int compressStreams;      // bool
+    int preserveMetadata;     // bool
+
+    size_t tileSizeBytes;
+    int tileEnabled;          // bool
+
+    int flattenAnnotations;   // bool
+    int flattenFormFields;    // bool
+    int flattenForPrint;      // bool
+    int generateAppearances;  // bool
+} pdfium4j_flatten_config_t;
+
+SHIM_EXPORT int FPDF_CALLCONV pdfium4j_flatten_advanced(
+    const uint8_t* in_pdf, size_t in_len,
+    const pdfium4j_flatten_config_t* config,
+    uint8_t** out_pdf, size_t* out_len);
+
+SHIM_EXPORT void FPDF_CALLCONV pdfium4j_free_buffer(uint8_t* buf);
+
+SHIM_EXPORT int FPDF_CALLCONV pdfium4j_encode_jpeg(
+    const uint8_t* bgra, int w, int h, int stride,
+    int quality, int grayscale,
+    uint8_t** out_bytes, size_t* out_len);
+
+SHIM_EXPORT int FPDF_CALLCONV pdfium4j_encode_png(
+    const uint8_t* bgra, int w, int h, int stride,
+    int compression_level, int grayscale, int alpha,
+    uint8_t** out_bytes, size_t* out_len);
 
 SHIM_EXPORT int FPDF_CALLCONV pdfium4j_page_count(FPDF_DOCUMENT doc);
 
@@ -118,7 +169,8 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_native(
     const char* xmp_metadata,
     int xmp_len,
     const char** metadata_pairs,
-    int metadata_count
+    int metadata_count,
+    int linearize
 );
 
 /**
@@ -134,7 +186,8 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_mem_native(
     const char* xmp_metadata,
     int xmp_len,
     const char** metadata_pairs,
-    int metadata_count
+    int metadata_count,
+    int linearize
 );
 
 SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_mem_to_file_native(
@@ -144,7 +197,8 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_mem_to_file_native(
     const char* xmp_metadata,
     int xmp_len,
     const char** metadata_pairs,
-    int metadata_count
+    int metadata_count,
+    int linearize
 );
 
 /**
@@ -176,6 +230,13 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_get_xmp_qpdf_mem(
     size_t      len,
     char*       buf,
     int         buf_len
+);
+
+SHIM_EXPORT int FPDF_CALLCONV pdfium4j_set_bookmarks_native(
+    const char* src_path,
+    const char* dst_path,
+    const uint8_t* serialized_bookmarks,
+    int serialized_len
 );
 
 SHIM_EXPORT void FPDF_CALLCONV pdfium4j_resolve_optional_symbols(void);

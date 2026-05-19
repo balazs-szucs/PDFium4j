@@ -32,7 +32,7 @@ public final class NativeLoader {
   private static final String SYS_PROP_OS_NAME = "os.name";
 
   private static final StableValue<Boolean> loaded = StableValue.of();
-  private static volatile Throwable loadError = null;
+  private static final Throwable loadError = null;
   private static final StableValue<SymbolLookup> shimLookup = StableValue.of();
 
   public static SymbolLookup getShimLookup() {

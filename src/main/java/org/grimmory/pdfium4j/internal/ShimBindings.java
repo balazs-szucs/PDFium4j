@@ -63,6 +63,17 @@ public final class ShimBindings {
                 false));
   }
 
+  private static final StableValue<MethodHandle> pdfium4jGetAllMetaUtf8V = StableValue.of();
+
+  public static MethodHandle pdfium4jGetAllMetaUtf8() {
+    return pdfium4jGetAllMetaUtf8V.orElseSet(
+        () ->
+            find(
+                "pdfium4j_get_all_meta_utf8",
+                FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER, C_POINTER, C_INT),
+                false));
+  }
+
   private static final StableValue<MethodHandle> pdfium4jSetMetaUtf8V = StableValue.of();
 
   public static MethodHandle pdfium4jSetMetaUtf8() {
@@ -189,6 +200,17 @@ public final class ShimBindings {
                 "pdfium4j_bookmark_page_index",
                 FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER),
                 true));
+  }
+
+  private static final StableValue<MethodHandle> pdfium4jSetBookmarksV = StableValue.of();
+
+  public static MethodHandle pdfium4jSetBookmarks() {
+    return pdfium4jSetBookmarksV.orElseSet(
+        () ->
+            find(
+                "pdfium4j_set_bookmarks_native",
+                FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER, C_POINTER, C_INT),
+                false));
   }
 
   private static final StableValue<MethodHandle> pdfium4jStructTreeGetV = StableValue.of();
@@ -391,7 +413,7 @@ public final class ShimBindings {
             find(
                 "pdfium4j_save_with_metadata_native",
                 FunctionDescriptor.of(
-                    C_INT, C_POINTER, C_POINTER, C_POINTER, C_INT, C_POINTER, C_INT),
+                    C_INT, C_POINTER, C_POINTER, C_POINTER, C_INT, C_POINTER, C_INT, C_INT),
                 false));
   }
 
@@ -404,7 +426,7 @@ public final class ShimBindings {
                 "pdfium4j_save_with_metadata_mem_native",
                 FunctionDescriptor.of(
                     C_INT, C_POINTER, C_SIZE_T, C_POINTER, C_POINTER, C_POINTER, C_INT, C_POINTER,
-                    C_INT),
+                    C_INT, C_INT),
                 false));
   }
 
@@ -417,7 +439,8 @@ public final class ShimBindings {
             find(
                 "pdfium4j_save_with_metadata_mem_to_file_native",
                 FunctionDescriptor.of(
-                    C_INT, C_POINTER, C_SIZE_T, C_POINTER, C_POINTER, C_INT, C_POINTER, C_INT),
+                    C_INT, C_POINTER, C_SIZE_T, C_POINTER, C_POINTER, C_INT, C_POINTER, C_INT,
+                    C_INT),
                 false));
   }
 
@@ -484,5 +507,48 @@ public final class ShimBindings {
                 mh, FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER, C_POINTER), Arena.global());
       }
     }
+  }
+
+  private static final StableValue<MethodHandle> pdfium4jFlattenAdvancedV = StableValue.of();
+
+  public static MethodHandle pdfium4jFlattenAdvanced() {
+    return pdfium4jFlattenAdvancedV.orElseSet(
+        () ->
+            find(
+                "pdfium4j_flatten_advanced",
+                FunctionDescriptor.of(C_INT, C_POINTER, C_SIZE_T, C_POINTER, C_POINTER, C_POINTER),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> pdfium4jFreeBufferV = StableValue.of();
+
+  public static MethodHandle pdfium4jFreeBuffer() {
+    return pdfium4jFreeBufferV.orElseSet(
+        () -> find("pdfium4j_free_buffer", FunctionDescriptor.ofVoid(C_POINTER), false));
+  }
+
+  private static final StableValue<MethodHandle> pdfium4jEncodeJpegV = StableValue.of();
+
+  public static MethodHandle pdfium4jEncodeJpeg() {
+    return pdfium4jEncodeJpegV.orElseSet(
+        () ->
+            find(
+                "pdfium4j_encode_jpeg",
+                FunctionDescriptor.of(
+                    C_INT, C_POINTER, C_INT, C_INT, C_INT, C_INT, C_INT, C_POINTER, C_POINTER),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> pdfium4jEncodePngV = StableValue.of();
+
+  public static MethodHandle pdfium4jEncodePng() {
+    return pdfium4jEncodePngV.orElseSet(
+        () ->
+            find(
+                "pdfium4j_encode_png",
+                FunctionDescriptor.of(
+                    C_INT, C_POINTER, C_INT, C_INT, C_INT, C_INT, C_INT, C_INT, C_POINTER,
+                    C_POINTER),
+                false));
   }
 }

@@ -13,6 +13,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.VarHandle;
 import java.util.Objects;
 
 /** FFM bindings for PDFium core functions from {@code fpdfview.h}. */
@@ -65,6 +66,39 @@ public final class ViewBindings {
               MemoryLayout.paddingLayout(4),
               C_POINTER.withName("m_GetBlock"),
               C_POINTER.withName("m_Param"));
+  public static final StructLayout FS_MATRIX_LAYOUT =
+      MemoryLayout.structLayout(
+          ValueLayout.JAVA_FLOAT.withName("a"),
+          ValueLayout.JAVA_FLOAT.withName("b"),
+          ValueLayout.JAVA_FLOAT.withName("c"),
+          ValueLayout.JAVA_FLOAT.withName("d"),
+          ValueLayout.JAVA_FLOAT.withName("e"),
+          ValueLayout.JAVA_FLOAT.withName("f"));
+  public static final StructLayout FS_RECTF_LAYOUT =
+      MemoryLayout.structLayout(
+          ValueLayout.JAVA_FLOAT.withName("left"),
+          ValueLayout.JAVA_FLOAT.withName("top"),
+          ValueLayout.JAVA_FLOAT.withName("right"),
+          ValueLayout.JAVA_FLOAT.withName("bottom"));
+  public static final StructLayout IFSDK_PAUSE_LAYOUT =
+      C_POINTER.byteSize() == 8
+          ? MemoryLayout.structLayout(
+              ValueLayout.JAVA_INT.withName("version"),
+              MemoryLayout.paddingLayout(4),
+              C_POINTER.withName("NeedToPauseNow"),
+              C_POINTER.withName("user"))
+          : MemoryLayout.structLayout(
+              ValueLayout.JAVA_INT.withName("version"),
+              C_POINTER.withName("NeedToPauseNow"),
+              C_POINTER.withName("user"));
+
+  public static final VarHandle IFSDK_PAUSE_VERSION =
+      IFSDK_PAUSE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("version"));
+  public static final VarHandle IFSDK_PAUSE_CALLBACK =
+      IFSDK_PAUSE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("NeedToPauseNow"));
+  public static final VarHandle IFSDK_PAUSE_USER =
+      IFSDK_PAUSE_LAYOUT.varHandle(MemoryLayout.PathElement.groupElement("user"));
+
   public static final FunctionDescriptor GET_BLOCK_DESC =
       FunctionDescriptor.of(C_INT, C_POINTER, C_LONG, C_POINTER, C_LONG);
 
@@ -214,6 +248,49 @@ public final class ViewBindings {
         () -> find("FPDF_SetRendererType", FunctionDescriptor.ofVoid(C_INT), false));
   }
 
+  private static final StableValue<MethodHandle> FPDF_RenderPageBitmapWithMatrix_V =
+      StableValue.of();
+
+  public static MethodHandle fpdfRenderPageBitmapWithMatrix() {
+    return FPDF_RenderPageBitmapWithMatrix_V.orElseSet(
+        () ->
+            find(
+                "FPDF_RenderPageBitmapWithMatrix",
+                FunctionDescriptor.ofVoid(C_POINTER, C_POINTER, C_POINTER, C_POINTER, C_INT),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDF_RenderPageBitmap_Start_V = StableValue.of();
+
+  public static MethodHandle fpdfRenderPageBitmapStart() {
+    return FPDF_RenderPageBitmap_Start_V.orElseSet(
+        () ->
+            find(
+                "FPDF_RenderPageBitmap_Start",
+                FunctionDescriptor.of(
+                    C_INT, C_POINTER, C_POINTER, C_INT, C_INT, C_INT, C_INT, C_INT, C_INT,
+                    C_POINTER),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDF_RenderPage_Continue_V = StableValue.of();
+
+  public static MethodHandle fpdfRenderPageContinue() {
+    return FPDF_RenderPage_Continue_V.orElseSet(
+        () ->
+            find(
+                "FPDF_RenderPage_Continue",
+                FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER),
+                false));
+  }
+
+  private static final StableValue<MethodHandle> FPDF_RenderPage_Close_V = StableValue.of();
+
+  public static MethodHandle fpdfRenderPageClose() {
+    return FPDF_RenderPage_Close_V.orElseSet(
+        () -> find("FPDF_RenderPage_Close", FunctionDescriptor.ofVoid(C_POINTER), false));
+  }
+
   private static final StableValue<MethodHandle> FPDF_LoadMemDocument64_V = StableValue.of();
 
   public static MethodHandle fpdfLoadMemDocument64() {
@@ -226,13 +303,20 @@ public final class ViewBindings {
   }
 
   public static final int FPDF_RENDERER_TYPE_SKIA = 1;
+  public static final int FPDF_RENDER_READY = 0;
+  public static final int FPDF_RENDER_TOBECONTINUED = 1;
+  public static final int FPDF_RENDER_DONE = 2;
+  public static final int FPDF_RENDER_FAILED = 3;
   public static final int FPDF_ERR_FORMAT = 3;
   public static final int FPDF_ERR_PASSWORD = 4;
   public static final int FPDF_ERR_SECURITY = 5;
   public static final int FPDF_ANNOT = 0x01;
   public static final int FPDF_LCD_TEXT = 0x02;
+  public static final int FPDF_NO_NATIVETEXT = 0x04;
   public static final int FPDF_GRAYSCALE = 0x08;
   public static final int FPDF_REVERSE_BYTE_ORDER = 0x10;
+  public static final int FPDF_RENDER_LIMITEDIMAGECACHE = 0x200;
+  public static final int FPDF_RENDER_FORCEHALFTONE = 0x400;
   public static final int FPDF_PRINTING = 0x800;
   public static final int FPDF_RENDER_NO_SMOOTHTEXT = 0x1000;
   public static final int FPDF_RENDER_NO_SMOOTHIMAGE = 0x2000;

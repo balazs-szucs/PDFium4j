@@ -226,23 +226,73 @@ val extractPdfiumBinaries by tasks.registering {
             }
 
             // Copy extra dependencies if roots are provided (CI environment)
+            // NOTE: Only copy specific zlib and libjpeg libraries, NOT wildcard *.so* which can include unrelated
+            // system libraries (e.g., Swift compiler artifacts). The shim and CMake handle dependency linking properly.
             val zlibRoot = System.getenv("ZLIB_ROOT")
             val jpegRoot = System.getenv("JPEG_ROOT")
 
-            listOfNotNull(zlibRoot, jpegRoot).map { proj.file(it) }.filter { it.exists() }.forEach { root ->
-                proj.copy {
-                    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-                    from(root) {
-                        include("bin/*.dll", "lib/*.so*", "lib/*.dylib*")
-                        eachFile { relativePath = RelativePath(true, name) }
+            zlibRoot?.let { root ->
+                val zlibLibDir = proj.file(root).resolve("lib")
+                if (zlibLibDir.exists()) {
+                    zlibLibDir.listFiles()?.filter {
+                        it.name.matches(Regex("^libz\\.(so(\\.\\d+)?|dylib|a|lib)$"))
+                    }?.forEach { file ->
+                        try {
+                            proj.file(platformDir).resolve(file.name).writeBytes(file.readBytes())
+                            logger.debug("[$localName] Copied ${file.name} from ZLIB_ROOT")
+                        } catch (e: Exception) {
+                            logger.debug("[$localName] Skipped ${file.name}: ${e.message}")
+                        }
                     }
-                    into(platformDir)
-                    includeEmptyDirs = false
+                }
+            }
+
+            jpegRoot?.let { root ->
+                val jpegLibDir = proj.file(root).resolve("lib")
+                if (jpegLibDir.exists()) {
+                    jpegLibDir.listFiles()?.filter {
+                        it.name.matches(Regex("^libjpeg\\.(so(\\.\\d+)?|dylib|a|lib)$")) ||
+                        it.name.matches(Regex("^libturbojpeg\\.(so(\\.\\d+)?|dylib|a|lib)$"))
+                    }?.forEach { file ->
+                        try {
+                            proj.file(platformDir).resolve(file.name).writeBytes(file.readBytes())
+                            logger.debug("[$localName] Copied ${file.name} from JPEG_ROOT")
+                        } catch (e: Exception) {
+                            logger.debug("[$localName] Skipped ${file.name}: ${e.message}")
+                        }
+                    }
                 }
             }
 
             // Fix permissions to ensure we can copy/move these files later
             platformDir.walkTopDown().forEach { it.setWritable(true) }
+
+            if (localName.startsWith("linux")) {
+                logger.lifecycle("[$localName] Attempting to strip debug symbols from native libraries")
+                val stripCmd = listOf("strip", "--strip-debug", "--strip-unneeded")
+
+                platformDir.listFiles()?.forEach { file ->
+                    if ((file.name.endsWith(".so") || file.name.endsWith(".so.1")) && file.isFile) {
+                        try {
+                            val cmd = stripCmd + file.absolutePath
+                            val process = ProcessBuilder(cmd)
+                                .redirectErrorStream(true)
+                                .start()
+                            val exitCode = process.waitFor()
+                            if (exitCode == 0) {
+                                val strippedSize = file.length()
+                                logger.lifecycle("[$localName] Successfully stripped ${file.name} to ${strippedSize/1024}KB")
+                            } else {
+                                // Silent skip - strip might not be available on non-Linux hosts
+                                logger.debug("[$localName] Skipping strip for ${file.name} (tool may not support ELF format)")
+                            }
+                        } catch (e: Exception) {
+                            // Silent skip - strip might not be in PATH on non-Linux hosts
+                            logger.debug("[$localName] Skipping strip for ${file.name}: ${e.message}")
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -285,6 +335,7 @@ val extractPdfiumHeaders by tasks.registering {
 val buildShim by tasks.registering {
     description = "Builds the C++ shim library"
     dependsOn(extractPdfiumHeaders, extractPdfiumBinaries)
+    doNotTrackState("Custom CMake native build task")
 
     val shimDir = project.file("shim")
     val buildDir = layout.buildDirectory.dir("shim-build")
@@ -444,7 +495,7 @@ val generateNativeIndex by tasks.registering {
     dependsOn(extractPdfiumBinaries, buildShim)
     inputs.property("activePlatforms", activePlatforms.keys)
     val nativesRoot = pdfiumNativesDir.map { it.dir("natives") }
-    inputs.dir(nativesRoot)
+    inputs.dir(nativesRoot).optional()
     outputs.dir(nativesRoot)
 
     doLast {
@@ -553,6 +604,7 @@ tasks.assemble {
 tasks.withType<Test> {
     useJUnitPlatform()
     maxHeapSize = "2g"
+    maxParallelForks = Runtime.getRuntime().availableProcessors()
     testLogging {
         showStandardStreams = true
         events("passed", "skipped", "failed")

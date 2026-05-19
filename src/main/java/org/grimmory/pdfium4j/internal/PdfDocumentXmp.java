@@ -42,14 +42,14 @@ public final class PdfDocumentXmp {
         byte[] tailXmp = extractXmpFromSegment(tail);
         if (tailStart == 0) return tailXmp;
 
-        if (tailXmp.length == 0) {
-          // Common case when XMP sits before the tail scan window.
+        // If the tail XMP has a low score (e.g. page-level or empty) or the file is small,
+        // we perform a full-file scan to get the best scoring (document-level) XMP stream.
+        if (fileSize < 10 * 1024 * 1024 || scoreXmp(tailXmp) < 20) {
           MemorySegment full = fc.map(FileChannel.MapMode.READ_ONLY, 0, fileSize, arena);
-          return extractXmpFromSegment(full);
+          byte[] fullXmp = extractXmpFromSegment(full);
+          return fullXmp.length > 0 ? fullXmp : tailXmp;
         }
 
-        // If tail extraction found a canonical xpacket, accept it. Otherwise, run a full-file
-        // scan and prefer that result to avoid accidental matches in trailing update sections.
         if (startsWith(tailXmp, XMP_START)) {
           return tailXmp;
         }
@@ -68,6 +68,7 @@ public final class PdfDocumentXmp {
   public static byte[] extractXmpFromSegment(MemorySegment pdf) {
     long searchFrom = 0;
     byte[] bestFound = EMPTY_BYTE_ARRAY;
+    int bestScore = 0;
 
     try {
       while (searchFrom < pdf.byteSize()) {
@@ -88,8 +89,12 @@ public final class PdfDocumentXmp {
           jump = RDF_START.length;
         }
 
-        if (currentBlock.length > 0 && isMeaningfulXmp(currentBlock)) {
-          bestFound = currentBlock;
+        if (currentBlock.length > 0) {
+          int score = scoreXmp(currentBlock);
+          if (score > bestScore || (score == bestScore && bestScore > 0)) {
+            bestFound = currentBlock;
+            bestScore = score;
+          }
         }
         searchFrom = next + Math.max(1, jump);
       }
@@ -97,6 +102,23 @@ public final class PdfDocumentXmp {
       PdfiumLibrary.ignore(e);
     }
     return bestFound;
+  }
+
+  private static int scoreXmp(byte[] data) {
+    if (data == null || data.length < 50) return 0;
+    String s = new String(data, StandardCharsets.UTF_8);
+    if (!s.contains("<rdf:Description") && !s.contains(":Description")) {
+      return 0;
+    }
+    int score = 1;
+    if (s.contains("<dc:title") || s.contains(":title")) score += 10;
+    if (s.contains("<dc:creator") || s.contains(":creator")) score += 10;
+    if (s.contains("<xapMM:DocumentID") || s.contains(":DocumentID")) score += 10;
+    if (s.contains("<pdf:Producer") || s.contains(":Producer")) score += 5;
+    if (s.contains("<xap:CreatorTool") || s.contains(":CreatorTool")) score += 5;
+    // Length bias to break ties (prefer larger XMP blocks)
+    score += Math.min(5, data.length / 500);
+    return score;
   }
 
   private static long findEarliestBlockStart(MemorySegment pdf, long searchFrom) {
@@ -109,14 +131,6 @@ public final class PdfDocumentXmp {
     if (nextXmpmeta >= 0 && (next < 0 || nextXmpmeta < next)) next = nextXmpmeta;
     if (nextRdf >= 0 && (next < 0 || nextRdf < next)) next = nextRdf;
     return next;
-  }
-
-  private static boolean isMeaningfulXmp(byte[] data) {
-    if (data == null || data.length < 50) return false;
-    String s = new String(data, StandardCharsets.UTF_8);
-    // Must contain actual metadata content, not just an empty RDF wrapper.
-    // We look for rdf:Description which is the container for actual properties.
-    return s.contains("<rdf:Description") || s.contains(":Description");
   }
 
   private static byte[] extractXpacketAt(MemorySegment pdf, long start) {

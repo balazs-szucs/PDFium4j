@@ -67,7 +67,8 @@ if(NOT ZLIB_FOUND)
     endif()
 else()
     set(ZLIB_H_PATH "${ZLIB_INCLUDE_DIR}" CACHE PATH "Path to zlib.h" FORCE)
-    set(ZLIB_LIB_PATH "${ZLIB_LIBRARY}" CACHE FILEPATH "Path to zlib library" FORCE)
+    set(ZLIB_LIB_PATH "${ZLIB_LIBRARIES}" CACHE FILEPATH "Path to zlib library" FORCE)
+    set(ZLIB_FOUND ON)
 endif()
 
 # --- JPEG ---
@@ -80,11 +81,19 @@ if(NOT JPEG_FOUND)
     endif()
 else()
     set(LIBJPEG_H_PATH "${JPEG_INCLUDE_DIR}" CACHE PATH "Path to jpeglib.h" FORCE)
-    set(LIBJPEG_LIB_PATH "${JPEG_LIBRARY}" CACHE FILEPATH "Path to jpeg library" FORCE)
+    set(LIBJPEG_LIB_PATH "${JPEG_LIBRARIES}" CACHE FILEPATH "Path to jpeg library" FORCE)
+    set(JPEG_FOUND ON)
 endif()
 
 # --- Restore suffixes ---
 set(CMAKE_FIND_LIBRARY_SUFFIXES "${_saved_find_suffixes}")
+
+# turbojpeg symbols (tj*) are required by raster JPEG encode path
+find_library(
+    LIBTURBOJPEG_LIB_PATH
+    NAMES turbojpeg
+    HINTS ${JPEG_ROOT} ${JPEG_ROOT}/lib
+    PATHS /opt/homebrew/lib /usr/lib /usr/local/lib)
 
 message(STATUS "ZLIB_FOUND: ${ZLIB_FOUND}")
 message(STATUS "  - Header: ${ZLIB_H_PATH}")
@@ -93,6 +102,7 @@ message(STATUS "  - Library: ${ZLIB_LIB_PATH}")
 message(STATUS "JPEG_FOUND: ${JPEG_FOUND}")
 message(STATUS "  - Header: ${LIBJPEG_H_PATH}")
 message(STATUS "  - Library: ${LIBJPEG_LIB_PATH}")
+message(STATUS "  - TurboJPEG: ${LIBTURBOJPEG_LIB_PATH}")
 
 # QPDF uses these cache variables
 set(ZLIB_H_PATH "${ZLIB_H_PATH}" CACHE PATH "Path to zlib.h" FORCE)
@@ -106,10 +116,27 @@ set(ZLIB_LIBRARY "${ZLIB_LIB_PATH}" CACHE FILEPATH "" FORCE)
 set(JPEG_INCLUDE_DIR "${LIBJPEG_H_PATH}" CACHE PATH "" FORCE)
 set(JPEG_LIBRARY "${LIBJPEG_LIB_PATH}" CACHE FILEPATH "" FORCE)
 
+# --- PNG ---
+find_package(PNG QUIET)
+if(NOT PNG_FOUND)
+    find_path(LIBPNG_H_PATH png.h HINTS $ENV{PNG_ROOT} $ENV{PNG_ROOT}/include PATHS /opt/homebrew/include /usr/include /usr/local/include)
+    find_library(LIBPNG_LIB_PATH NAMES png16-static png-static png libpng.a png.lib libpng16.a HINTS $ENV{PNG_ROOT} $ENV{PNG_ROOT}/lib PATHS /opt/homebrew/lib /usr/lib /usr/local/lib)
+    if(LIBPNG_H_PATH AND LIBPNG_LIB_PATH)
+        set(PNG_FOUND ON)
+    endif()
+else()
+    set(LIBPNG_H_PATH "${PNG_PNG_INCLUDE_DIR}" CACHE PATH "Path to png.h" FORCE)
+    set(LIBPNG_LIB_PATH "${PNG_LIBRARIES}" CACHE FILEPATH "Path to png library" FORCE)
+    set(PNG_FOUND ON)
+endif()
+message(STATUS "PNG_FOUND: ${PNG_FOUND}")
+message(STATUS "  - Header: ${LIBPNG_H_PATH}")
+message(STATUS "  - Library: ${LIBPNG_LIB_PATH}")
+
 # HIJACK: Create dummy targets for 'z' and 'jpeg' to shadow the system ones.
 # This ensures that even when QPDF specifies 'z' or 'jpeg', it resolves to our static files.
 # We ONLY do this on MUSL/Alpine because we build them from source there to ensure -fPIC.
-if(SHIM_IS_MUSL AND ZLIB_FOUND AND JPEG_FOUND)
+if(SHIM_IS_MUSL AND ZLIB_FOUND AND JPEG_FOUND AND PNG_FOUND)
     if(NOT TARGET z)
         add_library(z STATIC IMPORTED GLOBAL)
         set_target_properties(z PROPERTIES IMPORTED_LOCATION "${ZLIB_LIB_PATH}")
@@ -117,6 +144,10 @@ if(SHIM_IS_MUSL AND ZLIB_FOUND AND JPEG_FOUND)
     if(NOT TARGET jpeg)
         add_library(jpeg STATIC IMPORTED GLOBAL)
         set_target_properties(jpeg PROPERTIES IMPORTED_LOCATION "${LIBJPEG_LIB_PATH}")
+    endif()
+    if(NOT TARGET png)
+        add_library(png STATIC IMPORTED GLOBAL)
+        set_target_properties(png PROPERTIES IMPORTED_LOCATION "${LIBPNG_LIB_PATH}")
     endif()
 endif()
 
@@ -132,10 +163,22 @@ add_library(pdfium4j_shim SHARED
     src/pdfium4j_read.cpp
     src/pdfium4j_write.cpp
     src/pdfium4j_utils.cpp
+    src/pdf_flattener.cpp
     vendor/pugixml/pugixml.cpp
 )
 
+if(PNG_FOUND)
+    include_directories("${LIBPNG_H_PATH}")
+endif()
+
 target_compile_definitions(pdfium4j_shim PRIVATE PDFIUM4J_SHIM_IMPLEMENTATION)
+
+if(PNG_FOUND)
+    target_compile_definitions(pdfium4j_shim PRIVATE PDFIUM4J_HAS_PNG)
+endif()
+if(JPEG_FOUND)
+    target_compile_definitions(pdfium4j_shim PRIVATE PDFIUM4J_HAS_JPEG)
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_options(pdfium4j_shim PRIVATE -static-libgcc -static-libstdc++)
@@ -177,20 +220,23 @@ if(NOT PDFIUM_LIB)
     message(FATAL_ERROR "Could not find pdfium library in ${PDFIUM_ROOT}")
 endif()
 
-if(SHIM_IS_MUSL AND ZLIB_FOUND AND JPEG_FOUND)
+if(SHIM_IS_MUSL AND ZLIB_FOUND AND JPEG_FOUND AND PNG_FOUND)
     # Force use of absolute paths to static archives to ensure no runtime dependencies
     target_link_libraries(pdfium4j_shim PRIVATE 
         ${PDFIUM_LIB} 
         z 
         jpeg
+        png
         libqpdf
     )
-elseif(ZLIB_FOUND AND JPEG_FOUND)
+elseif(ZLIB_FOUND AND JPEG_FOUND AND PNG_FOUND)
     # On non-musl, link normally (likely shared) to avoid -fPIC issues with system static libs
     target_link_libraries(pdfium4j_shim PRIVATE 
         ${PDFIUM_LIB} 
-        "${ZLIB_LIB_PATH}" 
-        "${LIBJPEG_LIB_PATH}" 
+        ${ZLIB_LIBRARIES}
+        ${JPEG_LIBRARIES}
+        ${LIBTURBOJPEG_LIB_PATH}
+        ${PNG_LIBRARIES}
         libqpdf
     )
 else()
@@ -210,4 +256,9 @@ set_target_properties(pdfium4j_shim PROPERTIES
 
 if(UNIX AND NOT APPLE)
     target_link_options(pdfium4j_shim PRIVATE "LINKER:-rpath,$ORIGIN")
+    # Strip debug symbols on Linux to reduce binary size
+    add_custom_command(TARGET pdfium4j_shim POST_BUILD
+        COMMAND ${CMAKE_STRIP} --strip-debug --strip-unneeded $<TARGET_FILE:pdfium4j_shim>
+        COMMENT "Stripping debug symbols from pdfium4j_shim.so"
+    )
 endif()

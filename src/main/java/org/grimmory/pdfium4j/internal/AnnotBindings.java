@@ -92,4 +92,30 @@ public final class AnnotBindings {
     return FPDFAnnot_GetRect_V.orElseSet(
         () -> find("FPDFAnnot_GetRect", FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER), true));
   }
+
+  private static final StableValue<MethodHandle> FPDFPage_CreateAnnot_V = StableValue.of();
+
+  public static MethodHandle fpdfPageCreateAnnot() {
+    return FPDFPage_CreateAnnot_V.orElseSet(
+        () ->
+            find("FPDFPage_CreateAnnot", FunctionDescriptor.of(C_POINTER, C_POINTER, C_INT), true));
+  }
+
+  private static final StableValue<MethodHandle> FPDFAnnot_SetRect_V = StableValue.of();
+
+  public static MethodHandle fpdfAnnotSetRect() {
+    return FPDFAnnot_SetRect_V.orElseSet(
+        () -> find("FPDFAnnot_SetRect", FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER), true));
+  }
+
+  private static final StableValue<MethodHandle> FPDFAnnot_SetStringValue_V = StableValue.of();
+
+  public static MethodHandle fpdfAnnotSetStringValue() {
+    return FPDFAnnot_SetStringValue_V.orElseSet(
+        () ->
+            find(
+                "FPDFAnnot_SetStringValue",
+                FunctionDescriptor.of(C_INT, C_POINTER, C_POINTER, C_POINTER),
+                false));
+  }
 }

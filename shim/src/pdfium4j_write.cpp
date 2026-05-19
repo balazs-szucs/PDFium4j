@@ -93,9 +93,9 @@ private:
     return 0;
 }
 
-static void configure_writer(QPDFWriter& writer) {
+static void configure_writer(QPDFWriter& writer, bool linearize) {
     writer.setPreserveUnreferencedObjects(false);
-    writer.setLinearization(false);
+    writer.setLinearization(linearize);
     writer.setObjectStreamMode(qpdf_o_generate);
     writer.setCompressStreams(true);
 }
@@ -125,7 +125,8 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_native(
     const char* xmp_metadata,
     int xmp_len,
     const char** metadata_pairs,
-    int metadata_count
+    int metadata_count,
+    int linearize
 ) {
     if (!src_path || !dst_path) return -1;
     if (metadata_count < 0) return -1;
@@ -155,7 +156,7 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_native(
 
         try {
             QPDFWriter writer(qpdf, dst_path);
-            configure_writer(writer);
+            configure_writer(writer, linearize != 0);
             writer.write();
         } catch (...) {
             return -6;
@@ -199,7 +200,8 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_mem_native(
     const char* xmp_metadata,
     int xmp_len,
     const char** metadata_pairs,
-    int metadata_count
+    int metadata_count,
+    int linearize
 ) {
     if (!src_buf || src_len == 0 || !write_block) return -1;
     if (metadata_count < 0) return -1;
@@ -230,7 +232,7 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_mem_native(
         try {
             CallbackPipeline cp(write_block, pThis);
             QPDFWriter writer(qpdf);
-            configure_writer(writer);
+            configure_writer(writer, linearize != 0);
             writer.setOutputPipeline(&cp);
             writer.write();
         } catch (...) {
@@ -250,7 +252,8 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_mem_to_file_native(
     const char* xmp_metadata,
     int xmp_len,
     const char** metadata_pairs,
-    int metadata_count
+    int metadata_count,
+    int linearize
 ) {
     if (!src_buf || src_len == 0 || !dst_path) return -1;
     if (metadata_count < 0) return -1;
@@ -280,7 +283,117 @@ SHIM_EXPORT int FPDF_CALLCONV pdfium4j_save_with_metadata_mem_to_file_native(
 
         try {
             QPDFWriter writer(qpdf, dst_path);
-            configure_writer(writer);
+            configure_writer(writer, linearize != 0);
+            writer.write();
+        } catch (...) {
+            return -6;
+        }
+
+        return 0;
+    } catch (...) {
+        return -4;
+    }
+}
+
+SHIM_EXPORT int FPDF_CALLCONV pdfium4j_set_bookmarks_native(
+    const char* src_path,
+    const char* dst_path,
+    const uint8_t* serialized_bookmarks,
+    int serialized_len
+) {
+    if (!src_path || !dst_path || !serialized_bookmarks || serialized_len < 4) return -1;
+
+    try {
+        QPDF qpdf;
+        try {
+            qpdf.processFile(src_path);
+        } catch (const std::exception&) {
+            return -2;
+        }
+
+        if (qpdf.isEncrypted()) {
+            return -3;
+        }
+
+        const uint8_t* p = serialized_bookmarks;
+        auto read_int32 = [&p]() -> int {
+            int val = (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+            p += 4;
+            return val;
+        };
+
+        int count = read_int32();
+        if (count < 0) return -1;
+
+        struct OutlineItem {
+            std::string title;
+            int pageIndex;
+            int depth;
+            QPDFObjectHandle handle;
+        };
+
+        std::vector<OutlineItem> items;
+        auto pages = qpdf.getAllPages();
+
+        for (int i = 0; i < count; ++i) {
+            int pageIndex = read_int32();
+            int depth = read_int32();
+            int len = read_int32();
+            if (len < 0) return -1;
+            std::string title(reinterpret_cast<const char*>(p), static_cast<size_t>(len));
+            p += len;
+
+            QPDFObjectHandle dict = QPDFObjectHandle::newDictionary();
+            dict.replaceKey("/Title", QPDFObjectHandle::newUnicodeString(title));
+
+            if (pageIndex >= 0 && pageIndex < static_cast<int>(pages.size())) {
+                QPDFObjectHandle dest = QPDFObjectHandle::newArray();
+                dest.appendItem(pages.at(static_cast<size_t>(pageIndex)));
+                dest.appendItem(QPDFObjectHandle::newName("/XYZ"));
+                dest.appendItem(QPDFObjectHandle::newNull());
+                dest.appendItem(QPDFObjectHandle::newNull());
+                dest.appendItem(QPDFObjectHandle::newNull());
+                dict.replaceKey("/Dest", dest);
+            }
+
+            QPDFObjectHandle indirect = qpdf.makeIndirectObject(dict);
+            items.push_back({title, pageIndex, depth, indirect});
+        }
+
+        // Link items
+        QPDFObjectHandle outlines = QPDFObjectHandle::newDictionary();
+        outlines.replaceKey("/Type", QPDFObjectHandle::newName("/Outlines"));
+        QPDFObjectHandle outlinesRef = qpdf.makeIndirectObject(outlines);
+        qpdf.getRoot().replaceKey("/Outlines", outlinesRef);
+
+        if (!items.empty()) {
+            for (size_t i = 0; i < items.size(); ++i) {
+                // Parent is always the outlines root
+                items[i].handle.replaceKey("/Parent", outlinesRef);
+
+                // Prev item
+                if (i > 0) {
+                    items[i].handle.replaceKey("/Prev", items[i - 1].handle);
+                }
+
+                // Next item
+                if (i + 1 < items.size()) {
+                    items[i].handle.replaceKey("/Next", items[i + 1].handle);
+                }
+            }
+
+            // Root /Outlines first/last/count
+            outlinesRef.replaceKey("/First", items.front().handle);
+            outlinesRef.replaceKey("/Last", items.back().handle);
+            outlinesRef.replaceKey("/Count", QPDFObjectHandle::newInteger(static_cast<int>(items.size())));
+        }
+
+        try {
+            QPDFWriter writer(qpdf, dst_path);
+            writer.setPreserveUnreferencedObjects(false);
+            writer.setLinearization(false);
+            writer.setObjectStreamMode(qpdf_o_generate);
+            writer.setCompressStreams(true);
             writer.write();
         } catch (...) {
             return -6;
